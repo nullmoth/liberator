@@ -1271,6 +1271,7 @@ arm("the script's lists of what a kit may set are the builder's",
     and f'BOOT_ARGS_ALLOWED="{" ".join(v3_macos27.BOOT_ARGS_ALLOWED)}"' in open(SCRIPT).read())
 
 # 8. the switch in the app: hidden and inert unless the app found a kit, and nothing a 2.x user sees names macOS 27
+import re
 html = (ROOT / "Resources/index.html").read_text()
 appjs = (ROOT / "Resources/app.js").read_text()
 main = (ROOT / "Sources/main.swift").read_text()
@@ -1279,9 +1280,9 @@ arm("the card is hidden in the page as shipped and every button on it starts dis
     '<div class="pane card" id="ggcard" hidden>' in html
     and all(f'id="{b}" disabled' in html for b in ("ggprep", "gginst", "ggact", "ggfin", "ggcancel")))
 arm("the page shows the card only when the app reports a kit, and enables it only on macOS 15 or 26",
-    '$("ggcard").hidden = !m.goldenGate;' in appjs and "S.ggReady = !!m.goldenGate && [15, 26].includes(m.major) && !why;" in appjs)
+    '$("ggcard").hidden = !m.goldenGate;' in appjs and "S.ggReady = !!m.goldenGate && OS_FROM.includes(m.major) && !why;" in appjs
+    and re.search(r"^const OS_FROM = \[15, 26\][,;]", appjs, re.M) is not None)   # the two versions live in one named list since the page became Liberator's own
 arm("the page script still never names macOS 27", "macOS 27" not in appjs)
-import re
 osgate = (ROOT / "Sources/OSGate.swift").read_text()
 planall = re.findall(r'ggmark "PLAN-ALL ([a-z0-9: -]+)"', setup)
 shares = [p.split(":") for p in planall[0].split()] if len(planall) == 1 else []
