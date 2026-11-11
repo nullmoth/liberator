@@ -790,6 +790,21 @@ activate)
   write_state active "$(plutil -extract driver raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract driver_installer raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract system raw -o - "$EFI/$STATE" 2>/dev/null)" \
     || { mv "$EFI/OC" "$EFI/$STAGED"; mv "$EFI/$KEPT" "$EFI/OC"; stop "could not record the change; macOS 26's startup files are back"; }
   ok "this Mac now starts from the macOS 27 startup files; macOS 26's are kept at EFI/$KEPT"
+  # The boot picker starts the startup disk by itself after a few seconds. Until this step set it, that was still
+  # the macOS this runs on, which gets no picture from the macOS 27 startup files: on the first install made this
+  # way the picker started the wrong system twice. The system volume is named by device: on a macOS 27 volume the
+  # form that names a mounted folder fails (it wants a file an Apple silicon system does not carry). Only with the
+  # system's own disk tool, never in a test run.
+  if [ "$DISKUTIL" = /usr/sbin/diskutil ]; then
+    sdu=$(sed -n 's/^system //p' "$GGDIR/macos27-volumes" 2>/dev/null | head -n 1); sdd=""
+    case "$sdu" in ????????-????-????-????-????????????) sdd=$("$DISKUTIL" info "$sdu" 2>/dev/null | awk -F': *' '/Device Identifier/ {print $2; exit}');; esac
+    case "$sdd" in
+      disk[0-9]*s[0-9]*)
+        if /usr/sbin/bless --device "/dev/$sdd" --setBoot >/dev/null 2>&1; then ok "the boot picker now starts macOS 27 by itself"
+        else note "the boot picker's own choice could not be set: choose the macOS 27 volume in it and hold Control while pressing Return, which keeps the choice"; fi;;
+      *) note "the macOS 27 volume was not found to make it the boot picker's own choice: choose it in the picker and hold Control while pressing Return, which keeps the choice";;
+    esac
+  fi
   note "keep the 1401 USB stick: it still starts macOS 26. Cancel Golden Gate from macOS 26 puts everything back"
   echo "RESULT ok"; exit 0;;
 
@@ -823,6 +838,10 @@ clear-downloads)
   echo "RESULT ok"; exit 0;;
 
 rollback|cancel|remove)
+  # Going back also gives the boot picker its old choice: the macOS this runs on. Left on macOS 27 it would start
+  # that system from startup files that are no longer the macOS 27 ones. Best effort, and never in a test run.
+  # A removal that has not been confirmed changes nothing at all, this included.
+  if [ "$DISKUTIL" = /usr/sbin/diskutil ] && { [ "$STEP" != remove ] || [ $CONFIRM = 1 ]; }; then /usr/sbin/bless --mount / --setBoot >/dev/null 2>&1 || true; fi
   if [ "$STEP" = remove ]; then
     [ $CONFIRM = 1 ] || stop "removing macOS 27 is done only with --confirm. Nothing was changed"
     from_ok || stop "macOS 27 is removed from macOS 15 or 26; this Mac runs macOS $MAJOR. Nothing was changed"
