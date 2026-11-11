@@ -359,6 +359,74 @@ with tempfile.TemporaryDirectory() as td:
         "NetArm2x86IOAPIC.kext" not in lim and "A2XACPIPlatform.kext" in lim and "a2x_exec_hook.kext" in lim, repr(sorted(lim)))
     arm("what the kit marks for a PC is left out on a Mac, and the other kit arguments are added", " -vsmcbeta " not in args27 and " -no_compat_check " in args27, args27)
     arm("a real Mac keeps its own model, and is told so", sc["PlatformInfo"]["Generic"].get("SystemProductName") == "" and "NOTE model: this Mac's own (not changed)" in out, out)
+    # 2e. kernel patches. A patch list written for macOS 26 ends at 25.99.99, and an AMD PC does not start without
+    # it. Only a patch the kit names (its bytes were found in this macOS 27 kernel, in the same functions) is carried;
+    # the kit's own patch stands in for one that would hit other code; anything else keeps its limit and is named.
+    import kernel_patches_27 as kp27
+
+    def kpatch(comment, find, mx="25.99.99", mn="17.0.0", on=True, **more):
+        p = {"Arch": "x86_64", "Base": "", "Comment": comment, "Count": 1, "Enabled": on, "Find": find, "Identifier": "kernel", "Limit": 0,
+             "Mask": b"", "MaxKernel": mx, "MinKernel": mn, "Replace": bytes(len(find)), "ReplaceMask": b"", "Skip": 0}
+        p.update(more)
+        return p
+
+    known = kpatch("known | remove rdmsr", b"\x0f\x32\x90")
+    loose = kpatch("loose | first match elsewhere on 27", b"\x48\x00\x0f", Mask=b"\x48\x00\xff", Count=2)
+    stranger = kpatch("stranger; `rm -rf` $(x)", b"\xde\xad")
+    cored = kpatch("known | cores (user value)", b"\xc1\xe8\x1a", Base="_cpuid_set_info", Replace=b"\xb8\x10\x00")
+    old = kpatch("known bytes, ended before 26", b"\x0f\x32\x90", mx="24.99.99")
+    off = kpatch("known bytes, switched off", b"\x0f\x32\x90", on=False)
+    already = kpatch("already reaches 27", b"\x0f\x30", mx="")
+    amd = fresh(td, "amd-pc")
+    acp = os.path.join(amd.efi, "EFI", "OC", "config.plist")
+    ac = plistlib.load(open(acp, "rb"))
+    ac["Kernel"]["Patch"] = [known, loose, stranger, cored, old, off, already]
+    plistlib.dump(ac, open(acp, "wb"))
+    own27 = {"for": kp27.mark(loose), "patch": {"identifier": "kernel", "base": "", "comment": "NullMoth | exact | macOS 27", "count": 1, "limit": 0,
+                                                 "find": "TCsPgg==", "replace": "TCtmkA==", "mask": "", "replace_mask": ""}}
+    akit = mac_kit("kit-amd", patches_27=[kp27.mark(known), kp27.mark(dict(cored, Replace=b"\xb8\x08\x00"))], patches_27_own=[own27])
+    AMDARGS = ["--macos-major", "26", "--gpu-id", "2D05", "--cpu-vendor", "AuthenticAMD", "--laptop", "no"]
+    rc, out = run("stage", amd.efi, akit, *AMDARGS)
+    sp = plistlib.load(open(os.path.join(amd.efi, "EFI", gg.STAGED, "config.plist"), "rb"))["Kernel"]["Patch"] if rc == 0 else []
+    by = {p["Comment"]: p for p in sp}
+    lim = lambda c: by.get(c, {}).get("MaxKernel")  # noqa: E731
+    arm("an AMD PC: a kernel patch the kit names is carried to macOS 27", rc == 0 and lim("known | remove rdmsr") == "27.99.99", out + repr(sorted(by)))
+    arm("the name ignores what a patch writes: the one holding the user's own core count is carried with it",
+        lim("known | cores (user value)") == "27.99.99" and by["known | cores (user value)"]["Replace"] == b"\xb8\x10\x00", repr(by.get("known | cores (user value)")))
+    arm("a patch whose first match on macOS 27 is in other code keeps its limit", lim("loose | first match elsewhere on 27") == "25.99.99", repr(lim("loose | first match elsewhere on 27")))
+    mine = by.get("NullMoth | exact | macOS 27", {})
+    arm("and the kit's own patch for it is added, for the macOS 27 kernel only, with its bytes",
+        mine.get("MinKernel") == "27.0.0" and mine.get("MaxKernel") == "27.99.99" and mine.get("Find") == b"\x4c\x2b\x0f\x82"
+        and mine.get("Replace") == b"\x4c\x2b\x66\x90" and mine.get("Enabled") is True and mine.get("Count") == 1 and len(sp) == 8, repr(mine))
+    arm("a patch the kit does not name keeps its limit and is named in the result, with nothing of its text run",
+        lim("stranger; `rm -rf` $(x)") == "25.99.99" and "1 kernel patch(es) of this PC were not checked against macOS 27 and stay off there: stranger" in out, out)
+    arm("the result says how many were carried and how many replaced", "NOTE kernel patches for macOS 27: 2 carried as they are" in out and "1 replaced by the kit's own" in out, out)
+    arm("a patch that ended before macOS 26, one that is switched off and one that already reaches 27 are left exactly as they were",
+        lim("known bytes, ended before 26") == "24.99.99" and lim("known bytes, switched off") == "25.99.99" and by["known bytes, switched off"]["Enabled"] is False
+        and lim("already reaches 27") == "", repr({c: lim(c) for c in by}))
+    oc = plistlib.load(open(acp, "rb"))["Kernel"]["Patch"]
+    arm("the macOS 26 startup files keep every patch as it was", oc == [known, loose, stranger, cored, old, off, already])
+    amd2 = fresh(td, "amd-pc-old-kit")
+    c2 = plistlib.load(open(os.path.join(amd2.efi, "EFI", "OC", "config.plist"), "rb"))
+    c2["Kernel"]["Patch"] = [known]
+    plistlib.dump(c2, open(os.path.join(amd2.efi, "EFI", "OC", "config.plist"), "wb"))
+    oldkit = mac_kit("kit-no-patch-list")
+    om = json.load(open(os.path.join(oldkit, v3_macos27.MANIFEST)))
+    for key in ("patches_27", "patches_27_own"):
+        om.pop(key, None)
+    json.dump(om, open(os.path.join(oldkit, v3_macos27.MANIFEST), "w"))
+    rc, out = run("stage", amd2.efi, oldkit, *AMDARGS)
+    sp2 = plistlib.load(open(os.path.join(amd2.efi, "EFI", gg.STAGED, "config.plist"), "rb"))["Kernel"]["Patch"] if rc == 0 else [{}]
+    arm("control: a kit that names no patches carries none", rc == 0 and sp2[0].get("MaxKernel") == "25.99.99" and "kernel patch" not in out, out)
+    badkit = mac_kit("kit-amd-bad", patches_27=[], patches_27_own=[dict(own27, patch=dict(own27["patch"], comment='x","Enabled":false,"y":"'))])
+    amd3 = fresh(td, "amd-pc-bad-kit")
+    c3 = plistlib.load(open(os.path.join(amd3.efi, "EFI", "OC", "config.plist"), "rb"))
+    c3["Kernel"]["Patch"] = [loose]
+    plistlib.dump(c3, open(os.path.join(amd3.efi, "EFI", "OC", "config.plist"), "wb"))
+    b3 = tree(amd3.efi)
+    rc, out = run("stage", amd3.efi, badkit, *AMDARGS)
+    arm("a kit patch with text that would break out of its field is refused and nothing is staged",
+        rc == 1 and "a kit kernel patch has a field 1401 will not write" in out and tree(amd3.efi) == b3, out)
     pc2 = fresh(td, "pc-after-mac")
     rc, out = run("stage", pc2.efi, mkit, "--gpu-id", "2D05")
     pcc = plistlib.load(open(os.path.join(pc2.efi, "EFI", gg.STAGED, "config.plist"), "rb")) if rc == 0 else {"Kernel": {"Add": []}, "NVRAM": {"Add": {}}, "PlatformInfo": {"Generic": {}}}

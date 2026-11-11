@@ -126,6 +126,16 @@ def make(config, kexts, out):
     manifest["caps"] += [{"name": n, "max_kernel": TAHOE_MAX} for n in TAHOE_ONLY if n not in capped]
     manifest["block_caps"] = [{"identifier": i, "max_kernel": TAHOE_MAX} for i in BLOCK_CAPS]
     manifest["known_27"] = list(KNOWN_27)
+    # Kernel patches of a PC's own config that may be carried to macOS 27, and ours that stand in for one that may not:
+    # tools/kernel_patches_27.py check wrote the file from the macOS 26 and 27 kernels. A kit without the file carries
+    # none, which is what every kit did before.
+    plist27 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patches_27.json")
+    if os.path.exists(plist27):
+        with open(plist27) as fh:
+            p27 = json.load(fh)
+        manifest["patches_27"] = [r["mark"] for r in p27["carried"]]
+        manifest["patches_27_own"] = p27["own"]
+        manifest["patches_27_kernel_sha256"] = p27["kernel_27_sha256"]
     nv = cfg["NVRAM"]["Add"].get("7C436110-AB2A-4BBB-A880-FE41995C9F82", {})
     if isinstance(nv.get("csr-active-config"), bytes) and len(nv["csr-active-config"]) == 4:
         manifest["csr_active_config"] = nv["csr-active-config"].hex()

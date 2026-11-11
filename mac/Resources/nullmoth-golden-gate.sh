@@ -477,6 +477,34 @@ WHY=""
 bad() { WHY=$*; return 1; }
 cget() { plutil -extract "$1" raw -o - "$AC" 2>/dev/null; }
 bundle_at() { local b; b=$(cget "Kernel.Add.$1.BundlePath") || return 1; echo "${b##*/}"; }
+# The name of one kernel patch of the config being written: a digest of what OpenCore matches on. The kit's maker
+# computes the same digest (tools/kernel_patches_27.py mark): the fields joined with '|', data as base64, numbers in
+# decimal, an absent field empty. What the patch writes is not part of it: one patch carries the user's own core count.
+patch_mark() {
+  local k out=""
+  for k in Identifier Base Find Mask Count Limit Skip; do out="$out$(cget "Kernel.Patch.$1.$k")|"; done
+  out=$(printf '%s' "$out" | shasum -a 256 2>/dev/null | cut -c1-64)
+  printf '%s' "$out" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  printf '%s' "$out"
+}
+# One of the kit's own macOS 27 patches ($1 = its index in patches_27_own), added at the end of the patch list. It is
+# bounded to kernel 27, so macOS 26 starts exactly as before.
+add_own_patch() {
+  local k="patches_27_own.$1.patch" at ident base comment count limit f
+  ident=$(kv "$k.identifier"); base=$(kv "$k.base"); comment=$(kv "$k.comment"); count=$(kv "$k.count"); limit=$(kv "$k.limit")
+  safe "$ident" && safe "$base" && safe "$comment" && [ -n "$ident" ] || { bad "a kit kernel patch has a field 1401 will not write"; return 1; }
+  case "$count$limit" in ''|*[!0-9]*) bad "a kit kernel patch has a count that is not a number"; return 1;; esac
+  for f in find replace mask replace_mask; do
+    case "$(kv "$k.$f")" in *[!A-Za-z0-9+/=]*) bad "a kit kernel patch has bytes that are not base64"; return 1;; esac
+  done
+  [ -n "$(kv "$k.find")" ] && [ -n "$(kv "$k.replace")" ] || { bad "a kit kernel patch has nothing to find or to write"; return 1; }
+  at=$(cget Kernel.Patch)
+  plutil -insert "Kernel.Patch.$at" -json "{\"Arch\":\"x86_64\",\"Base\":\"$base\",\"Comment\":\"$comment\",\"Count\":$count,\"Enabled\":true,\"Identifier\":\"$ident\",\"Limit\":$limit,\"MaxKernel\":\"27.99.99\",\"MinKernel\":\"27.0.0\",\"Skip\":0}" "$AC" \
+    || { bad "could not add the kit's kernel patch"; return 1; }
+  plutil -insert "Kernel.Patch.$at.Find" -data "$(kv "$k.find")" "$AC" && plutil -insert "Kernel.Patch.$at.Replace" -data "$(kv "$k.replace")" "$AC" \
+    && plutil -insert "Kernel.Patch.$at.Mask" -data "$(kv "$k.mask")" "$AC" && plutil -insert "Kernel.Patch.$at.ReplaceMask" -data "$(kv "$k.replace_mask")" "$AC" \
+    || { bad "could not write the kit's kernel patch bytes"; return 1; }
+}
 index_of() {     # first Kernel.Add index whose bundle is $1
   local n i; n=$(cget Kernel.Add); i=0
   while [ "$i" -lt "$n" ]; do [ "$(bundle_at "$i")" = "$1" ] && { echo "$i"; return 0; }; i=$((i + 1)); done; return 1
@@ -522,6 +550,7 @@ not_for_this() {
 # kernel, and it never reached its first service. So a limit that reaches 27 is treated like no limit at all.
 reaches_27() { case "${1%%.*}" in '') return 0;; *[!0-9]*) return 1;; esac; [ "${1%%.*}" -ge 27 ]; }
 NOT27=""; NOTABLES=0     # what apply_kit reports: kexts kept off macOS 27, and identity tables it could not write
+PATCH_ON=0; PATCH_OWN=0; PATCH_OFF=0; PATCH_OFF_NAMES=""   # kernel patches: carried to 27, replaced by the kit's own, left at 26
 apply_kit() {    # $1 = the OC folder to change
   local oc=$1 n i name when pos idx have p m li j key type val parent args a added s0 u0 hex fresh k b
   AC="$oc/config.plist"; local kd="$oc/Kexts"
@@ -579,6 +608,41 @@ apply_kit() {    # $1 = the OC folder to change
       [ "$(cget "Kernel.Block.$i.Identifier")" = "$name" ] && [ "$(cget "Kernel.Block.$i.Enabled")" = true ] && reaches_27 "$(cget "Kernel.Block.$i.MaxKernel")" && sets "Kernel.Block.$i.MaxKernel" "$val"
       i=$((i + 1)); done
     j=$((j + 1)); done
+
+  # Kernel patches. A patch list is bounded by kernel version, and one written for macOS 26 ends at 25.99.99, so the
+  # macOS 27 kernel would start without it: on a PC with an AMD processor that is a stop before the first line.
+  # Raising every limit is not the answer either. One patch of the usual AMD list matches loosely, and in the macOS 27
+  # kernel its first match is in other code. So a patch is carried to macOS 27 only when the kit names it: the kit's
+  # maker found its bytes in this macOS 27 kernel, in the same functions as in macOS 26. Where the kit holds its own
+  # patch for one that cannot be carried, that one is added for macOS 27. Any other patch keeps its limit and is named.
+  n=$(cget Kernel.Patch); case "$n" in ''|*[!0-9]*) n=0;; esac
+  if [ "$n" -gt 0 ] && khas patches_27; then
+    local marks=" " owns=" " mk mx mn nown pcount o key val
+    m=$(kv patches_27); case "$m" in ''|*[!0-9]*) m=0;; esac
+    j=0; while [ "$j" -lt "$m" ]; do marks="$marks$(kv patches_27.$j) "; j=$((j + 1)); done
+    nown=$(kv patches_27_own) || nown=0; case "$nown" in ''|*[!0-9]*) nown=0;; esac
+    j=0; while [ "$j" -lt "$nown" ]; do owns="$owns$(kv patches_27_own.$j.for):$j "; j=$((j + 1)); done
+    pcount=$n; i=0
+    while [ "$i" -lt "$pcount" ]; do
+      mx=$(cget "Kernel.Patch.$i.MaxKernel"); mn=$(cget "Kernel.Patch.$i.MinKernel")
+      # only a patch that is on, applies to macOS 26 (kernel 25) and ends before 27 is a question at all
+      if [ "$(cget "Kernel.Patch.$i.Enabled")" = true ] && [ -n "$mx" ] && ! reaches_27 "$mx" \
+         && printf '%s' "${mx%%.*}" | grep -Eq '^[0-9]+$' && [ "${mx%%.*}" -ge 25 ] \
+         && { [ -z "$mn" ] || { printf '%s' "${mn%%.*}" | grep -Eq '^[0-9]+$' && [ "${mn%%.*}" -le 25 ]; }; }; then
+        mk=$(patch_mark "$i") || { bad "could not read kernel patch $i"; return 1; }
+        case "$marks" in *" $mk "*)
+          sets "Kernel.Patch.$i.MaxKernel" 27.99.99 || { bad "could not carry kernel patch $i"; return 1; }
+          PATCH_ON=$((PATCH_ON + 1));;
+        *) case "$owns" in *" $mk:"*)
+            o=${owns#* $mk:}; o=${o%% *}
+            add_own_patch "$o" || return 1
+            PATCH_OWN=$((PATCH_OWN + 1));;
+          *) PATCH_OFF=$((PATCH_OFF + 1))
+            val=$(cget "Kernel.Patch.$i.Comment" | tr -c 'A-Za-z0-9 _.,|:+()/-' ' ' | cut -c1-90)
+            PATCH_OFF_NAMES="$PATCH_OFF_NAMES${PATCH_OFF_NAMES:+; }${val:-patch $i}";; esac;; esac
+      fi
+      i=$((i + 1)); done
+  fi
 
   # system kexts the injected NVIDIA driver links against: in the boot collection on macOS 27
   m=$(kv force); [ -n "$m" ] || m=0; j=0
@@ -892,6 +956,8 @@ stage)
   else note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"; fi
   [ -z "$GFX" ] || note "graphics path: $GFX"
   for k in $NOT27; do note "$k was never run on macOS 27: it stays on macOS 26 and does not load on macOS 27"; done
+  [ $((PATCH_ON + PATCH_OWN)) = 0 ] || note "kernel patches for macOS 27: $PATCH_ON carried as they are (checked against this macOS 27 kernel)$([ $PATCH_OWN = 0 ] || echo ", $PATCH_OWN replaced by the kit's own")"
+  [ $PATCH_OFF = 0 ] || note "$PATCH_OFF kernel patch(es) of this PC were not checked against macOS 27 and stay off there: $PATCH_OFF_NAMES"
   [ $NOTABLES = 0 ] || [ "$EFIKIND" = mac ] || note "this PC's config has no serial number and UUID of its own, so the Mac identity tables were not written"
   note "driver package: $DNOTE"
   note "system package: $SNOTE"

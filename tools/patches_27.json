@@ -1,0 +1,188 @@
+{
+ "kernel_26_sha256": "7004ebc1020a5c7e3f075c631507f31fdc0ce3fe02e9f01f42dce1d178770a08",
+ "kernel_27_sha256": "3c9317518535791503970fbec322b9bba70e91f3a233536205ccd77b047ffc83",
+ "binaries": {
+  "com.apple.iokit.IOPCIFamily": {
+   "sha256_26": "44c110353037ce88bfd14181c4d52c5a2c0ccd5679b8e941822dd9a825ccef04",
+   "sha256_27": "bbe5d9bc84009bc2c96d6987ae5700358eab5d885623b4cd4edb2a7f60598e0d"
+  }
+ },
+ "carried": [
+  {
+   "mark": "77badd3880008f3add9f6a283a6768f4997c34eb4b7654be7a1bf61ce13204d8",
+   "comment": "algrey | Force cpuid_cores_per_package to constant (user-specified) | 13.3+",
+   "identifier": "kernel",
+   "found_26": 17,
+   "found_27": 18,
+   "in": [
+    "_cpuid_wa_required"
+   ]
+  },
+  {
+   "mark": "87aaa53926c0054ad8365e87060ba60657d92520e7e31450d17548cf0575e011",
+   "comment": "algrey | _commpage_populate | Remove rdmsr | 10.13+",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_commpage_post_ucode_update"
+   ]
+  },
+  {
+   "mark": "e26b08a9e9a04fa239dca8880d7a4b0c3a254edf046025d39e4daf01cc054449",
+   "comment": "algrey | _cpuid_set_cache_info | Set CPUID proper instead of 4 | 10.13+",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_cpuid_wa_required"
+   ]
+  },
+  {
+   "mark": "f8c4e4ebf0206eb2cc7fcb7033da36829d220d95aa6c41aad53a5824cfa81fe7",
+   "comment": "algrey | _cpuid_set_generic_info | Remove wrmsr(0x8B) | 10.13+",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_cpuid_set_info"
+   ]
+  },
+  {
+   "mark": "9fe1a28437b761c701504fa18cd01f21b7f8d6717984ee571ada193006a6c733",
+   "comment": "algrey | _cpuid_set_generic_info | Replace rdmsr(0x8B) with constant 186 | 10.13+",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_cpuid_set_info"
+   ]
+  },
+  {
+   "mark": "a4e6206b52526047e1e0c92241bde5a859807a9884e56ff438cfa6a6641bfcf8",
+   "comment": "algrey | _cpuid_set_generic_info | Set flag=1 | 10.13+",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_cpuid_set_info"
+   ]
+  },
+  {
+   "mark": "6533778dc3cd76e4b3730ce443914f0577e45c17b43d91183430a635a73fe974",
+   "comment": "algrey | _cpuid_set_generic_info | Disable check to allow leaf7 | 15.0+",
+   "identifier": "kernel",
+   "found_26": 2,
+   "found_27": 2,
+   "in": [
+    "_cpuid_set_info"
+   ]
+  },
+  {
+   "mark": "1971c77841975f82a92e91574fd7ea97e8d72eccb8d005820b4698db7443f0e2",
+   "comment": "Goldfish64, algrey | Bypass GenuineIntel check panic | 12.0+",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_cpuid_set_info"
+   ]
+  },
+  {
+   "mark": "3eb73d3ba4ad973531d0821eef5ae3a53581164d8ae997b2f7feff1803d512cc",
+   "comment": "algrey | _i386_init | Remove 3 rdmsr calls | 10.13+",
+   "identifier": "kernel",
+   "found_26": 3,
+   "found_27": 3,
+   "in": [
+    "_pstate_trace",
+    "_i386_init",
+    "_i386_init"
+   ]
+  },
+  {
+   "mark": "302b0faeca217f25d80bfe26d18442f3530b36b5e6c166d08075bd3dea67e6f7",
+   "comment": "algrey, XLNC | Remove version check and panic | 10.13+",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_lapic_init"
+   ]
+  },
+  {
+   "mark": "ad3b2a78e4e476f1532117c4b318354fedd3c0b7a0c2f01dbe8f953f543ebe30",
+   "comment": "CaseySJ | IOPCIIsHotplugPort | Fix PCI bus enumeration on AM5 | 13.0+",
+   "identifier": "com.apple.iokit.IOPCIFamily",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "__ZN17IOPCIConfigurator18IOPCIIsHotplugPortEP16IOPCIConfigEntry"
+   ]
+  },
+  {
+   "mark": "6afc8f773a05700b0c6d24f03f281a4d5bbf275f503d12dab14301da158d0eb9",
+   "comment": "Visual | thread_quantum_expire, thread_unblock, thread_invoke | Remove non-monotonic time panic | 12.0+",
+   "identifier": "kernel",
+   "found_26": 3,
+   "found_27": 3,
+   "in": [
+    "_thread_quantum_expire",
+    "_thread_unblock",
+    "_thread_block_reason"
+   ]
+  },
+  {
+   "mark": "0cf5df3cf5ea8a69afcd1f628533473040f273988922c93d769ca07d91cba581",
+   "comment": "Algrey / Zormeister | _mtrr_update_action | Fix PAT | 15.0+",
+   "identifier": "kernel",
+   "found_26": 2,
+   "found_27": 2,
+   "in": [
+    "_mtrr_update_all_cpus",
+    "_pat_init"
+   ]
+  }
+ ],
+ "left": [
+  {
+   "comment": "algrey | _cpuid_set_cpufamily | Force CPUFAMILY_INTEL_PENRYN | 11.3+",
+   "identifier": "kernel",
+   "why": "macOS 26: the symbol '_cpuid_set_info ' is not in this binary"
+  },
+  {
+   "comment": "CaseySJ | probeBusGated | Disable 10 bit tags | 12.0+",
+   "identifier": "com.apple.iokit.IOPCIFamily",
+   "found_26": 0,
+   "found_27": 0,
+   "why": "macOS 26 has 0 of the 1 it wants: it does not work where it was written for"
+  },
+  {
+   "comment": "Visual | thread_invoke, thread_dispatch | Remove non-monotonic time panic | 12.0+",
+   "identifier": "kernel",
+   "found_26": 33,
+   "found_27": 15,
+   "in": [
+    "_do_stackshot",
+    "_kperf_lazy_wait_sample"
+   ],
+   "why": "it would change ['_do_stackshot', '_kperf_lazy_wait_sample'] on macOS 27 and ['_kperf_lazy_wait_sample', '_vmx_hv_support'] on macOS 26"
+  }
+ ],
+ "own": [
+  {
+   "for": "8fc72294d3c15b367c8e453002953f31229ef948be9c7d6c6ca57ee235e61dab",
+   "patch": {
+    "identifier": "kernel",
+    "base": "",
+    "comment": "NullMoth | thread_invoke | Remove non-monotonic time check | macOS 27",
+    "count": 1,
+    "limit": 0,
+    "find": "TCu3iAQAAA+CqQAAAA==",
+    "replace": "TCu3iAQAAGaQZpBmkA==",
+    "mask": "",
+    "replace_mask": ""
+   }
+  }
+ ]
+}
