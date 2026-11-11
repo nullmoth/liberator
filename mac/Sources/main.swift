@@ -445,7 +445,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         // buttons sit on it; the strip below keeps the window draggable, since the web view takes every click.
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "1401"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
+        window.title = "Liberator"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
         window.minSize = NSSize(width: 960, height: 620)
         window.backgroundColor = .black
         window.contentView = TitleBar.container(web: web, size: window.contentRect(forFrameRect: window.frame).size)
@@ -561,7 +561,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 // the only step that changes how this Mac starts, so the user is asked once, before anything runs.
                 let a = NSAlert()
                 a.messageText = "Prepare this Mac for macOS 27 and start from its startup files?"
-                a.informativeText = "1401 downloads what it needs (about 27 GB), puts macOS 27 on its own new volumes beside the macOS you use now, sets it up, and then makes the macOS 27 startup files the default. This takes a while. Your current macOS and its startup files are kept, and Cancel Golden Gate puts them back. Keep your 1401 USB stick."
+                a.informativeText = "Liberator downloads what it needs (about 27 GB), puts macOS 27 on its own new volumes beside the macOS you use now, sets it up, and then makes the macOS 27 startup files the default. This takes a while. Your current macOS and its startup files are kept, and Cancel Golden Gate puts them back. Keep your 1401 USB stick."
                 // The page's default is to bring this account over; its tick box asks for a new Mac instead.
                 let bring = b["bringAccount"] as? Bool == true
                 a.informativeText += bring ? "\n\nmacOS 27 will start with your account brought over." : "\n\nmacOS 27 will start at Apple's setup like a new Mac."
@@ -592,7 +592,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 // Takes macOS 27 and everything on its volumes away: only on an explicit yes.
                 let a = NSAlert(); a.alertStyle = .critical
                 a.messageText = "Remove macOS 27 from this Mac?"
-                a.informativeText = "This puts the startup files back as they were before Golden Gate and erases the macOS 27 that 1401 put on this Mac, with everything saved inside it: its files, apps, accounts and settings. It cannot be undone. The macOS you are using now is not touched.\n\nThe downloads are kept, so preparing again does not download again."
+                a.informativeText = "This puts the startup files back as they were before Golden Gate and erases the macOS 27 that Liberator put on this Mac, with everything saved inside it: its files, apps, accounts and settings. It cannot be undone. The macOS you are using now is not touched.\n\nThe downloads are kept, so preparing again does not download again."
                 a.addButton(withTitle: "Cancel"); a.addButton(withTitle: "Remove macOS 27")
                 guard a.runModal() == .alertSecondButtonReturn else { send("run", ["state": "cancelled", "mode": "goldengate"]); break }
                 extra.append("--confirm")
@@ -600,7 +600,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             if step == "clear-downloads" {
                 let a = NSAlert()
                 a.messageText = "Clear the Golden Gate downloads?"
-                a.informativeText = "1401 keeps what it downloaded for macOS 27 (about 27 GB) so that another try does not download it again. Clearing frees that space; the next Prepare for Golden Gate downloads it again. A macOS 27 that is already installed is not affected."
+                a.informativeText = "Liberator keeps what it downloaded for macOS 27 (about 27 GB) so that another try does not download it again. Clearing frees that space; the next Prepare for Golden Gate downloads it again. A macOS 27 that is already installed is not affected."
                 a.addButton(withTitle: "Cancel"); a.addButton(withTitle: "Clear downloads")
                 guard a.runModal() == .alertSecondButtonReturn else { send("run", ["state": "cancelled", "mode": "goldengate"]); break }
                 extra.append("--confirm")
@@ -614,7 +614,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 // The one step that changes how this Mac starts: it runs only on an explicit yes.
                 let a = NSAlert()
                 a.messageText = "Start this Mac from the macOS 27 startup files?"
-                a.informativeText = "The macOS 26 startup files are kept beside them, and Cancel Golden Gate (from macOS 26) puts them back. Keep your 1401 USB stick: it still starts macOS 26 if the new files do not."
+                a.informativeText = "The macOS 26 startup files are kept beside them, and Cancel Golden Gate (from macOS 26) puts them back. Keep your OpenCore USB stick: it still starts macOS 26 if the new files do not."
                 a.addButton(withTitle: "Cancel"); a.addButton(withTitle: "Use the macOS 27 files")
                 guard a.runModal() == .alertSecondButtonReturn else {
                     send("run", ["state": "cancelled", "mode": "goldengate"]); break
@@ -876,8 +876,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
     var latest: (version: String, name: String, url: URL, sha: String, sig: String?)? = nil
     var latestApp: (version: String, name: String, url: URL, sha: String, sig: URL?)? = nil
     static func releaseAppVersion(_ name: String) -> String? {
-        guard let match = name.range(of: #"^1401-Mac-([0-9]+\.[0-9]+(?:\.[0-9]+)?)\.zip$"#, options: .regularExpression) else { return nil }
-        return String(name[match].dropFirst("1401-Mac-".count).dropLast(".zip".count))
+        guard let match = name.range(of: #"^Liberator-Mac-([0-9]+\.[0-9]+(?:\.[0-9]+)?)\.zip$"#, options: .regularExpression) else { return nil }
+        return String(name[match].dropFirst("Liberator-Mac-".count).dropLast(".zip".count))
     }
     var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }
     static func releaseDriverVersion(_ name: String) -> String? {
@@ -1109,7 +1109,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         guard let l = latestApp else { return fail("check for updates first") }
         let me = Bundle.main.bundleURL, parent = me.deletingLastPathComponent()
         guard me.pathExtension == "app", FileManager.default.isWritableFile(atPath: parent.path) else {
-            return fail("1401 cannot replace itself in \(parent.path); move it to Applications, or download the new version from the site") }
+            return fail("Liberator cannot replace itself in \(parent.path); move it to Applications, or download the new version from the site") }
         let work = support.appendingPathComponent("app-update/\(l.version)")
         try? FileManager.default.removeItem(at: work)
         do { try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true) } catch { return fail(error.localizedDescription) }
@@ -1129,13 +1129,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             guard let sigData = syncGetMirrored(sigURL, timeout: 30), let sigText = String(data: sigData, encoding: .utf8) else {
                 return fail("could not download the update's signature, so it was not installed") }
             guard let zipData = try? Data(contentsOf: zip),
-                  ReleaseSignature.verifyBound(data: zipData, product: "1401-mac", version: l.version, signatureBase64: sigText) else {
+                  ReleaseSignature.verifyBound(data: zipData, product: "liberator-mac", version: l.version, signatureBase64: sigText) else {
                 return fail("the update's signature is not from NullMoth, so it was not installed") }
             _ = sh("/usr/bin/ditto", ["-x", "-k", zip.path, out.path])
             guard let new = (try? FileManager.default.contentsOfDirectory(at: out, includingPropertiesForKeys: nil))?.first(where: { $0.pathExtension == "app" }),
                   let info = NSDictionary(contentsOf: new.appendingPathComponent("Contents/Info.plist")),
                   info["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier,
-                  info["CFBundleShortVersionString"] as? String == l.version else { return fail("the download is not the 1401 \(l.version) app") }
+                  info["CFBundleShortVersionString"] as? String == l.version else { return fail("the download is not the Liberator \(l.version) app") }
             let v = Process(); v.executableURL = URL(fileURLWithPath: "/usr/bin/codesign"); v.arguments = ["--verify", "--deep", new.path]
             v.standardOutput = Pipe(); v.standardError = Pipe()
             guard (try? v.run()) != nil else { return fail("could not check the new app's signature") }
@@ -1285,9 +1285,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         guard ["", "flicker"].contains(sample) else { return }
         let a = NSAlert()
         a.messageText = sample == "flicker" ? "Record the flicker and send it to NullMoth" : "Send logs to NullMoth"
-        a.informativeText = "1401 is sending this Mac's NullMoth logs to nullmothsystems.com so the problem can be found and fixed: what 1401 did, the driver's state, driver crash reports, recent WindowServer, Firefox and Blender crash reports, update diagnostics, OpenCore's startup logs, and a numeric device/CPU relationship map. A separately imported diagnostics receipt is included only if that session allowed upload, and only as a validated count/configuration summary. The map records kernel-visible hardware, not verified driver support. Your name, your Mac's name, serial numbers and addresses are removed first. macOS asks for your password so 1401 can read the startup logs."
+        a.informativeText = "Liberator is sending this Mac's NullMoth logs to nullmothsystems.com so the problem can be found and fixed: what Liberator did, the driver's state, driver crash reports, recent WindowServer, Firefox and Blender crash reports, update diagnostics, OpenCore's startup logs, and a numeric device/CPU relationship map. A separately imported diagnostics receipt is included only if that session allowed upload, and only as a validated count/configuration summary. The map records kernel-visible hardware, not verified driver support. Your name, your Mac's name, serial numbers and addresses are removed first. macOS asks for your password so 1401 can read the startup logs."
         if sample == "flicker" {
-            a.informativeText = "Start this while the screen is flickering. For 20 seconds 1401 records how the driver puts frames on the display (flip counts and timing, refused updates, the refresh rate and WindowServer's load), then sends it with the ordinary logs. Keep using the Mac normally while it records.\n\n" + a.informativeText
+            a.informativeText = "Start this while the screen is flickering. For 20 seconds Liberator records how the driver puts frames on the display (flip counts and timing, refused updates, the refresh rate and WindowServer's load), then sends it with the ordinary logs. Keep using the Mac normally while it records.\n\n" + a.informativeText
         }
         a.addButton(withTitle: "Send"); a.addButton(withTitle: "Cancel")
         guard a.runModal() == .alertFirstButtonReturn else { send("logsDone", ["ok": false, "why": "Not sent."]); return }
@@ -1305,7 +1305,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             let cmd = Privileged.bundleScript(script, [], env: sample.isEmpty ? "" : "NULLMOTH_SAMPLE=\(sample) ")
             var collectionErrors: [String] = []
             DispatchQueue.main.async {
-                self.send("logsStatus", ["text": "Waiting for your Mac password (a macOS window asks for it). Collecting takes a few minutes; 1401 keeps working."])
+                self.send("logsStatus", ["text": "Waiting for your Mac password (a macOS window asks for it). Collecting takes a few minutes; Liberator keeps working."])
                 NSApp.activate(ignoringOtherApps: true)
             }
             // off the main thread: the app stays responsive while the logs are collected (Privileged.swift)
@@ -1459,7 +1459,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         if mode == "install" {
             let a = NSAlert()
             a.messageText = "Tell NullMoth this install worked?"
-            a.informativeText = "After this Mac restarts and reaches its desktop, 1401 can send one small confirmation to nullmothsystems.com - the macOS version, this Mac's model and CPU, the graphics cards, whether the display and the NVIDIA driver came up, and 1401's and OpenCore's versions - so a working install can be told apart from one that failed silently. It is sent once, then removes itself. Your name, your Mac's name, serial numbers and addresses are removed first. Nothing is sent unless you choose Send."
+            a.informativeText = "After this Mac restarts and reaches its desktop, Liberator can send one small confirmation to nullmothsystems.com - the macOS version, this Mac's model and CPU, the graphics cards, whether the display and the NVIDIA driver came up, and 1401's and OpenCore's versions - so a working install can be told apart from one that failed silently. It is sent once, then removes itself. Your name, your Mac's name, serial numbers and addresses are removed first. Nothing is sent unless you choose Send."
             a.addButton(withTitle: "Send once after it boots"); a.addButton(withTitle: "Don't send")
             reachedDesktopConsent = a.runModal() == .alertFirstButtonReturn
         }

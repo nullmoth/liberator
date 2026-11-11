@@ -2,87 +2,14 @@
 const $ = (id) => document.getElementById(id);
 const post = (m) => window.webkit.messageHandlers.nm.postMessage(m);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const S = { mac: null, pkg: "", previewed: false, installed: false, driverUpdate: false };
+const S = { mac: null, pkg: "", kit: false, previewed: false, installed: false, driverUpdate: false };
+// The systems the move starts from, and every system this app runs on (those and the one it moves to).
+const OS_FROM = [15, 26], OS_OK = [15, 26, 27];
+// The sentences of the verdict card are in the page (index.html), not here.
+const V = $("verdict").dataset;
 
 function row(k, v) { return `<tr><th>${esc(k)}</th><td>${v}</td></tr>`; }
 function step(n, state) { const li = $("s" + n); li.classList.toggle("done", state === "done"); li.classList.toggle("now", state === "now"); }
-
-// The "ARM apps (opt-in)" card: status (on/off, check, list), busy text, translation progress and every error.
-// A.last: the outcome of the last action (an error, or a finished translation). A status refresh follows most actions
-// and would otherwise overwrite it, so the refresh shows it above the status once.
-const A = { on: false, ok: false, running: false, last: "" };
-function armButtons() {
-  $("armon").hidden = A.on; $("armoff").hidden = !A.on; $("armchk").hidden = !A.on;
-  $("armon").disabled = false;
-  $("armtr").hidden = !A.on; $("armtr").disabled = !(A.on && A.ok) || A.running;
-  $("armprog").hidden = !A.running;
-  $("armbrew").hidden = !A.on; $("armbrewgo").disabled = !A.on || A.running;
-}
-// nm-arm brew status: {"arm": {"installed", "ruby", "programs"}, "intel": {"installed"}} or {"why"}
-function armBrewText(b) {
-  if (!b) return "";
-  if (b.why) return `<span class="warn">${esc(b.why)}</span>`;
-  const side = (s, name, cmd) => s && s.installed ? `<span class="good">${name} ready</span> (${cmd})` : `${name} not set up`;
-  let t = side(b.arm, "ARM Homebrew", "abrew") + " &middot; " + side(b.intel, "Intel Homebrew", "ibrew");
-  const p = b.arm && b.arm.programs;
-  if (p) t += `<br>Translated programs: ${esc(p.translated || 0)}; waiting for their first run: ${esc(p.stub || 0)}.`;
-  if (b.arm && b.arm.installed && b.arm.ruby && !b.arm.ruby.launcher) t += `<br><span class="warn">The ARM Homebrew's Ruby is not prepared yet: run abrew once in Terminal.</span>`;
-  return t;
-}
-function armEvent(d) {
-  if (d.kind === "status") {
-    A.on = !!d.installed; A.running = !!d.translating;
-    const c = d.check || {};
-    A.ok = A.on && c.ok === true;
-    let t = (A.last ? A.last + "<br>" : "") + (d.note ? `<span class="good">${esc(d.note)}</span><br>` : "");
-    A.last = "";
-    if (!A.on) t += "Off. Nothing is installed.";
-    else if (c.ok === true) t += `<span class="good">This Mac can run translated apps</span>` + (c.target ? ` (${esc(c.target)})` : "") + ".";
-    else t += `<span class="warn">${esc(c.why || "This Mac did not pass the check.")}</span>`;
-    // nm-arm check's "note": a sentence for the user when the system seems to hide CPU features (a VM, for example)
-    if (A.on && c.note) t += `<br><span class="small">${esc(c.note)}</span>`;
-    if (d.listWhy) t += `<br><span class="warn">${esc(d.listWhy)}</span>`;
-    $("armr").innerHTML = t;
-    $("armclt").hidden = !(A.on && c.prerequisites && c.prerequisites.clt === false);
-    $("armbrewr").innerHTML = A.on ? armBrewText(d.brew) : "";
-    const apps = d.apps || [];
-    $("armapps").innerHTML = !A.on ? "" : apps.length
-      ? "<table>" + apps.map((a) => `<tr><th>${esc(a.name)}</th><td><button type="button" class="b" data-op="open" data-path="${esc(a.path)}">Open</button> <button type="button" class="b" data-op="remove" data-name="${esc(a.name)}">Remove</button></td></tr>`).join("") + "</table>"
-      : '<p class="small">No translated apps yet.</p>';
-    armButtons();
-    return;
-  }
-  if (d.kind === "request") {
-    // 1401 for Windows asked for ARM apps: open Tools with this card first, the banner on top of it
-    $("armreqt").textContent = d.text;
-    $("armreqon").hidden = !d.canRun;
-    $("armreq").hidden = false;
-    const tab = document.querySelector('.tab[data-t="tools"]');
-    if (tab) tab.click();
-    const sec = $("t-tools"), card = $("armcard"), first = sec.querySelector(".card");
-    if (first && first !== card) sec.insertBefore(card, first);
-    card.scrollIntoView({ block: "start" });
-    return;
-  }
-  if (d.kind === "busy") { A.last = ""; $("armr").textContent = d.text; return; }
-  if (d.kind === "error") { A.last = `<span class="warn">${esc(d.why)}</span>`; $("armr").innerHTML = A.last; armButtons(); return; }
-  if (d.kind === "progress") {
-    A.running = true; armButtons(); $("armcancel").disabled = false;
-    if (typeof d.pct === "number") $("armbar").value = d.pct; else $("armbar").removeAttribute("value");
-    $("armmsg").textContent = `${d.app}: ${d.msg || d.stage || ""}`;
-    return;
-  }
-  if (d.kind === "done") {
-    A.running = false; armButtons();
-    if (d.what === "brew")
-      A.last = d.ok ? `<span class="good">${esc(d.msg || "Homebrew is set up. Open a new Terminal window.")}</span>`
-                    : `<span class="warn">Homebrew: ${esc(d.why || "the setup did not finish")}</span>`;
-    else
-      A.last = d.ok ? `<span class="good">${esc(d.app)} is translated: it is in Applications &gt; NullMoth ARM.</span>`
-                    : `<span class="warn">${esc(d.app)}: ${esc(d.why || "the translation did not finish")}</span>`;
-    $("armr").innerHTML = A.last;
-  }
-}
 
 function render(m) {
   S.mac = m;
@@ -90,7 +17,7 @@ function render(m) {
   const card = m.gpus.find((g) => g.supported) || m.gpus.find((g) => g.vendor === "10DE");
   const on = m.kexts >= 4 && m.metal.some((n) => /NVIDIA|GeForce|RTX/i.test(n));
   $("mac").innerHTML =
-    row("macOS", esc(m.macos) + ([15, 26].includes(m.major) ? "" : ' <span class="bad">(the driver is for macOS 15 and 26)</span>')) +
+    row("macOS", esc(m.macos) + (OS_OK.includes(m.major) ? "" : ' <span class="bad">(not a macOS Liberator runs on)</span>')) +
     row("Processor", m.arch === "x86_64" && !m.translated ? "x86_64" : '<span class="bad">Apple silicon - this driver is for Intel Macs and PCs</span>') +
     row("Graphics", m.gpus.length ? m.gpus.map((g) => esc(g.name) + (g.supported ? (g.tested ? ' <span class="good">listed device, model tested</span>' : ' <span class="warn">listed by NVIDIA, model not tested yet</span>') : g.vendor === "10DE" ? ' <span class="bad">not supported (needs RTX 20 series or newer)</span>' : "")).join("<br>") : "none found") +
     row("OpenCore", m.opencore ? esc(m.opencore) : m.nativeMacPro ? 'not needed: Mac Pro (2019) on Apple\'s firmware <span class="warn">(experimental, needs SIP off)</span>' : '<span class="warn">not detected</span>') +
@@ -99,24 +26,18 @@ function render(m) {
 
   let why = "";
   if (m.arch !== "x86_64" || m.translated) why = "This Mac has Apple silicon. Its own graphics are already Apple's.";
-  else if (![15, 26].includes(m.major)) why = `The driver is built for macOS 15 Sequoia and macOS 26 Tahoe (beta); this Mac runs ${esc(m.macos)}.`;
-  else if (!card && (m.gpuHiding || []).some((a) => a !== "-wegnoigpu")) why = `No NVIDIA card is visible because this Mac starts with ${esc(m.gpuHiding.filter((a) => a !== "-wegnoigpu").join(" "))}, which hides discrete GPUs. Remove it from boot-args in OpenCore's config.plist, restart, and open 1401 again.`;
-  else if (!card && (m.hiddenNvidia || []).length) why = `The NVIDIA card (${esc(m.hiddenNvidia.join(", "))}) is on the bus but switched off for macOS, usually by a disable-gpu property in OpenCore's DeviceProperties. Remove it, restart, and open 1401 again.`;
-  else if (!card && /^MacBook/.test(m.hwModel || "")) why = "No NVIDIA card was found. On a laptop the card is often switched off before macOS starts: by the BIOS graphics mode (choose Hybrid/MSHybrid or Discrete, not iGPU only) or by a dGPU-off SSDT in OpenCore's ACPI folder. Fix that, restart, and open 1401 again.";
+  else if (!OS_OK.includes(m.major)) why = esc(V.otherOs) + esc(m.macos) + ".";
+  else if (!card && (m.gpuHiding || []).some((a) => a !== "-wegnoigpu")) why = `No NVIDIA card is visible because this Mac starts with ${esc(m.gpuHiding.filter((a) => a !== "-wegnoigpu").join(" "))}, which hides discrete GPUs. Remove it from boot-args in OpenCore's config.plist, restart, and open Liberator again.`;
+  else if (!card && (m.hiddenNvidia || []).length) why = `The NVIDIA card (${esc(m.hiddenNvidia.join(", "))}) is on the bus but switched off for macOS, usually by a disable-gpu property in OpenCore's DeviceProperties. Remove it, restart, and open Liberator again.`;
+  else if (!card && /^MacBook/.test(m.hwModel || "")) why = "No NVIDIA card was found. On a laptop the card is often switched off before macOS starts: by the BIOS graphics mode (choose Hybrid/MSHybrid or Discrete, not iGPU only) or by a dGPU-off SSDT in OpenCore's ACPI folder. Fix that, restart, and open Liberator again.";
   else if (!card || !card.supported) why = "No supported NVIDIA card was found. The driver needs a GeForce RTX 20 series or newer.";
-  else if (!m.opencore && !m.nativeMacPro) why = "This Mac does not report OpenCore. The driver's settings live in OpenCore's config, so 1401 will not install without it.";
+  else if (!m.opencore && !m.nativeMacPro) why = "This Mac does not report OpenCore. The driver's settings live in OpenCore's config, so Liberator will not work without it.";
 
   // Keep the checked package available when the driver is already running.
   const pk = m.packages.find((p) => p.ok === "yes"); if (pk) S.pkg = pk.path;
-  // Tahoe: only from macOS 15, on a Mac the driver can be installed on, with the checked package (it carries both drivers)
-  // (this scan's package, not S.pkg: an ejected disk image must not leave the button pointing at a path that is gone)
-  $("upd").disabled = !pk || m.major !== 15 || !!why || !!m.nativeMacPro;   // a Mac Pro (2019) runs macOS 26 as it is
-  $("updt").innerHTML = m.major === 26 ? "This Mac already runs macOS 26." : why ? "" : pk ? "" :
-    'Needs the driver package: <button type="button" class="b" id="dl3">Download the driver package</button>';
-  const d3 = $("dl3"); if (d3) d3.onclick = () => post({ act: "download" });
-  // Golden Gate (macOS 26 -> 27): the card exists only when the app found a v3 kit; its steps run only from macOS 26
+  // Golden Gate: the card exists only when this build carries a kit pin; its steps run only from the starting systems
   $("ggcard").hidden = !m.goldenGate;
-  S.ggReady = !!m.goldenGate && [15, 26].includes(m.major) && !why;
+  S.ggReady = !!m.goldenGate && OS_FROM.includes(m.major) && !why;
   S.ggKit = m.ggKit || "none";
   const kept = $("ggkept"), mb = Number(m.ggKeptMB) || 0;
   kept.textContent = mb > 0 ? kept.dataset.kept.replace("{n}", (mb / 1000).toFixed(1)) : kept.dataset.none;
@@ -124,54 +45,32 @@ function render(m) {
   // The words for the kit are in the page (index.html), not here.
   $("ggkit").textContent = S.ggKit === "other" ? $("ggkit").dataset.update : $("ggkit").dataset.get + (m.ggKitMB ? " (downloads " + m.ggKitMB + " MB)" : "");
   $("ggkitr").textContent = S.ggKit === "current" ? $("ggkitr").dataset.current : S.ggKit === "other" ? $("ggkitr").dataset.other : "";
-  if (m.goldenGate && !S.ggReady && !$("ggt").textContent) $("ggt").textContent = [15, 26].includes(m.major) ? "Needs a supported NVIDIA card and OpenCore." : "Golden Gate starts from macOS 15 or 26.";
-  if (on) {
-    $("verdict").innerHTML = `<p class="good">NullMoth components are loaded and an NVIDIA Metal device is visible.</p><p>Use Check for a newer driver to update the driver. To remove the driver, use Remove the driver below.${m.major === 15 ? " To move to macOS 26 Tahoe, use <b>Prepare this Mac for Tahoe</b> below." : ""}</p>`;
-    $("steps").hidden = true; return;
+  if (m.goldenGate && !S.ggReady && !$("ggt").textContent) $("ggt").textContent = OS_FROM.includes(m.major) ? $("ggt").dataset.need : $("ggt").dataset.from;
+  $("steps").hidden = true;
+  if (why) { $("verdict").innerHTML = `<p class="bad">Liberator can't be used here.</p><p>${why}</p>`; return; }
+  // On a starting system the driver there belongs to the other app; this one only makes the move.
+  if (OS_FROM.includes(m.major)) {
+    $("verdict").innerHTML = `<p class="good">${esc(V.ready)}</p>` + (on ? "" : `<p>${esc(V.driverHere)}</p>`);
+    return;
   }
-  // No NVIDIA card but an AMD or Intel GPU: the NVIDIA steps do not apply, the AMD/Intel test driver below does. It needs
-  // the driver package (that is where the test driver ships), so the download stays offered.
-  const other = !card && m.arch === "x86_64" && !m.translated && [15, 26].includes(m.major) && m.gpus.some((g) => g.vendor === "1002" || g.vendor === "8086");
-  // No GPU at all on an Intel-type Mac: OpenCore switched it off (disable-gpu or -wegnoigpu), and Lilu then takes it off
-  // macOS's PCI list entirely, so the table says "none found" (2.0.3, a Core Ultra laptop, chat photo 10-16). The test
-  // driver's setup turns an Intel GPU at the usual address back on, so it is offered here instead of the NVIDIA advice.
-  const hiddenOwn = !card && m.arch === "x86_64" && !m.translated && [15, 26].includes(m.major) && !m.gpus.length && !(m.hiddenNvidia || []).length
-    && !(m.gpuHiding || []).some((a) => a !== "-wegnoigpu");   // -wegnoegpu & co. hide the NVIDIA card: their advice stays
-  if (hiddenOwn) {
-    const pk3 = m.packages.find((p) => p.ok === "yes"); if (pk3) S.pkg = pk3.path;
-    $("verdict").innerHTML = `<p class="warn">macOS sees no GPU at all on this Mac.</p><p>OpenCore most likely switches it off (a disable-gpu property${(m.gpuHiding || []).includes("-wegnoigpu") ? ", and -wegnoigpu in boot-args" : ""}). For the processor's own Intel or AMD GPU, <b>AMD / Intel GPU and NPU driver (test)</b> below turns it back on with the test driver, and <b>Turn it off</b> switches it off again. Turning it on downloads the AMD / Intel driver's own package and checks it.</p>`;
-    $("steps").hidden = true; return;
-  }
-  if (why && other) {
-    const pk2 = m.packages.find((p) => p.ok === "yes"); if (pk2) S.pkg = pk2.path;
-    $("verdict").innerHTML = `<p class="warn">No NVIDIA card, so the NVIDIA driver does not apply here.</p><p>This Mac's ${esc(m.gpus.filter((g) => g.vendor !== "10DE").map((g) => g.name).join(", "))} can try the experimental AMD / Intel GPU driver: see <b>AMD / Intel GPU and NPU driver (test)</b> below. Turning it on downloads that driver's own package and checks it.</p>`;
-    $("steps").hidden = true; return;
-  }
-  if (why) { $("verdict").innerHTML = `<p class="bad">Can't install here.</p><p>${why}</p>`; $("steps").hidden = true; return; }
-  // All four kexts loaded but no NVIDIA Metal device is a different state from "not running" (#98: an Optimus laptop
-  // whose kexts were loaded was told to restart and allow an extension that was never blocked).
-  if (m.files && !S.installed && m.kexts >= 4) {
-    $("verdict").innerHTML = '<p class="warn">The driver is loaded, but macOS shows no NVIDIA Metal device yet.</p><p>On a laptop whose built-in screen is wired to the Intel or AMD graphics (no MUX switch), the NVIDIA card draws only the displays plugged into its own HDMI or DisplayPort: connect one there and restart. Otherwise restart once; if it stays this way, use Send logs.</p>';
-  } else if (m.files && !S.installed) {
-    $("verdict").innerHTML = '<p class="warn">The driver is installed but not running.</p><p>Restart. If macOS blocked a system extension, allow it in Privacy &amp; Security, then restart once more.</p>';
-  } else {
-    $("verdict").innerHTML = `<p>Your <b>${esc(card.name)}</b> has a driver configuration available. This machine still needs boot, display and application checks. Four steps, in order.</p>`;
-  }
-  $("steps").hidden = false;
-  const good = m.packages.find((p) => p.ok === "yes");
-  if (good) { S.pkg = good.path; $("s1t").innerHTML = `Found on ${esc(good.where)}, checksum OK.`; $("dl").hidden = true; step(1, "done"); }
-  else { $("s1t").textContent = m.packages.length ? "A copy was found but its checksum is wrong. Download a fresh one." : "Not on this Mac yet."; $("dl").hidden = false; step(1, "now"); }
-  $("dry").disabled = !S.pkg;
+  if (on) { $("verdict").innerHTML = `<p class="good">${esc(V.on27)}</p>`; return; }
+  $("verdict").innerHTML = `<p class="warn">${esc(V.off27)}</p>`;
+  // The driver steps: on the new system the install is the kit's own, so there is no package to get. The app refuses
+  // the install with its reason when the kit is not on this Mac.
+  S.kit = !!m.goldenGate;
+  $("steps").hidden = !S.kit;
+  $("s1t").textContent = $("s1t").dataset.kit; step(1, "done");
+  $("dry").disabled = !S.kit;
   goState();
-  if (S.pkg && !S.previewed) step(2, "now");
+  if (!S.previewed) step(2, "now");
 }
 
 // A greyed-out button with no reason sent users to Discord (10-13: "Install Driver is greyed out, what do I do"): the
 // button says which step comes first.
 function goState() {
-  $("go").disabled = !S.pkg || !S.previewed;
-  $("go").textContent = !S.pkg ? "Install the driver (get the driver first)" : !S.previewed ? "Install the driver (press Show me the changes first)" : "Install the driver";
-  $("go").title = !S.pkg ? "Step 1 has not found the driver yet." : !S.previewed ? "Step 2 lists every change first; then this button turns on." : "";
+  $("go").disabled = !S.kit || !S.previewed;
+  $("go").textContent = !S.previewed ? "Install the driver (press Show me the changes first)" : "Install the driver";
+  $("go").title = !S.previewed ? "Step 2 lists every change first; then this button turns on." : "";
 }
 
 function logLine(l) {
@@ -195,17 +94,14 @@ const NM = {
         // Update driver shows its own line; without this the progress went to step 1 and the update looked stuck.
         const mb = (n) => (n / 1048576).toFixed(1);
         const t = data.total > 0 ? `${Math.floor((100 * data.done) / data.total)}% (${mb(data.done)} of ${mb(data.total)} MB)` : `${mb(data.done)} MB`;
-        $("dlp").textContent = t;
         if (S.driverUpdate) $("updr").textContent = `Downloading the newest driver: ${t}`;
       }
-      if (data.state === "start") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = true));
-      if (data.state === "error" || data.state === "done") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = false));
+      if (data.state === "start") ["updchk", "upddrv"].forEach((b) => ($(b).disabled = true));
+      if (data.state === "error" || data.state === "done") ["updchk", "upddrv"].forEach((b) => ($(b).disabled = false));
       if (data.state === "error") {
-        $("dlp").innerHTML = `<span class="bad">${esc(data.why)}</span>`;
         if (S.driverUpdate) { S.driverUpdate = false; $("updr").innerHTML = `<span class="bad">${esc(data.why)}</span>`; }
       }
       if (data.state === "done") {
-        $("dlp").textContent = "done, checksum OK";
         if (S.driverUpdate) { $("updr").textContent = "Download checked. Installing the driver..."; $("upddrv").disabled = true; }
         post({ act: "scan" });
       }
@@ -216,10 +112,12 @@ const NM = {
         const have = data.installed ? `installed ${esc(data.installed)}, ` : "";
         const kind = data.prerelease ? "early release " : "";
         $("updr").innerHTML = !data.installed
-          ? `1401 could not tell which driver version is installed. The newest ${kind}is ${esc(data.latest)}; updating to it is safe either way.`
+          ? `Liberator could not tell which driver version is installed. The newest ${kind}is ${esc(data.latest)}; updating to it is safe either way.`
           : data.newer ? `${have}newest ${kind}${esc(data.latest)} - ready to update.` : `${have}you have the newest driver (${esc(data.latest)}).`;
-        $("upddrv").hidden = !data.newer;
-        $("upddrv").disabled = !data.newer;
+        // A driver release is for the starting systems, and those belong to the other app: it is named, never installed here.
+        const offer = data.newer && !(S.mac && OS_FROM.includes(S.mac.major));
+        $("upddrv").hidden = !offer;
+        $("upddrv").disabled = !offer;
         if (data.app) $("updr").innerHTML += data.appNewer ? ` App ${esc(data.appHave)} -> ${esc(data.app)} is ready.` : ` The app (${esc(data.appHave)}) is up to date.`;
         $("updapp").hidden = !data.appNewer;
         $("updapp").disabled = !data.appNewer;
@@ -227,12 +125,12 @@ const NM = {
     }
     if (event === "appupd") {
       if (data.state === "error") { $("updapp").disabled = false; $("updr").innerHTML = `<span class="bad">${esc(data.why)}</span>`; }
-      if (data.state === "start") $("updr").textContent = `Downloading 1401 ${data.version}...`;
-      if (data.state === "restarting") $("updr").textContent = `1401 ${data.version} checked - restarting into it...`;
+      if (data.state === "start") $("updr").textContent = `Downloading Liberator ${data.version}...`;
+      if (data.state === "restarting") $("updr").textContent = `Liberator ${data.version} checked - restarting into it...`;
     }
     if (event === "run") {
       const busy = data.state === "start";
-      ["dry", "go", "rm", "dl", "updchk", "upddrv", "upd", "updc"].forEach((b) => ($(b).disabled = busy));
+      ["dry", "go", "rm", "updchk", "upddrv"].forEach((b) => ($(b).disabled = busy));
       ggButtons(busy);
       if (busy) { $("logwrap").hidden = false; $("log").textContent = ""; return; }
       if (data.why) { $("logwrap").hidden = false; logLine(data.why); }
@@ -250,13 +148,8 @@ const NM = {
       }
       if (data.mode === "dry" && data.ok) { S.previewed = true; step(2, "done"); step(3, "now"); }
       if (data.mode === "install" && data.ok) { S.installed = true; step(3, "done"); step(4, "now"); $("rs").disabled = false; }
-      if (data.mode === "tahoe") {
-        if (data.ok) { $("swu").hidden = false; $("updt").textContent = "Ready for Tahoe. Open Software Update and install macOS 26."; logLine("OK ready for Tahoe - click Open Software Update and install macOS 26"); }
-        else $("updt").textContent = "Tahoe preparation stopped. Review the setup log above.";
-      }
       if (data.mode === "goldengate" && data.ok && !$("ggbar").hidden) ggBar(100, "100%  Done");
       if (data.mode === "goldengate") $("ggt").textContent = data.ok ? GG_DONE[S.ggStep] || (S.ggStep === "kit" ? $("ggkit").dataset.done : S.ggStep === "all" ? $("ggprep").dataset.done : "Done.") : "Stopped. Review the setup log above.";
-      if (data.mode === "tahoecancel") { $("swu").hidden = true; $("updt").textContent = data.ok ? "Done: the driver is set to start. Restart the Mac to load it." : "Stopped. Review the setup log above."; }
       post({ act: "scan" });
     }
   },
@@ -269,9 +162,6 @@ $("efi").onchange = () => {
   goState();
   step(2, "now"); step(3, "waiting");
 };
-$("dl").onclick = () => post({ act: "download" });
-$("upd").onclick = () => post({ act: "osupdate", cancel: false, pkg: S.pkg, efi: efi() });
-$("swu").onclick = () => post({ act: "swupdate" });
 // The Golden Gate bar: one percentage for the whole run and one line under it, both worked out by the app from the
 // progress lines of the scripts. It never moves back; a new run starts it again.
 function ggBar(pct, text) {
@@ -294,7 +184,7 @@ const GG_DONE = {
   installer: "The new system is on its own volumes. Next: set it up, before its first start.",
   collections: "The kernel collections are made. Next: install the new system.",
   finish: "The new system is set up. Next: start from the new startup files.",
-  activate: "This Mac now starts from the new startup files; the macOS 26 files are kept. Restart and choose the new volume.",
+  activate: "This Mac now starts from the new startup files; the old ones are kept. Restart and choose the new volume.",
   cancel: "Golden Gate cancelled: the startup files are as they were.",
   remove: "The new system is removed and the startup files are as they were. The downloads are kept.",
   "clear-downloads": "The downloads are cleared.",
@@ -307,13 +197,12 @@ const GG_DONE = {
 [["ggkit", false], ["ggkitf", true]].forEach(([id, file]) => {
   $(id).onclick = () => { S.ggStep = "kit"; $("ggt").textContent = ""; ggBar(null); post({ act: "goldengate", step: "kit", file, efi: efi() }); };
 });
-$("updc").onclick = () => post({ act: "osupdate", cancel: true, efi: efi() });
 $("updchk").onclick = () => { $("updr").textContent = "Checking..."; post({ act: "checkUpdate" }); };
 $("updapp").onclick = () => { $("updapp").disabled = true; post({ act: "updateApp" }); };
 $("upddrv").onclick = () => { S.driverUpdate = true; $("upddrv").disabled = true; $("updr").textContent = "Downloading the newest driver..."; post({ act: "updateDriver", efi: efi() }); };
 $("ocg").onclick = (e) => { e.preventDefault(); post({ act: "open", url: "https://dortania.github.io/OpenCore-Install-Guide/" }); };
-$("dry").onclick = () => post({ act: "run", mode: "dry", pkg: S.pkg, efi: efi() });
-$("go").onclick = () => post({ act: "run", mode: "install", pkg: S.pkg, efi: efi() });
+$("dry").onclick = () => post({ act: "run", mode: "dry", pkg: "", efi: efi() });
+$("go").onclick = () => post({ act: "run", mode: "install", pkg: "", efi: efi() });
 $("rm").onclick = () => { if (confirm("Remove the NullMoth driver and put your OpenCore config back the way it was?")) post({ act: "run", mode: "remove", pkg: "", efi: efi() }); };
 $("rs").onclick = () => post({ act: "restart" });
 $("vbon").onclick = () => post({ act: "verbose", on: true, efi: efi() });
@@ -322,26 +211,6 @@ $("blon").onclick = () => post({ act: "backlight", on: true, efi: efi() });
 $("bloff").onclick = () => post({ act: "backlight", on: false, efi: efi() });
 $("hdon").onclick = () => post({ act: "hidpi", on: true, efi: efi() });
 $("hdoff").onclick = () => post({ act: "hidpi", on: false, efi: efi() });
-$("gpuon").onclick = () => post({ act: "gputest", on: true, efi: efi() });
-$("gpuoff").onclick = () => post({ act: "gputest", on: false, efi: efi() });
-$("xeon").onclick = () => post({ act: "xe", on: true, efi: efi() });
-$("xeoff").onclick = () => post({ act: "xe", on: false, efi: efi() });
-$("armon").onclick = () => { $("armon").disabled = true; post({ act: "arm", op: "on" }); };
-$("armoff").onclick = () => post({ act: "arm", op: "off" });
-$("armreqon").onclick = () => { $("armreq").hidden = true; $("armon").disabled = true; post({ act: "arm", op: "on", from: "windows" }); };
-$("armreqno").onclick = (e) => { e.preventDefault(); $("armreq").hidden = true; post({ act: "arm", op: "notNow" }); };
-$("armchk").onclick = () => post({ act: "arm", op: "check" });
-$("armclt").onclick = () => post({ act: "arm", op: "clt" });
-$("armtr").onclick = () => { $("armtr").disabled = true; post({ act: "arm", op: "translate" }); };
-$("armbrewgo").onclick = () => { $("armbrewgo").disabled = true; post({ act: "arm", op: "brew", pick: $("armbrewpick").value, primary: $("armbrewprim").value }); };
-$("armcancel").onclick = () => { $("armcancel").disabled = true; $("armmsg").textContent = "Cancelling..."; post({ act: "arm", op: "cancel" }); };
-$("armapps").onclick = (e) => {
-  const b = e.target.closest("button[data-op]");
-  if (b) post({ act: "arm", op: b.dataset.op, name: b.dataset.name, path: b.dataset.path });
-};
-post({ act: "arm", op: "status" });
-$("teston").onclick = () => post({ act: "tester", on: true });
-$("testoff").onclick = () => post({ act: "tester", on: false });
 $("earlyon").onclick = () => post({ act: "early", on: true });
 $("earlyoff").onclick = () => post({ act: "early", on: false });
 post({ act: "early" });
@@ -356,7 +225,7 @@ post({ act: "scan" });
 document.querySelectorAll(".tab").forEach((b) => (b.onclick = () => {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
   ["drv", "efi", "tools", "usb", "crash"].forEach((t) => ($("t-" + t).hidden = t !== b.dataset.t));
-  $("ttl").textContent = "1401 — " + b.dataset.title;
+  $("ttl").textContent = "Liberator — " + b.dataset.title;
   if (b.dataset.t !== "usb") post({ act: "usbStop" });
 }));
 // Light or dark: the switch in the title bar, remembered on this Mac; until it is used, the system's setting decides.
@@ -409,7 +278,7 @@ $("uw").onclick = () => { U.pick = {}; U.off = new Set(); U.last = ""; post({ ac
 $("uwr").onclick = () => { $("uerr").textContent = ""; post({ act: "usbStop" }); post({ act: "usbWrite", sel: U.pick, efi: efi() }); };
 $("mk").onclick = () => post({ act: "crashReport" });
 $("cf").onclick = () => post({ act: "open", url: "https://buymeacoffee.com/nullmoth" });
-// every project 1401 is built on or downloads, with its author and licence
+// every project Liberator is built on or downloads, with its author and licence
 $("cr").onclick = () => post({ act: "open", url: "https://github.com/nullmoth/1401/blob/main/NOTICE.md" });
 $("sl").onclick = () => { $("sl").disabled = true; $("slr").textContent = "Collecting and sending..."; post({ act: "sendLogs" }); };
 $("fl").onclick = () => { $("sl").disabled = true; $("fl").disabled = true; $("slr").textContent = "Recording the display for 20 seconds, then sending..."; post({ act: "sendLogs", sample: "flicker" }); };
@@ -439,12 +308,6 @@ NM.on = (m) => {
   if (m.event === "early") {
     $("earlyr").textContent = m.data.on ? "On: new drivers reach this Mac first, before they are offered to everyone." : "Off: this Mac gets releases once they have held up for everyone who went first.";
     $("earlyon").hidden = m.data.on; $("earlyoff").hidden = !m.data.on;
-    return;
-  }
-  if (m.event === "arm") { armEvent(m.data); return; }
-  if (m.event === "tester") {
-    $("testr").innerHTML = m.data.ok ? `<span class="good">${m.data.on ? "Joined: a report goes out after each restart." : "Left: nothing runs any more."}</span>`
-                                     : `<span class="warn">${esc(m.data.why)}</span>`;
     return;
   }
   if (m.event === "logsStatus") { $("slr").textContent = m.data.text; return; }
@@ -477,7 +340,7 @@ NM.on = (m) => {
     }
     if (n) {
       const note = document.createElement("p");
-      note.textContent = "Before you edit config.plist, keep a copy of it. If a change stops this Mac from starting, start from your 1401 stick and put the copy back.";
+      note.textContent = $("efiout").dataset.keep;
       $("efiout").appendChild(note);
     }
     return;
@@ -498,19 +361,8 @@ NM.on = (m) => {
     if (d.localPath) $("slr").innerHTML += "<br>Report files are saved locally. Open Logs to find them or retry Send logs.";
     return;
   }
-  if (m.event === "crashDone") { $("cr").innerHTML = m.data.ok ? `<span class="good">Saved to your Desktop:</span> ${esc(m.data.path.split("/").pop())}` : `<span class="warn">${esc(m.data.why)}</span>`; return; }
-  if (m.event === "scan" && m.data.crashes) $("cr").textContent = m.data.crashes.length ? `${m.data.crashes.length} crash file(s) on this Mac name the driver.` : "No crash that names the driver is on this Mac.";
-  if (m.event === "scan" && m.data.itlwmNeedsHeliPort) {
-    setTimeout(() => $("verdict").insertAdjacentHTML("beforeend", '<p class="warn">Wi-Fi: this Mac\'s Intel Wi-Fi runs on itlwm, which joins networks through its own app, HeliPort, not the Wi-Fi menu. Download HeliPort from github.com/OpenIntelWireless/HeliPort/releases, move it to Applications, open it, and pick your network there. To start it with the Mac, turn on Launch at Login in its menu.</p>'), 0);
-  }
-  // 2.7.1: shown for every Mac started with -nvoff, not only ones with an install record. 10 of 34 "driver did not come
-  // up" reports on 2.7 were parked this way with no way back on screen; setup finds the booted OpenCore partition itself.
-  if (m.event === "scan" && m.data.safemode) {
-    setTimeout(() => {
-      $("verdict").insertAdjacentHTML("afterbegin", '<p class="warn">This Mac started with the NVIDIA driver switched off: -nvoff is in the boot arguments. 1401 puts it there while macOS updates, and some people add it after a black screen. If you prepared for the macOS 26 update, update macOS now from System Settings and the driver comes back by itself after it. To turn the driver back on without updating, or if it stayed off after the update, click Turn the driver on, then restart. If the screen went black with the driver on, send the logs first (Send logs to NullMoth, below). To take the driver out for good, click Remove the driver below.</p><p class="row"><button type="button" class="b go" id="nvon">Turn the driver on</button></p>');
-      $("nvon").onclick = () => { $("nvon").disabled = true; post({ act: "osupdate", cancel: true, efi: efi() }); };
-    }, 0);
-  }
+  if (m.event === "crashDone") { $("crr").innerHTML = m.data.ok ? `<span class="good">Saved to your Desktop:</span> ${esc(m.data.path.split("/").pop())}` : `<span class="warn">${esc(m.data.why)}</span>`; return; }
+  if (m.event === "scan" && m.data.crashes) $("crr").textContent = m.data.crashes.length ? `${m.data.crashes.length} crash file(s) on this Mac name the driver.` : "No crash that names the driver is on this Mac.";
   prevOn(m);
 };
 window.NM = NM;

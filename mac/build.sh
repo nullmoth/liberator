@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-OUT=${1:-build}; APP=$OUT/1401.app
+OUT=${1:-build}; APP=$OUT/Liberator.app
 [ -f Resources/NullMothSafe.efi ] || { echo "STOP: Resources/NullMothSafe.efi missing (build efi-safe first)"; exit 1; }
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -74,25 +74,25 @@ for s in 16 32 128 256 512; do
   sips -z $s $s Resources/moth-mark.jpg --setProperty format png --out "$IS/icon_${s}x${s}.png" >/dev/null
   sips -z $((s*2)) $((s*2)) Resources/moth-mark.jpg --setProperty format png --out "$IS/icon_${s}x${s}@2x.png" >/dev/null
 done
-iconutil -c icns "$IS" -o "$APP/Contents/Resources/1401.icns"
+iconutil -c icns "$IS" -o "$APP/Contents/Resources/Liberator.icns"
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
-<key>CFBundleExecutable</key><string>1401</string>
-<key>CFBundleIconFile</key><string>1401</string>
-<key>CFBundleIdentifier</key><string>com.nullmoth.1401</string>
-<key>CFBundleName</key><string>1401</string>
-<key>CFBundleDisplayName</key><string>1401</string>
+<key>CFBundleExecutable</key><string>Liberator</string>
+<key>CFBundleIconFile</key><string>Liberator</string>
+<key>CFBundleIdentifier</key><string>com.nullmoth.liberator</string>
+<key>CFBundleName</key><string>Liberator</string>
+<key>CFBundleDisplayName</key><string>Liberator</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.8.1</string>
-<key>CFBundleVersion</key><string>143</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+<key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSHumanReadableCopyright</key><string>© 2026 NullMoth Systems</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSRemovableVolumesUsageDescription</key><string>1401 reads the OpenCore settings on your USB stick or disk to install the driver there.</string>
-<key>NSAppleEventsUsageDescription</key><string>1401 asks macOS for your password to install the driver, and to restart when you click Restart.</string>
+<key>NSRemovableVolumesUsageDescription</key><string>Liberator reads the OpenCore settings on your USB stick or disk to install the driver there.</string>
+<key>NSAppleEventsUsageDescription</key><string>Liberator asks macOS for your password to install the driver, and to restart when you click Restart.</string>
 </dict></plist>
 PL
 # The hash of every resource is compiled into the app, so the root shell can check its private copy of the scripts
@@ -110,14 +110,14 @@ HASHES=$(mktemp -d)/BundleHashes.swift
   echo '    ]'; echo '}'
 } > "$HASHES"
 xcrun swiftc -O -target x86_64-apple-macos15.0 -sdk "$SDK" -framework WebKit -framework Metal -framework IOKit \
-  Sources/main.swift Sources/TesterLane.swift Sources/ArmApps.swift Sources/ReachedDesktop.swift Sources/profile.swift Sources/redaction.swift Sources/actions.swift Sources/diagnostics.swift Sources/HardwareMap.swift Sources/HardwareMapWorker.swift Sources/NativePeripheralFacts.swift Sources/SavedReports.swift Sources/ReportQueue.swift Sources/Privileged.swift Sources/ReleaseSignature.swift Sources/UpdateChannel.swift Sources/Mirror.swift Sources/EfiRules.swift Sources/EfiCheck.swift Sources/TitleBar.swift Sources/OSGate.swift "$HASHES" -o "$APP/Contents/MacOS/1401"
+  Sources/main.swift Sources/TesterLane.swift Sources/ArmApps.swift Sources/ReachedDesktop.swift Sources/profile.swift Sources/redaction.swift Sources/actions.swift Sources/diagnostics.swift Sources/HardwareMap.swift Sources/HardwareMapWorker.swift Sources/NativePeripheralFacts.swift Sources/SavedReports.swift Sources/ReportQueue.swift Sources/Privileged.swift Sources/ReleaseSignature.swift Sources/UpdateChannel.swift Sources/Mirror.swift Sources/EfiRules.swift Sources/EfiCheck.swift Sources/TitleBar.swift Sources/OSGate.swift "$HASHES" -o "$APP/Contents/MacOS/Liberator"
 # --options runtime,library: library validation, so only code signed by the
 # same identity loads into the bundle. Was a bare ad-hoc signature, which let
 # any dropped-in library load into the process that asks for the password.
 # The helper binaries above were already signed this way.
 # The hardened runtime blocks Apple Events the app sends itself (Restart asks System Events) unless the signature
 # carries this entitlement. The Metal device list runs in nullmoth-metal-devices for the same reason the app is hardened.
-ENT=$(mktemp -d)/1401.entitlements
+ENT=$(mktemp -d)/Liberator.entitlements
 cat > "$ENT" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -1,14 +1,13 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'">
-<title>1401</title>
+<title>Liberator</title>
 <link rel="stylesheet" href="app.css">
 </head><body>
 <div class="desk" id="desk">
-<div class="sky sky1" aria-hidden="true"></div><div class="sky sky2" aria-hidden="true"></div><div class="sky sky3" aria-hidden="true"></div>
 
 <header class="bar">
-<span class="ttl" id="ttl">1401 — This Mac</span>
+<span class="ttl" id="ttl">Liberator — This Mac</span>
 <button type="button" class="theme" id="theme" aria-label="Switch between light and dark">
 <svg class="moon" viewBox="0 0 12 12" aria-hidden="true"><path d="M8.5 7.5A4 4 0 0 1 4.5 2.2a4 4 0 1 0 4 5.3z"/></svg>
 <svg class="sun" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="2.2"/><path d="M6 .8v1.4M6 9.8v1.4M.8 6h1.4M9.8 6h1.4M2.3 2.3l1 1M8.7 8.7l1 1M2.3 9.7l1-1M8.7 3.3l1-1"/></svg>
@@ -29,47 +28,51 @@
 
 <section id="t-drv">
 <h1>Your Mac, mapped</h1>
-<p class="lede">1401 sets up the NullMoth driver on OpenCore Macs running macOS 15.5 or later, or macOS 26 Tahoe. <b>Keep the USB stick or disk OpenCore started this Mac from plugged in</b>: 1401 changes the settings on that one.</p>
+<p class="lede">Liberator moves an OpenCore Mac to macOS 27 and sets up the NullMoth driver there. <b>Keep the USB stick or disk OpenCore started this Mac from plugged in</b>: Liberator changes the settings on that one.</p>
 <table class="pc"><tbody id="mac"><tr><th>Looking...</th><td>one second</td></tr></tbody></table>
 
-<div id="verdict" class="pane card"></div>
-
-<div id="steps" class="pane card" hidden>
-<p class="sh">What happens</p>
-<ol class="todo">
-<li id="s1"><b>Get the driver.</b> <span id="s1t"></span> <button type="button" class="b go" id="dl" hidden>Download it</button> <span id="dlp"></span></li>
-<li id="s2"><b>Look before touching anything.</b> 1401 reads your OpenCore config and lists every change it would make. Nothing is changed. (macOS asks for your password.) <button type="button" class="b" id="dry" disabled>Show me the changes</button></li>
-<li id="s3"><b>Install.</b> Backs up your OpenCore config, makes exactly the changes listed, installs the driver, and adds <i>1401: Remove NVIDIA driver</i> to your boot picker. <button type="button" class="b go" id="go" disabled>Install the driver</button></li>
-<li id="s4"><b>Restart.</b> If macOS says a system extension was blocked, open <a href="#" id="priv">Privacy &amp; Security</a>, click Allow, and restart once more. <button type="button" class="b" id="rs" disabled>Restart now</button></li>
-</ol>
-<p id="efirow" hidden>The startup partition could not be confirmed. Select the OpenCore partition this Mac started from: <select id="efi"></select></p>
-</div>
-
-<div id="logwrap" class="pane card" hidden><p class="sh">What 1401 is doing</p><pre id="log" aria-live="polite"></pre>
-<p class="small"><a href="#" id="logs">Open the log folder</a></p></div>
-
-<div class="pane card"><p class="sh">Updates</p>
-<p>1401 checks for the newest NullMoth driver and the newest 1401 app. The app updates itself and reopens. The driver is downloaded, checked against its published SHA-256 and installed the same way as above, with your OpenCore config backed up first.</p>
-<p class="row"><button type="button" class="b go" id="updchk">Check for updates</button> <button type="button" class="b go" id="upddrv" hidden>Update driver</button> <button type="button" class="b go" id="updapp" hidden>Update the app</button> <span id="updr"></span></p>
-<p><b>Early updates.</b> A new driver goes first to people who turn this on, and reaches everyone once their machines show it made nothing worse. Turn it on to get releases a day or two early and send logs when something is off.</p>
-<p class="row"><button type="button" class="b" id="earlyon">Turn early updates on</button> <button type="button" class="b" id="earlyoff" hidden>Turn early updates off</button> <span id="earlyr"></span></p></div>
-
-<div class="pane card"><p class="sh">Update to macOS 26 Tahoe</p>
-<p>From macOS 15, <b>Prepare this Mac for Tahoe</b> installs or updates the driver, parks it, and gives the installer the small GPU BAR it needs so its screens show. Then install macOS 26 from Software Update; the first start after the update sets the driver up for Tahoe and restarts once by itself. <b>Cancel the Tahoe preparation</b> puts everything back.</p>
-<p class="row"><button type="button" class="b" id="upd" disabled>Prepare this Mac for Tahoe</button> <button type="button" class="b" id="swu" hidden>Open Software Update</button> <button type="button" class="b" id="updc">Cancel the Tahoe preparation</button> <span id="updt"></span></p></div>
+<div id="verdict" class="pane card"
+ data-ready="This Mac can make the move. Use Prepare for Golden Gate below."
+ data-other-os="Liberator starts from macOS 15 or macOS 26 and runs on macOS 27; this Mac runs "
+ data-driver-here="Liberator does not install the driver for this macOS: that is the 1401 app. Liberator's driver is the one for macOS 27."
+ data-on27="macOS 27 is running with the NullMoth driver."
+ data-off27="macOS 27 is running, but the NullMoth driver is not. Restart once; if it stays this way, use Send logs."></div>
 
 <div class="pane card" id="ggcard" hidden><p class="sh">Prepare for Golden Gate (macOS 27)</p>
-<p>From macOS 15 or 26, <b>Prepare for Golden Gate</b> does the whole move to macOS 27 in one run. It checks this Mac, downloads what it needs (about 27 GB, most of it macOS 27 from Apple), builds the startup files macOS 27 needs on this PC, puts macOS 27 on its own new volumes beside the macOS you use now, sets it up, and then makes the macOS 27 startup files the default. It needs about 102 GB free while it runs and asks once before it starts. The new system starts with your account brought over, unless you tick <b>Set up as a new Mac instead</b>: then it starts at Apple's setup like a new Mac. Your current macOS and its startup files are kept: <b>Cancel Golden Gate</b> puts them back. If it stops, press the button again: what is already done is not done twice. Keep your 1401 USB stick until macOS 27 is running. Wi-Fi and Bluetooth do not work on macOS 27 yet.</p>
-<p class="row"><button type="button" class="b go" id="ggprep" disabled data-done="Done. Restart and choose the macOS 27 volume. Your current macOS is still there.">Prepare for Golden Gate</button> <label><input type="checkbox" id="ggnew"> Set up as a new Mac instead</label> <label>Size <select id="ggsize"><option value="0" selected>Share the disk (no limit)</option><option value="40">40 GB (just trying it)</option><option value="64">64 GB</option><option value="128">128 GB</option><option value="256">256 GB</option><option value="512">512 GB</option></select></label> <button type="button" class="b" id="ggcancel" disabled>Cancel Golden Gate</button> <span id="ggt"></span> <span id="ggkitr" hidden data-current="" data-other=""></span></p>
-<p class="row"><button type="button" class="b" id="ggrm" disabled>Remove macOS 27</button> <button type="button" class="b" id="ggclr" disabled>Clear downloads</button> <span id="ggkept" data-kept="Kept for another try: {n} GB of downloads." data-none=""></span></p>
-<p><b>Remove macOS 27</b> puts the startup files back and erases the macOS 27 that 1401 installed, with everything in it; it asks first. The downloads are kept in a folder only the system can open and are checked again every time they are used, so a try that fails does not download them again. <b>Clear downloads</b> frees that space.</p>
-<div class="ggbar" id="ggbar" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100"><div id="ggbarf"></div></div>
+<p>From macOS 15 or 26, <b>Prepare for Golden Gate</b> does the whole move to macOS 27 in one run. It checks this Mac, downloads what it needs (about 27 GB, most of it macOS 27 from Apple), builds the startup files macOS 27 needs on this PC, puts macOS 27 on its own new volumes beside the macOS you use now, sets it up, and then makes the macOS 27 startup files the default. It needs about 102 GB free while it runs and asks once before it starts. The new system starts with your account brought over, unless you tick <b>Set up as a new Mac instead</b>: then it starts at Apple's setup like a new Mac. Your current macOS and its startup files are kept: <b>Cancel Golden Gate</b> puts them back. If it stops, press the button again: what is already done is not done twice. Keep your OpenCore USB stick until macOS 27 is running. Wi-Fi and Bluetooth do not work on macOS 27 yet.</p>
+<p class="row"><button type="button" class="b go" id="ggprep" disabled data-done="Done. Restart and choose the macOS 27 volume. Your current macOS is still there.">Prepare for Golden Gate</button> <label><input type="checkbox" id="ggnew"> Set up as a new Mac instead</label> <label>Size <select id="ggsize"><option value="0" selected>Share the disk (no limit)</option><option value="40">40 GB (just trying it)</option><option value="64">64 GB</option><option value="128">128 GB</option><option value="256">256 GB</option><option value="512">512 GB</option></select></label></p>
+<p class="row"><button type="button" class="b" id="ggcancel" disabled>Cancel Golden Gate</button> <button type="button" class="b" id="ggrm" disabled>Remove macOS 27</button> <button type="button" class="b" id="ggclr" disabled>Clear downloads</button> <span id="ggkept" data-kept="Kept for another try: {n} GB of downloads." data-none=""></span> <span id="ggt" data-need="Needs a supported NVIDIA card and OpenCore." data-from="Golden Gate starts from macOS 15 or 26."></span> <span id="ggkitr" hidden data-current="" data-other=""></span></p>
+<p><b>Remove macOS 27</b> puts the startup files back and erases the macOS 27 that Liberator installed, with everything in it; it asks first. The downloads are kept in a folder only the system can open and are checked again every time they are used, so a try that fails does not download them again. <b>Clear downloads</b> frees that space.</p>
+<div class="ggbar" id="ggbar" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Golden Gate progress"><div id="ggbarf"></div></div>
 <p class="ggbart" id="ggbart" hidden></p>
 <p hidden><button type="button" id="ggkit" disabled data-get="" data-update="" data-done="">.</button><button type="button" id="ggkitf" disabled>.</button><button type="button" id="ggkc" disabled>.</button><button type="button" id="gginst" disabled>.</button><button type="button" id="ggfin" disabled>.</button><button type="button" id="ggact" disabled>.</button></p></div>
 
+<p id="efirow" hidden>The startup partition could not be confirmed. Select the OpenCore partition this Mac started from: <select id="efi"></select></p>
+
+<div id="steps" class="pane card" hidden>
+<p class="sh">NVIDIA driver</p>
+<ol class="todo">
+<li id="s1"><b>Get the driver.</b> <span id="s1t" data-kit="It comes with the macOS 27 support on this Mac."></span></li>
+<li id="s2"><b>Look before touching anything.</b> Liberator reads your OpenCore config and lists every change it would make. Nothing is changed. (macOS asks for your password.) <button type="button" class="b" id="dry" disabled>Show me the changes</button></li>
+<li id="s3"><b>Install.</b> Backs up your OpenCore config, makes exactly the changes listed, and installs the driver. <button type="button" class="b go" id="go" disabled>Install the driver</button></li>
+<li id="s4"><b>Restart.</b> If macOS says a system extension was blocked, open <a href="#" id="priv">Privacy &amp; Security</a>, click Allow, and restart once more. <button type="button" class="b" id="rs" disabled>Restart now</button></li>
+</ol>
+</div>
+
+<div id="logwrap" class="pane card" hidden><p class="sh">What Liberator is doing</p><pre id="log" aria-live="polite"></pre>
+<p class="small"><a href="#" id="logs">Open the log folder</a></p></div>
+
+<div class="pair">
+<div class="pane card"><p class="sh">Updates</p>
+<p>Liberator checks for the newest NullMoth driver and the newest Liberator app. The app updates itself and reopens. Every download is checked against its published SHA-256.</p>
+<p class="row"><button type="button" class="b go" id="updchk">Check for updates</button> <button type="button" class="b go" id="upddrv" hidden>Update driver</button> <button type="button" class="b go" id="updapp" hidden>Update the app</button> <span id="updr"></span></p>
+<p><b>Early updates.</b> A new driver goes first to people who turn this on, and reaches everyone once their machines show it made nothing worse.</p>
+<p class="row"><button type="button" class="b" id="earlyon">Turn early updates on</button> <button type="button" class="b" id="earlyoff" hidden>Turn early updates off</button> <span id="earlyr"></span></p></div>
+
 <div class="pane card"><p class="sh">If something goes wrong after you restart</p>
-<p>In the OpenCore boot picker choose <b>1401: Remove NVIDIA driver</b>, then your macOS disk. 1401 removes the driver and restarts, and this Mac comes back as it was before the install, OpenCore config included. The screen may stay dark until that second restart.</p>
+<p>In the OpenCore boot picker choose <b>1401: Remove NVIDIA driver</b>, then your macOS disk. The driver is removed, this Mac restarts, and it comes back as it was before the install, OpenCore config included. The screen may stay dark until that second restart.</p>
 <p class="row"><button type="button" class="b" id="rm">Remove the driver</button></p></div>
+</div>
 </section>
 
 <section id="t-efi" hidden>
@@ -77,13 +80,13 @@
 <p class="lede">Checks the OpenCore setup this Mac starts from against the settings that work on PCs like yours, and explains anything that needs changing, with the steps. It only reads: nothing is changed. Asks for your password once.</p></div>
 <button type="button" class="b go" id="efichk">Check my EFI</button></div>
 <p id="efichkr"></p>
-<div id="efiout"></div>
+<div id="efiout" data-keep="Before you edit config.plist, keep a copy of it. If a change stops this Mac from starting, start from your OpenCore USB stick and put the copy back."></div>
 </section>
 
 <section id="t-tools" hidden>
 <h1>Tools</h1>
 <div class="pane card"><p class="sh">Mount EFI</p>
-<p>The EFI partition holds your boot setup. 1401 finds the one this Mac started from, mounts it and opens it in Finder. Asks for your password once.</p>
+<p>The EFI partition holds your boot setup. Liberator finds the one this Mac started from, mounts it and opens it in Finder. Asks for your password once.</p>
 <p class="row"><button type="button" class="b go" id="efimount">Mount EFI</button> <span id="efimountr"></span></p></div>
 <div class="pane card"><p class="sh">Startup text (verbose mode)</p>
 <p>Shows what macOS is doing while it starts instead of the Apple logo. Useful if a start hangs. Takes effect at the next restart.</p>
@@ -94,44 +97,21 @@
 <div class="pane card"><p class="sh">HiDPI (Retina) modes</p>
 <p>Lets HiDPI "looks like" sizes work, for example 1920 x 1080 on a 2560 x 1440 screen, including ones added with a tool such as BetterDisplay. Without it such a size is refused and switches back. The driver draws the desktop at up to twice the screen's size, which uses more video memory. Takes effect at the next restart.</p>
 <p class="row"><button type="button" class="b" id="hdon">Turn HiDPI modes on</button> <button type="button" class="b" id="hdoff">Turn them off</button></p></div>
-<div class="pane card"><p class="sh">AMD / Intel GPU and NPU driver (test)</p>
-<p>For the AMD and Intel GPUs macOS has no driver for (Ryzen APUs, Radeon RX 7000/9000, Intel Iris Xe and Arc graphics), and the NPU in Intel Core Ultra and AMD Ryzen AI processors. An early test build: your Send logs are how it gets fixed. It downloads only the firmware your GPU and NPU need from linux-firmware (every file checked) and takes effect at the next restart.</p>
-<p>If that GPU drives your screen, the screen can stay dark. Then choose <b>1401: Start once without NVIDIA driver</b> in the boot picker (it parks this driver too) and turn it off here.</p>
-<p class="row"><button type="button" class="b" id="gpuon">Turn the test driver on</button> <button type="button" class="b" id="gpuoff">Turn it off</button></p>
-<p><b>Test program.</b> While the test driver is on, 1401 sends a short report after every restart: the driver's kernel messages, any crash, and which GPU and build you have (names and serial numbers removed). Leave at any time.</p>
-<p class="row"><button type="button" class="b" id="teston">Join the test program</button> <button type="button" class="b" id="testoff">Leave it</button> <span id="testr"></span></p></div>
-<div class="pane card" id="xecard" hidden><p class="sh">Intel Xe graphics (WhateverXe, test)</p>
-<p>For Tiger Lake, Alder Lake and Raptor Lake Intel graphics on macOS 15.8 or 26.7 and later. It uses <a href="https://github.com/b00t0x/WhateverXe">WhateverXe</a> by b00t0x: 1401 adds it to OpenCore, you restart, then press <b>Turn it on</b> again to install its graphics package. Those parts come straight from the author's GitHub, each checked. WhateverGreen is turned off while it is on; <b>Turn it off</b> puts everything back.</p>
-<p>If the screen stays dark after the restart, choose <b>1401: Start once without NVIDIA driver</b> in the boot picker: that start also leaves WhateverXe off. Then turn it off here.</p>
-<p class="row"><button type="button" class="b" id="xeon">Turn it on</button> <button type="button" class="b" id="xeoff">Turn it off</button></p></div>
 <div class="pane card"><p class="sh">Microphone and camera</p>
 <p>With the driver installed, macOS does not ask before an app uses the microphone or camera, so apps such as Discord get silence and never appear under Privacy &amp; Security. Pick the app here to allow it the microphone, camera and screen recording.</p>
 <p class="row"><button type="button" class="b" id="tccg">Allow an app...</button> <span id="tccr"></span></p></div>
 <div class="pane card"><p class="sh">Map my GPU (experimental)</p>
 <p>A few minutes of measurements on this Mac's GPU: what Metal reports, a correctness check, memory and compute speed, and small test shaders. Nothing is changed and no display mode is touched. The result goes in the log folder, and Send logs uploads it so the next driver can be tuned for your card.</p>
 <p class="row"><button type="button" class="b" id="gpumap">Map my GPU</button> <span id="gpumapr"></span></p></div>
-<div class="pane card" id="armcard"><p class="sh">ARM apps (opt-in)</p>
-<div id="armreq" hidden><p><b id="armreqt"></b></p>
-<p class="row"><button type="button" class="b go" id="armreqon" hidden>Turn on</button> <a href="#" id="armreqno">Not now</a></p></div>
-<p>Apps built only for Apple silicon can be translated to run on this Mac. Translation takes minutes for a small app and up to an hour or more for a big one. The original app is never changed: the translated copy goes to Applications &gt; NullMoth ARM. Turning this off removes the translator and the translated copies, and your 2.7 driver keeps working.</p>
-<p class="row"><button type="button" class="b" id="armon">Turn on</button> <button type="button" class="b" id="armoff" hidden>Turn off</button> <button type="button" class="b" id="armchk" hidden>Check this Mac</button> <button type="button" class="b" id="armclt" hidden>Install Command Line Tools</button> <button type="button" class="b go" id="armtr" hidden disabled>Translate an app...</button></p>
-<p id="armr"></p>
-<div id="armprog" hidden><progress id="armbar" max="100" style="width:100%"></progress>
-<p class="row"><span id="armmsg" class="small"></span> <button type="button" class="b" id="armcancel">Cancel</button></p></div>
-<div id="armapps"></div>
-<div id="armbrew" hidden><p><b>Homebrew</b></p>
-<p class="small">Two Homebrews side by side, as on a Mac with Apple silicon: the ARM one in /opt/homebrew installs Homebrew's Apple-silicon packages and translates them for this Mac; the Intel one in /usr/local runs natively but mostly builds from source, because Homebrew stopped publishing Intel packages. In Terminal, <code>abrew</code> is always ARM, <code>ibrew</code> always Intel, and <code>brew</code> is the one you pick here.</p>
-<p class="row"><select id="armbrewpick"><option value="both">ARM and Intel</option><option value="arm">ARM only (/opt/homebrew)</option><option value="intel">Intel only (/usr/local)</option></select> <select id="armbrewprim"><option value="arm">brew = ARM</option><option value="intel">brew = Intel</option></select> <button type="button" class="b" id="armbrewgo">Set up Homebrew</button></p>
-<p id="armbrewr" class="small"></p></div></div>
 </section>
 
 <section id="t-usb" hidden>
 <h1>USB ports</h1>
 <div class="pane card"><p class="sh">Map your USB ports</p>
-<p>macOS only uses 15 ports per USB controller and has no idea which ones your case actually has. 1401 watches the ports while you plug things in, then writes a map for the ports you select. Test them again after restarting, including USB-C both ways round and wake from sleep.</p>
+<p>macOS only uses 15 ports per USB controller and has no idea which ones your case actually has. Liberator watches the ports while you plug things in, then writes a map for the ports you select. Test them again after restarting, including USB-C both ways round and wake from sleep.</p>
 <ol class="todo">
 <li><b>Start watching.</b> <button type="button" class="b go" id="uw">Start</button></li>
-<li><b>Plug something into each port you use, one at a time.</b> A USB 3 stick is best; do each USB-C port both ways round. A port turns <span class="good">green</span> when 1401 sees it.</li>
+<li><b>Plug something into each port you use, one at a time.</b> A USB 3 stick is best; do each USB-C port both ways round. A port turns <span class="good">green</span> when Liberator sees it.</li>
 <li><b>Check the list</b>, pick the plug type for each port, and <button type="button" class="b go" id="uwr">Write the map</button> (macOS asks for your password; your OpenCore config is backed up first).</li>
 </ol>
 <p id="uerr" class="bad"></p></div>
@@ -141,13 +121,13 @@
 <section id="t-crash" hidden>
 <h1>Something still wrong?</h1>
 <div class="pane card"><p class="sh">Send logs</p>
-<p>1401 sends what it did, the driver's state, crash reports, OpenCore's startup logs and a numeric device map, with names, serial numbers and addresses removed. You get a report ID to post in the NullMoth Discord.</p>
+<p>Liberator sends what it did, the driver's state, crash reports, OpenCore's startup logs and a numeric device map, with names, serial numbers and addresses removed. You get a report ID to post in the NullMoth Discord.</p>
 <p class="row"><button type="button" class="b go" id="sl">Send logs to NullMoth</button> <button type="button" class="b" id="fl">Record the flicker</button></p>
-<p class="small">Record the flicker: press it while the screen flickers. 1401 records 20 seconds of how the driver puts frames on the display and sends it with your logs.</p>
+<p class="small">Record the flicker: press it while the screen flickers. Liberator records 20 seconds of how the driver puts frames on the display and sends it with your logs.</p>
 <p id="slr"></p></div>
 <div class="pane card"><p class="sh">Crash report</p>
-<p>If the driver ever crashes this Mac, 1401 asks at the next login whether to make a report. It is a text file on your Desktop with your hardware and what failed, with your name, your Mac's name, serial numbers, addresses and file paths taken out. <b>1401 never sends it by itself.</b></p>
-<p id="cr"></p>
+<p>If the driver ever crashes this Mac, Liberator asks at the next login whether to make a report. It is a text file on your Desktop with your hardware and what failed, with your name, your Mac's name, serial numbers, addresses and file paths taken out. <b>Liberator never sends it by itself.</b></p>
+<p id="crr"></p>
 <p class="row"><button type="button" class="b" id="mk">Make a report</button> <button type="button" class="b" id="up">Open the upload page</button> <button type="button" class="b" id="cf">Buy me a coffee</button> <button type="button" class="b" id="cr">Credits</button></p></div>
 <div class="pane card"><p class="sh">Optional diagnostics</p>
 <p>Capture is unavailable in this version. Send logs still collects hardware, kernel and panic evidence. No security settings have changed.</p>
