@@ -60,11 +60,11 @@ PB=/usr/libexec/PlistBuddy
 HERE=$(cd "$(dirname "$0")" && pwd)
 STAGED=OC-27-staged; KEPT=OC-26; DRIVER=NullMoth-v3; STATE=golden-gate.json; MANIFEST=v3-kit.json
 FROM_MAJOR=26; TARGET=27.2
-# One number for the room macOS 27 needs on the disk this macOS runs from, from the kit scripts' own figures: 45 GB
+# One number for the room macOS 27 needs on the disk this macOS runs from, from the kit scripts' own figures: 35 GB
 # for the new volumes, and 49 GB of work files while it runs (26 GB downloaded from Apple, 23 GB unpacked), which are
 # removed afterwards. The lay-down script checks the container and its work folder again, exactly, before it starts.
 # The kernel collections step needs 8 GB of work space of its own before that.
-MIN_DISK_GB=102
+MIN_DISK_GB=92
 # Where the kernel collections are made, and where the install step looks for them.
 KCWORK="/Library/Application Support/1401/golden-gate/kernel-collections"
 # Where the kit's lay-down keeps what it downloads (Apple's restore image, the Kernel Debug Kit) between runs.

@@ -244,25 +244,25 @@ with tempfile.TemporaryDirectory() as td:
     arm("a display device from no maker we have a driver for is refused, and named", rc == 1 and "FAIL no NVIDIA card the driver takes was found (found: none; other graphics: 1234:1111)" in out, out)
     rc, out = run("preflight", fx.efi, allk, *mac([], APPLE))
     arm("no graphics at all is refused", rc == 1 and "FAIL no NVIDIA card the driver takes was found (found: none)" in out, out)
-    rc, out = run("preflight", fx.efi, fx.kit_path, "--macos-major", "26", "--gpu-id", "2D05", "--disk-free-gb", "101", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS)
-    rc2, out2 = run("preflight", fx.efi, fx.kit_path, "--macos-major", "26", "--gpu-id", "2D05", "--disk-free-gb", "102", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS)
-    arm("room is one number, from the kit scripts' own figures: 102 GB passes, 101 GB is refused",
-        rc == 1 and "FAIL room for macOS 27: 101 GB free, 102 GB needed" in out and rc2 == 0, out + out2)
+    rc, out = run("preflight", fx.efi, fx.kit_path, "--macos-major", "26", "--gpu-id", "2D05", "--disk-free-gb", "91", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS)
+    rc2, out2 = run("preflight", fx.efi, fx.kit_path, "--macos-major", "26", "--gpu-id", "2D05", "--disk-free-gb", "92", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS)
+    arm("room is one number, from the kit scripts' own figures: 92 GB passes, 91 GB is refused",
+        rc == 1 and "FAIL room for macOS 27: 91 GB free, 92 GB needed" in out and rc2 == 0, out + out2)
     # A second try with the downloads kept: what is already downloaded is not needed again. The first real second try
-    # was refused with 88 GB free for the 102 GB a first try needs, while 26 GB of that was already on the disk.
+    # was refused with 88 GB free for the 102 GB a first try needed then, while 26 GB of that was already on the disk.
     lay = os.path.join(td, "lay-kept"); os.makedirs(lay); os.chmod(lay, 0o700)
     with open(os.path.join(lay, "UniversalMac_27.2_26B123_Restore.ipsw"), "wb") as fh:
         fh.truncate(26 * 1024 ** 3)
     with open(os.path.join(lay, "notes.txt"), "wb") as fh:
         fh.truncate(40 * 1024 ** 3)                      # not a download: counts for nothing
     kept = ["--macos-major", "26", "--gpu-id", "2D05", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS, "--lay-work", lay]
-    rc, out = run("preflight", fx.efi, fx.kit_path, *kept, "--disk-free-gb", "76")
-    rc2, out2 = run("preflight", fx.efi, fx.kit_path, *kept, "--disk-free-gb", "75")
-    arm("with the restore image kept from an earlier run, the room it takes is not asked for again: 76 GB is enough, 75 is not",
-        rc == 0 and "76 GB needed (26 GB is already downloaded)" in out and rc2 == 1 and "FAIL room for macOS 27: 75 GB free, 76 GB needed" in out2, out + out2)
+    rc, out = run("preflight", fx.efi, fx.kit_path, *kept, "--disk-free-gb", "66")
+    rc2, out2 = run("preflight", fx.efi, fx.kit_path, *kept, "--disk-free-gb", "65")
+    arm("with the restore image kept from an earlier run, the room it takes is not asked for again: 66 GB is enough, 65 is not",
+        rc == 0 and "66 GB needed (26 GB is already downloaded)" in out and rc2 == 1 and "FAIL room for macOS 27: 65 GB free, 66 GB needed" in out2, out + out2)
     os.symlink(os.path.join(lay, "notes.txt"), os.path.join(lay, "Kernel_Debug_Kit_27.2_build_26B123.dmg"))
-    rc, out = run("preflight", fx.efi, fx.kit_path, *kept, "--disk-free-gb", "76")
-    arm("a link in that folder is not counted as a download", rc == 0 and "76 GB needed (26 GB is already downloaded)" in out, out)
+    rc, out = run("preflight", fx.efi, fx.kit_path, *kept, "--disk-free-gb", "66")
+    arm("a link in that folder is not counted as a download", rc == 0 and "66 GB needed (26 GB is already downloaded)" in out, out)
     rc, out = run("preflight", fx.efi, fx.kit_path, "--macos-major", "15", "--gpu-id", "2D05", "--disk-free-gb", "110", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS)
     arm("Golden Gate starts from macOS 15 as well as 26", rc == 0 and "OK this Mac runs macOS 15; Golden Gate starts from macOS 15 or 26" in out, out)
     # what the later steps need from the running macOS is probed before anything is staged; a miss is said in one

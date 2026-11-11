@@ -13,7 +13,7 @@ Other boards, AMD processors and laptops are untried.
 ## What you need
 
 - A PC that already runs macOS 15 or macOS 26 through OpenCore, with the NullMoth NVIDIA driver working.
-- About 102 GB free on the macOS disk for a first run. About 27 GB of that is downloads, most of it macOS 27 from Apple.
+- About 92 GB free on the macOS disk for a first run. About 27 GB of that is downloads, most of it macOS 27 from Apple.
 - A wired network connection. Wi-Fi and Bluetooth do not work on macOS 27 yet.
 - About 30 minutes, plus the download.
 - A backup of anything you cannot lose.
