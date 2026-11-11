@@ -171,7 +171,16 @@ ocrel_in() {    # $1 = mount point; prints where OpenCore lives on it (EFI/OC, o
     for k in PlatformInfo.Generic.SystemProductName PlatformInfo.SMBIOS.SystemProductName PlatformInfo.DataHub.SystemProductName \
              NVRAM.Add.4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102.OCLP-Model; do
       cm=$(plutil -extract "$k" raw -o - "$c" 2>/dev/null); [ -n "$cm" ] && break; done
-    [ -n "$m" ] && [ -n "$cm" ] && [ "$cm" != "$m" ] && continue
+    if [ -n "$m" ] && [ -n "$cm" ] && [ "$cm" != "$m" ]; then
+      # After Golden Gate switched the startup files and before the first restart, EFI/OC holds the macOS 27 files
+      # (their model) and the files this Mac started from are kept beside them as EFI/OC-26. That partition is still
+      # this Mac's: a second run, Cancel and Remove must find it.
+      local kc="$1/EFI/OC-26/config.plist" km=""
+      [ "$d" = EFI/OC ] && [ -f "$1/EFI/golden-gate.json" ] && [ -f "$kc" ] || continue
+      for k in PlatformInfo.Generic.SystemProductName PlatformInfo.SMBIOS.SystemProductName PlatformInfo.DataHub.SystemProductName; do
+        km=$(plutil -extract "$k" raw -o - "$kc" 2>/dev/null); [ -n "$km" ] && break; done
+      [ "$km" = "$m" ] || continue
+    fi
     echo $d; return; done; }
 # Kexts the driver's OpenCore setup needs, pinned to the same files 1401 builds with (p1401/mirror.json).
 kurl() { case $1 in
