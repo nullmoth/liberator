@@ -61,4 +61,18 @@ for what, anchor in (('panics', '/Library/Logs/DiagnosticReports/*.panic'), ('Wi
     check(f'{what} are copied before the first log query (the 360 s limit cut them off in 72 uploads)', body.index(anchor) < first_query)
 check('the previous boot comes before the plugin and crash-window queries',
       body.index('previous-boot-kernel-log.txt') < body.index('driver-plugin-log.txt') < body.index('driver-crash-window.txt'))
+# The collector sends some files by name first and then every other file in the folder. A name in the first list
+# and not in the second pass's skip list is sent twice, and the app rejects a whole report that holds a name twice
+# ("The collector returned an invalid file"): Beta 1 reports from any Mac that had run Golden Gate arrived without
+# their macOS 27 section because golden-gate.txt was in the first list only.
+import re
+by_name = re.search(r'^for name in ([^;]+); do emit', src, re.M)
+skipped = re.search(r'case "\$\{file##\*/\}" in ([^)]+)\) continue', src)
+if not by_name or not skipped:
+    sys.exit('capture script changed shape (the two file lists) - check is UNKNOWN, not clean')
+first, second = set(by_name.group(1).split()), set(skipped.group(1).split('|'))
+check('every file sent by name is skipped in the second pass, so no file is sent twice', first == second,
+      'sent twice: ' + ', '.join(sorted(first - second)) if first - second else 'skipped but never sent by name: ' + ', '.join(sorted(second - first)))
+control = set(skipped.group(1).replace('golden-gate.txt|', '').split('|'))
+check('control: with golden-gate.txt left out of the skip list (as Beta 1 shipped) the same comparison fails', first != control)
 sys.exit(1 if fails else 0)

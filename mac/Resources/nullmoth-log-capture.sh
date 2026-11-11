@@ -68,7 +68,7 @@ emit() {
 for name in hardware-map.json driver-state.txt macos27-state.txt golden-gate.txt driver-kernel-log.txt driver-display.txt previous-boot-kernel-log.txt display-trace.txt display-kernel.txt display-ws.txt driver-plugin-log.txt driver-crash-window.txt collect.txt driver-update-log.txt; do emit "$TASK/files/$name" || break; done
 if /usr/bin/find "$TASK/files" -maxdepth 1 -type f -print | /usr/bin/sort > "$TASK/file-list.txt"; then
     while IFS= read -r file; do
-        case "${file##*/}" in hardware-map.json|driver-state.txt|macos27-state.txt|driver-kernel-log.txt|driver-display.txt|previous-boot-kernel-log.txt|display-trace.txt|display-kernel.txt|display-ws.txt|driver-plugin-log.txt|driver-crash-window.txt|collect.txt|driver-update-log.txt) continue;; esac
+        case "${file##*/}" in hardware-map.json|driver-state.txt|macos27-state.txt|golden-gate.txt|driver-kernel-log.txt|driver-display.txt|previous-boot-kernel-log.txt|display-trace.txt|display-kernel.txt|display-ws.txt|driver-plugin-log.txt|driver-crash-window.txt|collect.txt|driver-update-log.txt) continue;; esac
         emit "$file" || break
     done < "$TASK/file-list.txt"
 else warn read-failed; fi
