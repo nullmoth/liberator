@@ -1,65 +1,54 @@
-# 1401
+# Liberator
 
-Install macOS on the PC you already own: the reverse of Boot Camp. 1401 runs on Windows, checks your hardware, builds
-an OpenCore setup for it and writes a macOS install stick. It is free and open source.
+Liberator moves an OpenCore PC with an NVIDIA card from macOS 15 or 26 to macOS 27, and sets up the NullMoth NVIDIA
+driver there. It is a Mac app with one main button: **Prepare for Golden Gate**.
 
-- Download: [releases page](https://github.com/nullmoth/1401/releases) (`1401-Windows-<version>.zip`)
+This is a beta. macOS 27 has been started this way on one desktop PC: an Intel processor with an RTX 50-series card.
+Other boards, AMD processors and laptops are untried.
+
 - Changes: [CHANGELOG.md](CHANGELOG.md)
-- Problems: [troubleshooting](docs/TROUBLESHOOTING.md)
-- How it works: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
-- NVIDIA driver for macOS: [nvidia-macos-driver](https://github.com/nullmoth/nvidia-macos-driver)
+- NVIDIA driver for macOS 15 and 26: [nvidia-macos-driver](https://github.com/nullmoth/nvidia-macos-driver)
+- Building the first macOS install on a PC: [1401](https://github.com/nullmoth/1401)
 
-1401 has been tested end to end on a small number of PCs, so expect problems on others. If it doesn't work on yours,
-the [OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/) covers setting OpenCore up by hand.
+## What you need
+
+- A PC that already runs macOS 15 or macOS 26 through OpenCore, with the NullMoth NVIDIA driver working.
+- About 102 GB free on the macOS disk for a first run. About 27 GB of that is downloads, most of it macOS 27 from Apple.
+- A wired network connection. Wi-Fi and Bluetooth do not work on macOS 27 yet.
+- About 30 minutes, plus the download.
+- A backup of anything you cannot lose.
 
 ## Using it
 
-1. Unzip the release and keep the `1401` folder together. Run `1401.exe` as administrator (it reads the hardware and
-   writes the stick).
-2. Click Check this PC, Build the Mac setup, read Your BIOS steps, then Create the macOS stick. You need a USB stick of
-   4 GB or more that can be erased, and an internet connection.
-3. Restart, change the BIOS settings 1401 showed you, boot the stick and pick the macOS installer in the OpenCore menu.
-   In Disk Utility, erase only the partition or disk meant for macOS (APFS), never a disk with Windows or data you
-   want to keep. Then choose Reinstall macOS; the rest of macOS downloads from Apple.
-4. With an NVIDIA card (GTX 16 or newer): once macOS is running, open the `NullMoth` folder on the stick and run
-   1401.app, or download `1401-Mac-<version>.dmg` from the driver's releases page. It installs the driver and updates
-   the OpenCore settings on the stick. Keep the stick plugged in: OpenCore on it is what starts macOS.
+1. Open Liberator on macOS 15 or 26.
+2. Leave **Set up as a new Mac instead** unticked to bring your account over (name, password, administrator rights;
+   not the files in your home folder). Tick it to start at Apple's setup instead.
+3. Press **Prepare for Golden Gate** and confirm once. Liberator checks the PC, downloads what it needs, builds the
+   startup files macOS 27 needs on this PC, puts macOS 27 on its own new volumes beside your current macOS, sets it
+   up, and makes macOS 27 the default at startup.
+4. When it says it is done, restart. The start text pauses at "PCI configuration" for up to two minutes. Wait.
 
-5. Something went wrong? If the build fails, 1401 shows why and sends the log to nullmothsystems.com after telling you
-   (Cancel keeps it on your PC). If macOS does not start from the stick, boot back into Windows, plug the stick in and open
-   1401, or click **Scan for logs and send them**: the stick holds OpenCore's and macOS's startup logs and 1401 sends them.
-   Quote the report ID it shows when you ask for help.
+If it stops part-way, press the button again. Steps that finished are not repeated and the downloads are kept.
 
-## What 1401 changes compared with the engine it builds on
+## Going back
 
-1401 builds with [OpCore-Simplify](https://github.com/lzhoang2801/OpCore-Simplify) and then applies its own rules.
-Every rule that fires is recorded in the build result.
+Your current macOS is not changed. In the OpenCore boot picker choose your macOS 15 or 26 disk, open Liberator
+there, and press **Cancel Golden Gate** to put the old startup files back, or **Remove macOS 27** to also erase the
+macOS 27 volumes Liberator made.
 
-| Rule | What it does |
-|---|---|
-| `sip-minimal` | SIP stays on unless a chosen feature needs it lowered, and then only as far as that feature needs |
-| `tahoe-weg-amd`, `tahoe-weg-args` | macOS 26 with an AMD card: WhateverGreen removed (it panics on 26), its boot arguments stripped |
-| `tahoe-intel-bt` | macOS 26 with Intel Bluetooth: `-ibtcompatbeta` |
-| `arrow-lake-ctr`, `arrow-lake-ctrsmt` | Core Ultra 200 (Arrow Lake): CpuTopologyRebuild and `ctrsmt` off, matching a config that installs and runs macOS 15 on that CPU |
-| `boot-logs-on-stick` | OpenCore writes its log, Apple's boot log and any macOS panic to the stick, so a PC that never reaches macOS can still report why |
-| `keep-boot-args` | the stick never overwrites the boot arguments of a machine that already runs macOS |
-| `nullmoth-boot-args`, `nullmoth-sip` | NVIDIA card in the driver's table: macOS 15, the driver's boot arguments, SIP `0x0A43` |
-| `nullmoth-installer-bar` | NVIDIA card: small BAR for the installer (`ResizeAppleGpuBars 0`, `ResizeGpuBars -1`) so its screen survives PCI setup; the Mac app restores the full BAR after install |
+## Known limits of this beta
 
-## Tests
+- No Wi-Fi and no Bluetooth on macOS 27.
+- Books, Journal, Maps, Reminders and Voice Memos do not work yet.
+- The Dock and other glass surfaces can look flat and dark.
+- A run that fails after the system copy can leave one extra volume named "Macintosh HD" in the same container.
+  Delete it in Disk Utility before the next try.
 
-```bash
-python3 tests/corpus/fetch.py          # public Hardware Sniffer reports, pinned by commit
-python3 tests/run_corpus.py build      # build + rules + ocvalidate for every machine in the corpus
-python3 -m p1401.selftest && python3 -m p1401.guide --selftest && python3 -m p1401.apple --selftest \
-  && python3 -m p1401.usbwriter --selftest && python3 -m p1401.scan --selftest && python3 -m p1401.nullmoth --selftest
-```
+## If something goes wrong
 
-`loader/` is an experimental UEFI boot layer (Rust) tested in QEMU only. The app does not use it; sticks boot with
-OpenCore.
+Start your macOS 15 or 26 from the boot picker and press **Send a report** in Liberator. It can read the macOS 27
+logs from there, so this works when macOS 27 never reached its desktop. Quote the report ID when you ask for help.
 
-## Legal
+## Licence
 
-1401 is free of charge, forever, under the **PolyForm Noncommercial License 1.0.0** (`LICENSE`): use it, change it,
-share it, but nobody may sell it or use it to make money. Third-party parts keep their own licences (`NOTICE.md`).
-The NullMoth name and the moth logo belong to NullMoth Systems and are not licensed.
+See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).

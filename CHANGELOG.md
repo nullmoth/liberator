@@ -1,5 +1,12 @@
 # Changelog
 
+## Liberator 1.0.0 beta 1
+- First release. One button, Prepare for Golden Gate, moves an OpenCore PC with an NVIDIA card from macOS 15 or 26 to macOS 27.2: it downloads macOS 27 from Apple, builds the Intel startup files, puts macOS 27 on its own volumes beside the current macOS, installs the NullMoth driver for macOS 27 and the layer that runs Apple's arm64-only programs on Intel, and makes macOS 27 the startup default.
+- Your current macOS is kept. Cancel Golden Gate puts its startup files back; Remove macOS 27 also erases the new volumes.
+- Tested on one desktop PC (Intel processor, RTX 50-series card). No Wi-Fi or Bluetooth on macOS 27 yet.
+
+Entries below are from 1401, which Liberator started from.
+
 Each release also bundles the NVIDIA driver and Mac app of the same version; see the
 [driver changelog](https://github.com/nullmoth/nvidia-macos-driver/blob/main/CHANGELOG.md).
 
