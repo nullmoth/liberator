@@ -195,6 +195,55 @@ with tempfile.TemporaryDirectory() as td:
     rc2, out2 = run("preflight", fx.efi, none, *pc("2D05"))
     arm("a kit that names no cards still accepts every card the driver takes, and words the notice from this app's own record",
         rc == 0 and "(so far: NVIDIA GeForce RTX 5060 (2D05))" in out and rc2 == 0 and "has not been run on" not in out2, out + out2)
+
+    # 2c. graphics other than NVIDIA. Three paths: the NVIDIA driver, Apple's own AMD and Intel drivers (real Macs,
+    # and the Radeon cards Apple shipped), 1401's AMD and Intel test drivers. A path is offered only when the kit
+    # says it carries macOS 27 graphics for it; a kit that says nothing is an NVIDIA kit.
+    def mac(displays, apple=(), card=None):
+        a = ["--macos-major", "26", "--disk-free-gb", "110", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS]
+        a += ["--gpu-id", card] if card else ["--apple-id", "0000:0000"]
+        for d in displays:
+            a += ["--display", d]
+        for i in apple:
+            a += ["--apple-id", i]
+        return a
+
+    def kit_with(name, paths):
+        k = os.path.join(td, name)
+        shutil.copytree(fx.kit_path, k)
+        m = json.load(open(os.path.join(k, v3_macos27.MANIFEST)))
+        m["graphics"] = paths
+        json.dump(m, open(os.path.join(k, v3_macos27.MANIFEST), "w"))
+        return k
+
+    allk, applek = kit_with("kit-all", ["nvidia", "apple", "test"]), kit_with("kit-apple", ["nvidia", "apple"])
+    POLARIS, UHD630, XE, RX7600 = "1002:67DF", "8086:3E92", "8086:9A49", "1002:7480"
+    APPLE = (POLARIS, UHD630, "1002:7340")
+    rc, out = run("preflight", fx.efi, fx.kit_path, *mac([POLARIS], APPLE))
+    arm("today's kit (names no graphics paths) still refuses a Mac on Apple's AMD driver, and says what it found and what the kit carries",
+        rc == 1 and out.count("FAIL ") == 1 and "FAIL this Mac has AMD graphics (1002:67DF), which Apple's own driver in this macOS runs; "
+        "this kit has no macOS 27 graphics for it yet (it carries: nvidia)" in out and tree(fx.efi) == before, out)
+    rc, out = run("preflight", fx.efi, applek, *mac([POLARIS], APPLE))
+    arm("a kit that carries Apple's drivers accepts a Mac with a Radeon Apple shipped, on the apple path, and says it is untried",
+        rc == 0 and "FAIL" not in out and "OK this Mac has AMD graphics (1002:67DF), which Apple's own driver in this macOS runs, and this kit carries macOS 27 graphics for it" in out
+        and "NOTE graphics path: apple" in out and "macOS 27 has not been started on AMD graphics with this kit yet" in out and out.count(SEND) == 1, out)
+    rc, out = run("preflight", fx.efi, applek, *mac([UHD630], APPLE))
+    arm("the same kit accepts a Mac whose only graphics are Intel's on Apple's driver", rc == 0 and "Intel graphics (8086:3E92), which Apple's own driver" in out and "NOTE graphics path: apple" in out, out)
+    rc, out = run("preflight", fx.efi, applek, *mac([XE], APPLE))
+    arm("that kit refuses Intel graphics only a test driver runs, naming the test path", rc == 1 and out.count("FAIL ") == 1
+        and "Intel graphics (8086:9A49), which 1401's test driver runs; this kit has no macOS 27 graphics for it yet (it carries: nvidia, apple)" in out, out)
+    rc, out = run("preflight", fx.efi, allk, *mac([XE], APPLE))
+    arm("a kit that carries the test drivers accepts Intel processor graphics on the test path", rc == 0 and "NOTE graphics path: test" in out and "FAIL" not in out, out)
+    rc, out = run("preflight", fx.efi, allk, *mac([RX7600], APPLE))
+    arm("and an AMD card Apple never shipped, on the test path", rc == 0 and "AMD graphics (1002:7480), which 1401's test driver runs" in out and "NOTE graphics path: test" in out, out)
+    rc, out = run("preflight", fx.efi, allk, *mac([XE, POLARIS], APPLE))
+    arm("with both kinds present, the chip on Apple's own driver is the one chosen", rc == 0 and "NOTE graphics path: apple" in out and "1002:67DF" in out, out)
+    rc, out = run("preflight", fx.efi, allk, *mac([XE, POLARIS], APPLE, card="2D05"))
+    arm("an NVIDIA card the driver takes still wins over both", rc == 0 and "NOTE graphics path: nvidia" in out and "OK NVIDIA card NVIDIA GeForce RTX 5060 (2D05)" in out and "test driver" not in out, out)
+    rc, out = run("preflight", fx.efi, allk, *mac(["1234:1111"], APPLE))
+    arm("a display device from no maker we have a driver for is refused, and named", rc == 1 and "FAIL no NVIDIA card the driver takes was found (found: none; other graphics: 1234:1111)" in out, out)
+    rc, out = run("preflight", fx.efi, allk, *mac([], APPLE))
+    arm("no graphics at all is refused", rc == 1 and "FAIL no NVIDIA card the driver takes was found (found: none)" in out, out)
     rc, out = run("preflight", fx.efi, fx.kit_path, "--macos-major", "26", "--gpu-id", "2D05", "--disk-free-gb", "101", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS)
     rc2, out2 = run("preflight", fx.efi, fx.kit_path, "--macos-major", "26", "--gpu-id", "2D05", "--disk-free-gb", "102", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS)
     arm("room is one number, from the kit scripts' own figures: 102 GB passes, 101 GB is refused",

@@ -85,6 +85,7 @@ MODEL_RTX50=Mac17,15
 
 STEP=${1:-}; [ $# -gt 0 ] && shift
 ROOT=""; KIT=""; CONFIRM=0; MAJOR=""; GPUS=""; GPUS_GIVEN=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0
+DISPLAYS=""; DISPLAYS_GIVEN=0; APPLEIDS=""; APPLEIDS_GIVEN=0
 DISKUTIL=/usr/sbin/diskutil; TOOLS=""
 KITMODEL=0; CPUV=""; LAPTOP=""; ACCOUNT=""
 # Every step's lines also go to one log on this macOS: a step that stopped can be read afterwards, Send logs takes
@@ -98,6 +99,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --disk-free-gb) DISK_GB=${2:-}; shift;; --device-id) DEVIDS="$DEVIDS ${2:-}"; DEVIDS_GIVEN=1; shift;;
   --diskutil) DISKUTIL=${2:-}; shift;; --tools) TOOLS=${2:-}; shift;; --kc-work) KCWORK=${2:-}; shift;; --lay-work) LAYWORK=${2:-}; shift;; --preboot) PREBOOT=${2:-}; shift;; --step-log) STEPLOG=${2:-}; shift;;
   --cpu-vendor) CPUV=${2:-}; shift;; --laptop) LAPTOP=${2:-}; shift;;
+  --display) DISPLAYS="$DISPLAYS ${2:-}"; DISPLAYS_GIVEN=1; shift;; --apple-id) APPLEIDS="$APPLEIDS ${2:-}"; APPLEIDS_GIVEN=1; shift;;
   # test-hook-end
   *) echo "STOP unknown option $1"; echo "RESULT stop"; exit 2;; esac; shift; done
 step() { echo "STEP $*"; }; ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }
@@ -240,6 +242,22 @@ is_1401_efi() {
   [ -f "$C" ] || return 1
   plutil -convert xml1 -o - "$C" 2>/dev/null | grep -Eq '<string>1401( \||:)'
 }
+# A real Mac starts macOS 26 from OpenCore files 1401 did not build (OpenCore Legacy Patcher writes them). What tells
+# a real Mac from a PC, in the files themselves: a PC cannot start macOS without a kext that stands in for Apple's
+# SMC chip, and a Mac has the chip, so its config loads none. The config must still be a whole OpenCore config.
+is_mac_efi() {
+  [ -f "$C" ] || return 1
+  plutil -extract Kernel.Add raw -o - "$C" >/dev/null 2>&1 || return 1
+  plutil -extract PlatformInfo raw -o - "$C" >/dev/null 2>&1 || return 1
+  ! plutil -convert xml1 -o - "$C" 2>/dev/null | awk '
+      /<key>BundlePath<\/key>/ { getline; b = $0 } /<key>Enabled<\/key>/ { getline; if ($0 ~ /<true\/>/ && b ~ /(VirtualSMC|FakeSMC)\.kext<\/string>/) f = 1 }
+      /<\/dict>/ { b = "" } END { exit !f }'
+}
+startup_ok() {   # sets EFIKIND to 1401 or mac
+  if is_1401_efi; then EFIKIND=1401; return 0; fi
+  if is_mac_efi; then EFIKIND=mac; return 0; fi
+  return 1
+}
 nvidia_ids() {   # device IDs of the NVIDIA cards on the PCI bus, upper-case
   ioreg -c IOPCIDevice -r -d 1 -l -w 0 2>/dev/null | awk '
     function flush() { if (v == "de100000" && d != "") print toupper(substr(d, 3, 2) substr(d, 1, 2)); v = ""; d = "" }
@@ -248,6 +266,33 @@ nvidia_ids() {   # device IDs of the NVIDIA cards on the PCI bus, upper-case
     /"device-id" = </ { s = $0; sub(/.*</, "", s); sub(/>.*/, "", s); d = s }
     END { flush() }'
 }
+# Graphics other than NVIDIA. macOS 27 has no Intel-side graphics drivers of its own, so each chip needs a package
+# in the kit, and there are two kinds: chips Apple's own drivers in this macOS run (every real Intel Mac that starts
+# macOS 26 without added drivers, and the Radeon cards Apple shipped), and chips 1401's test drivers run on a PC
+# (other Radeon cards, AMD and Intel processor graphics). Which chips Apple's drivers take is read from this
+# macOS's own drivers, never from a list kept here: a list would go stale with the next macOS update.
+display_ids() {  # VVVV:DDDD of every display-class PCI device (class 03), upper-case
+  ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk -F'<|>' '
+    function out() { if (c == "03" && v != "" && d != "") print toupper(v ":" d) }
+    /\+-o / { out(); c = ""; v = ""; d = "" }
+    /"vendor-id" =/ { v = substr($2, 3, 2) substr($2, 1, 2) } /"device-id" =/ { d = substr($2, 3, 2) substr($2, 1, 2) }
+    /"class-code" =/ { c = substr($2, 5, 2) }
+    END { out() }' | sort -u
+}
+apple_graphics_ids() {  # VVVV:DDDD of every AMD and Intel chip a graphics driver of this macOS matches
+  local k
+  for k in /System/Library/Extensions/AMD*.kext /System/Library/Extensions/AppleIntel*Graphics*.kext; do
+    [ -f "$k/Contents/Info.plist" ] && plutil -p "$k/Contents/Info.plist" 2>/dev/null
+  done | grep -oE '0x[0-9A-Fa-f]{4}(1002|8086)' | awk '{ print toupper(substr($0, 7, 4) ":" substr($0, 3, 4)) }' | sort -u
+}
+kit_carries() {  # $1 = nvidia, apple or test: does this kit carry macOS 27 graphics for that path
+  local n i; n=$(kv graphics) || n=""
+  case "$n" in ''|*[!0-9]*) [ "$1" = nvidia ]; return;; esac   # a kit that names none is an NVIDIA kit
+  i=0; while [ "$i" -lt "$n" ]; do [ "$(kv graphics.$i)" = "$1" ] && return 0; i=$((i + 1)); done; return 1
+}
+kit_paths() { local n i out=""; n=$(kv graphics) || n=""; case "$n" in ''|*[!0-9]*) echo nvidia; return;; esac
+  i=0; while [ "$i" -lt "$n" ]; do out="$out, $(kv graphics.$i)"; i=$((i + 1)); done; printf '%s' "${out#, }"; }
+chip_maker() { case "${1%%:*}" in 1002) echo AMD;; 8086) echo Intel;; 10DE) echo NVIDIA;; *) echo "${1%%:*}";; esac; }
 bluetooth_ids() {  # VVVV-PPPP of USB devices in the wireless-controller class (224), which Bluetooth adapters use
   ioreg -p IOUSB -l -w 0 2>/dev/null | awk '
     function flush() { if (c == 224 && v != "") printf "%04X-%04X\n", v, p; v = ""; p = 0; c = -1 }
@@ -411,7 +456,11 @@ put_on_data() {
 kc_folder_trusted() { [ -d "$KCWORK" ] && [ ! -L "$KCWORK" ] && chain_trusted "$KCWORK" && tree_trusted "$KCWORK"; }
 kc_sums() { ( cd "$KCWORK" 2>/dev/null && shasum -a 256 BootKernelExtensions.kc SystemKernelExtensions.kc 2>/dev/null ); }
 packages_or_stop() {   # the kit's two packages, in its private copy: PAY/inst the driver's, SPAY/sinst the system's
-  ddir=$(kv driver.dir); inst=$(kv driver.installer)
+  # the graphics package follows the graphics this machine starts on: the NVIDIA driver's, or the one the kit
+  # carries for Apple's own AMD and Intel drivers (driver_apple) or for the test drivers (driver_test)
+  dkey=driver; stage_path
+  case "$GFX" in apple|test) khas "driver_$GFX.dir" || stop "the v3 kit carries no macOS 27 graphics package for this Mac's graphics ($GFX). Nothing was changed"; dkey="driver_$GFX";; esac
+  ddir=$(kv $dkey.dir); inst=$(kv $dkey.installer)
   case "$ddir" in ''|*/*|.*) stop "the v3 kit carries no driver package. Nothing was changed";; esac
   case "$inst" in ''|*/*|.*) stop "the v3 kit carries no driver package. Nothing was changed";; esac
   PAY="$KIT/$ddir"
@@ -441,6 +490,32 @@ entry_json() {   # $1 = kit kext index
     "$name" "$com" "$exe" "$max" "$min"
 }
 sets() { plutil -replace "$1" -string "$2" "$AC" 2>/dev/null || plutil -insert "$1" -string "$2" "$AC"; }
+# Which graphics this machine starts macOS 27 on, for staging: nvidia, apple, test, or empty when none is known
+# (an empty answer stages as an NVIDIA PC does, which is what every kit before these paths did).
+stage_path() {
+  local g d; GFX=""
+  [ $GPUS_GIVEN = 1 ] || GPUS=$(nvidia_ids)
+  for g in $GPUS; do card_supported "$(upper "$g")" && { GFX=nvidia; return 0; }; done
+  if [ $DISPLAYS_GIVEN = 0 ] && [ $GPUS_GIVEN = 0 ]; then DISPLAYS=$(display_ids); fi
+  if [ $APPLEIDS_GIVEN = 0 ] && [ $GPUS_GIVEN = 0 ]; then APPLEIDS=$(apple_graphics_ids); fi
+  for d in $DISPLAYS; do d=$(upper "$d")
+    case "$d" in 1002:*|8086:*) ;; *) continue;; esac
+    if printf '%s\n' $APPLEIDS | tr '[:lower:]' '[:upper:]' | grep -qx "$d"; then GFX=apple; return 0; fi
+    [ -n "$GFX" ] || GFX=test
+  done
+}
+in_kit_list() {  # $1 = manifest key of a list of strings, $2 = the string
+  local n i; n=$(kv "$1") || return 1
+  case "$n" in ''|*[!0-9]*) return 1;; esac
+  i=0; while [ "$i" -lt "$n" ]; do [ "$(kv "$1.$i")" = "$2" ] && return 0; i=$((i + 1)); done; return 1
+}
+# A kit kext or boot argument the kit marks for another kind of machine is left out: the NVIDIA kernel driver and its
+# arguments on a machine that starts on other graphics, and what only a PC needs (its SMC stand-in's argument) on a Mac.
+not_for_this() {
+  case "$GFX" in apple|test) in_kit_list only.nvidia "$1" && return 0;; esac
+  [ "$EFIKIND" = mac ] && in_kit_list only.pc "$1" && return 0
+  return 1
+}
 NOT27=""; NOTABLES=0     # what apply_kit reports: kexts kept off macOS 27, and identity tables it could not write
 apply_kit() {    # $1 = the OC folder to change
   local oc=$1 n i name when pos idx have p m li j key type val parent args a added s0 u0 hex fresh k b
@@ -450,6 +525,7 @@ apply_kit() {    # $1 = the OC folder to change
   while [ "$i" -lt "$n" ]; do
     name=$(kv kexts.$i.name); when=$(kv kexts.$i.when); [ -n "$when" ] || when=always
     pos=$(kv kexts.$i.position); [ -n "$pos" ] || pos=end
+    if not_for_this "$name"; then i=$((i + 1)); continue; fi
     idx=$(index_of "$name") || idx=""
     if [ "$when" = present ] && [ -z "$idx" ]; then i=$((i + 1)); continue; fi
     if [ "$when" = ids ] && [ -z "$idx" ]; then
@@ -542,6 +618,7 @@ EOF
   args=$(cget "NVRAM.Add.$NV.boot-args"); added=""
   m=$(kv boot_args); j=0
   while [ "$j" -lt "$m" ]; do a=$(kv boot_args.$j)
+    if not_for_this "$a"; then j=$((j + 1)); continue; fi
     case " $BOOT_ARGS_ALLOWED " in *" $a "*) ;; *) bad "a boot argument 1401 will not write"; return 1;; esac
     # name=value: a value the PC's own config gives that name is replaced, so the name is there once
     case "$a" in *=*) local kept="" t; for t in $args; do case "$t" in "${a%%=*}="*) [ "$t" = "$a" ] && kept="$kept $t";; *) kept="$kept $t";; esac; done; args=${kept# };; esac
@@ -552,6 +629,8 @@ EOF
 
   if khas set; then
     while IFS= read -r key; do [ -n "$key" ] || continue
+      # a real Mac keeps the model its own firmware gives it: the kit's model is the identity a PC is given
+      if [ "$EFIKIND" = mac ] && [ "$key" = PlatformInfo/Generic/SystemProductName ]; then continue; fi
       p=$(printf '%s' "$key" | tr / .); parent=${p%.*}
       [ "$(plutil -type "$parent" "$AC" 2>/dev/null)" = dictionary ] || { bad "the config has no $(printf '%s' "$parent" | tr . /) to set ${p##*.} in"; return 1; }
       type=$(plutil -type "set.$key" "$KIT/$MANIFEST" 2>/dev/null); val=$(kv "set.$key")
@@ -597,6 +676,9 @@ EOF
     local keep=" " exe
     j=0; while [ "$j" -lt "$m" ]; do keep="$keep$(kv known_27.$j) "; j=$((j + 1)); done
     n=$(kv kexts); j=0; while [ "$j" -lt "$n" ]; do keep="$keep$(kv kexts.$j.name) "; j=$((j + 1)); done
+    # a Mac's own hardware kexts the kit names as known to load on macOS 27 (its Ethernet, its processor's power management)
+    if [ "$EFIKIND" = mac ]; then n=$(kv known_27_mac) || n=0; case "$n" in ''|*[!0-9]*) n=0;; esac
+      j=0; while [ "$j" -lt "$n" ]; do keep="$keep$(kv known_27_mac.$j) "; j=$((j + 1)); done; fi
     n=$(cget Kernel.Add); i=0
     while [ "$i" -lt "$n" ]; do
       name=$(bundle_at "$i"); exe=$(cget "Kernel.Add.$i.ExecutablePath")
@@ -678,16 +760,44 @@ preflight)
   [ $GPUS_GIVEN = 1 ] || GPUS=$(nvidia_ids)
   hit=""; for g in $GPUS; do g=$(upper "$g"); card_supported "$g" && { hit=$g; break; }; done
   UNTRIED=""
+  GFX=""
   if [ -n "$hit" ]; then check 0 "NVIDIA card $(card_name "$hit") ($hit) is one the driver takes"
     card_tried "$hit" || UNTRIED="macOS 27 has not been run on $(card_name "$hit") yet (so far: $(cards_tried)). This is a beta: it may not start"
-  else check 1 "no NVIDIA card the driver takes was found (found:${GPUS:- none})"; fi
+    GFX=nvidia
+  else
+    # No NVIDIA card the driver takes: an AMD or Intel chip may still be one macOS 27 can be offered for. A chip on
+    # Apple's own driver is preferred over one on a test driver (a Mac with both starts on Apple's).
+    GFX=""; CHIP=""
+    if [ $DISPLAYS_GIVEN = 0 ] && [ $GPUS_GIVEN = 0 ]; then DISPLAYS=$(display_ids); fi
+    if [ $APPLEIDS_GIVEN = 0 ] && [ $GPUS_GIVEN = 0 ]; then APPLEIDS=$(apple_graphics_ids); fi
+    for d in $DISPLAYS; do d=$(upper "$d")
+      case "$d" in 1002:*|8086:*) ;; *) continue;; esac
+      if printf '%s\n' $APPLEIDS | tr '[:lower:]' '[:upper:]' | grep -qx "$d"; then GFX=apple; CHIP=$d; break; fi
+      [ -n "$GFX" ] || { GFX=test; CHIP=$d; }
+    done
+    case "$GFX" in
+      apple) what="$(chip_maker "$CHIP") graphics ($CHIP), which Apple's own driver in this macOS runs";;
+      test)  what="$(chip_maker "$CHIP") graphics ($CHIP), which 1401's test driver runs";;
+    esac
+    if [ -z "$GFX" ]; then check 1 "no NVIDIA card the driver takes was found (found:${GPUS:- none}${DISPLAYS:+; other graphics:$DISPLAYS})"
+    elif kit_carries "$GFX"; then check 0 "this Mac has $what, and this kit carries macOS 27 graphics for it"
+      UNTRIED="macOS 27 has not been started on $(chip_maker "$CHIP") graphics with this kit yet. This is a beta: it may not start"
+    else check 1 "this Mac has $what; this kit has no macOS 27 graphics for it yet (it carries: $(kit_paths)). No NVIDIA card the driver takes was found (found:${GPUS:- none})"
+    fi
+  fi
+  [ -z "$GFX" ] || note "graphics path: $GFX"
   # A kind of PC macOS 27 has not been started on yet is said, not refused: every PC that 1401 builds for and the
   # driver runs on under macOS 26 may try it.
   [ -n "$CPUV" ] || CPUV=$(sysctl -n machdep.cpu.vendor 2>/dev/null)
   case "$CPUV" in *AMD*) UNTRIED="${UNTRIED:+$UNTRIED. }macOS 27 with this kit has not been started on a PC with an AMD processor yet";; esac
   [ -n "$LAPTOP" ] || { if ioreg -rc AppleSmartBattery 2>/dev/null | grep -q '"BatteryInstalled" = Yes'; then LAPTOP=yes; else LAPTOP=no; fi; }
   [ "$LAPTOP" != yes ] || UNTRIED="${UNTRIED:+$UNTRIED. }macOS 27 with this kit has not been started on a laptop yet; its built-in screen and its switch between two graphics chips are untried"
-  [ -f "$C" ] && is_1401_efi; check $? "the startup files at $EFI/OC are a 1401 build"
+  EFIKIND=""
+  if [ -f "$C" ] && startup_ok; then
+    if [ "$EFIKIND" = mac ]; then check 0 "the startup files at $EFI/OC are a Mac's own OpenCore files (not a 1401 build)"
+      UNTRIED="${UNTRIED:+$UNTRIED. }macOS 27 with this kit has not been started on a real Mac yet"
+    else check 0 "the startup files at $EFI/OC are a 1401 build"; fi
+  else check 1 "the startup files at $EFI/OC are a 1401 build"; fi
   if [ -f "$C" ]; then
     need=$(stage_need_kb); free=$(free_kb "$ROOT")
     [ -n "$free" ] && [ "$free" -ge "$need" ]; check $? "room on the startup partition: $(( ${free:-0} / 1024 )) MB free, $((need / 1024)) MB needed"
@@ -738,13 +848,14 @@ stage)
   step "Staging the macOS 27 startup files beside the macOS 26 ones"
   state_or_stop
   [ "$ST" = none ] || stop "Golden Gate is already $ST on this partition; cancel it first to stage again"
-  is_1401_efi || stop "the startup files here were not made by 1401. Nothing was changed"
+  startup_ok || stop "the startup files here were not made by 1401. Nothing was changed"
   need=$(stage_need_kb); free=$(free_kb "$ROOT")
   [ -n "$free" ] && [ "$free" -ge "$need" ] || stop "the startup partition has $(( ${free:-0} / 1024 )) MB free and the macOS 27 copy needs $((need / 1024)) MB. Nothing was changed"
   # the copy is changed in a scratch folder and moved into place in one rename, so a stopped run leaves no half-made folder
   SCR="$EFI/.golden-gate-scratch"; rm -rf "$SCR"
   undo() { rm -rf "$SCR" "$EFI/$STAGED" "$ROOT/$DRIVER"; }
   mkdir "$SCR" && cp -R "$EFI/OC" "$SCR/OC" || { undo; stop "could not copy the startup files. EFI/OC is unchanged"; }
+  stage_path
   apply_kit "$SCR/OC" || { undo; stop "the macOS 27 startup files could not be staged ($WHY). EFI/OC is unchanged"; }
   mv "$SCR/OC" "$EFI/$STAGED" || { undo; stop "could not place the staged folder. EFI/OC is unchanged"; }
   rm -rf "$SCR"
@@ -772,9 +883,11 @@ stage)
   fi
   write_state staged "$DNOTE" "$DINST" "$SNOTE" || { undo; stop "could not record the state. EFI/OC is unchanged"; }
   ok "macOS 27 startup files staged at EFI/$STAGED; this Mac still starts from EFI/OC"
-  note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"
+  if [ "$EFIKIND" = mac ]; then note "model: this Mac's own (not changed)"
+  else note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"; fi
+  [ -z "$GFX" ] || note "graphics path: $GFX"
   for k in $NOT27; do note "$k was never run on macOS 27: it stays on macOS 26 and does not load on macOS 27"; done
-  [ $NOTABLES = 0 ] || note "this PC's config has no serial number and UUID of its own, so the Mac identity tables were not written"
+  [ $NOTABLES = 0 ] || [ "$EFIKIND" = mac ] || note "this PC's config has no serial number and UUID of its own, so the Mac identity tables were not written"
   note "driver package: $DNOTE"
   note "system package: $SNOTE"
   note "next: get macOS 27 from Apple, then make the staged files the default when you are ready"
