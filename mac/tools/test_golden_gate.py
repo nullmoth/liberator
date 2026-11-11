@@ -1283,6 +1283,11 @@ arm("the page shows the card only when the app reports a kit, and enables it onl
     '$("ggcard").hidden = !m.goldenGate;' in appjs and "S.ggReady = !!m.goldenGate && OS_FROM.includes(m.major) && !why;" in appjs
     and re.search(r"^const OS_FROM = \[15, 26\][,;]", appjs, re.M) is not None)   # the two versions live in one named list since the page became Liberator's own
 arm("the page script still never names macOS 27", "macOS 27" not in appjs)
+_sh = open(SCRIPT).read().splitlines()
+_bless = [i for i, ln in enumerate(_sh) if "/usr/sbin/bless " in ln and not ln.lstrip().startswith("#")]
+arm("the system's own bless is only ever reached as root with the system's own disk tool, so no test run can start it (one waited for ever)",
+    len(_bless) == 2 and all(any('[ "$DISKUTIL" = /usr/sbin/diskutil ] && [ "$(id -u)" = 0 ]' in _sh[j] for j in range(max(0, i - 6), i + 1)) for i in _bless)
+    and os.geteuid() != 0, repr(_bless))
 osgate = (ROOT / "Sources/OSGate.swift").read_text()
 planall = re.findall(r'ggmark "PLAN-ALL ([a-z0-9: -]+)"', setup)
 shares = [p.split(":") for p in planall[0].split()] if len(planall) == 1 else []

@@ -1027,8 +1027,9 @@ activate)
   # the macOS this runs on, which gets no picture from the macOS 27 startup files: on the first install made this
   # way the picker started the wrong system twice. The system volume is named by device: on a macOS 27 volume the
   # form that names a mounted folder fails (it wants a file an Apple silicon system does not carry). Only with the
-  # system's own disk tool, never in a test run.
-  if [ "$DISKUTIL" = /usr/sbin/diskutil ]; then
+  # system's own disk tool and as root, never in a test run: a test once ran the system's own bless on the machine
+  # it was run on, where it can wait for ever.
+  if [ "$DISKUTIL" = /usr/sbin/diskutil ] && [ "$(id -u)" = 0 ]; then
     sdu=$(sed -n 's/^system //p' "$GGDIR/macos27-volumes" 2>/dev/null | head -n 1); sdd=""
     case "$sdu" in ????????-????-????-????-????????????) sdd=$("$DISKUTIL" info "$sdu" 2>/dev/null | awk -F': *' '/Device Identifier/ {print $2; exit}');; esac
     case "$sdd" in
@@ -1074,7 +1075,7 @@ rollback|cancel|remove)
   # Going back also gives the boot picker its old choice: the macOS this runs on. Left on macOS 27 it would start
   # that system from startup files that are no longer the macOS 27 ones. Best effort, and never in a test run.
   # A removal that has not been confirmed changes nothing at all, this included.
-  if [ "$DISKUTIL" = /usr/sbin/diskutil ] && { [ "$STEP" != remove ] || [ $CONFIRM = 1 ]; }; then /usr/sbin/bless --mount / --setBoot >/dev/null 2>&1 || true; fi
+  if [ "$DISKUTIL" = /usr/sbin/diskutil ] && [ "$(id -u)" = 0 ] && { [ "$STEP" != remove ] || [ $CONFIRM = 1 ]; }; then /usr/sbin/bless --mount / --setBoot >/dev/null 2>&1 || true; fi
   if [ "$STEP" = remove ]; then
     [ $CONFIRM = 1 ] || stop "removing macOS 27 is done only with --confirm. Nothing was changed"
     from_ok || stop "macOS 27 is removed from macOS 15 or 26; this Mac runs macOS $MAJOR. Nothing was changed"
