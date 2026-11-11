@@ -84,7 +84,7 @@ BOOT_ARGS_ALLOWED="-v -lilubetaall -vsmcbeta -no_compat_check a2x_conlive=1 a2xb
 MODEL_RTX50=Mac17,15
 
 STEP=${1:-}; [ $# -gt 0 ] && shift
-ROOT=""; KIT=""; CONFIRM=0; MAJOR=""; GPUS=""; GPUS_GIVEN=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0
+ROOT=""; KIT=""; CONFIRM=0; MAJOR=""; GPUS=""; GPUS_GIVEN=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0; ESPFREE=""
 DISPLAYS=""; DISPLAYS_GIVEN=0; APPLEIDS=""; APPLEIDS_GIVEN=0
 DISKUTIL=/usr/sbin/diskutil; TOOLS=""
 KITMODEL=0; CPUV=""; LAPTOP=""; ACCOUNT=""
@@ -96,7 +96,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --bring-account) ACCOUNT=${2:-}; shift;; --size-gb) SIZE_GB=${2:-}; shift;;
   # test-hook-begin
   --macos-major) MAJOR=${2:-}; shift;; --gpu-id) GPUS="$GPUS ${2:-}"; GPUS_GIVEN=1; shift;;
-  --disk-free-gb) DISK_GB=${2:-}; shift;; --device-id) DEVIDS="$DEVIDS ${2:-}"; DEVIDS_GIVEN=1; shift;;
+  --disk-free-gb) DISK_GB=${2:-}; shift;; --esp-free-kb) ESPFREE=${2:-}; shift;; --device-id) DEVIDS="$DEVIDS ${2:-}"; DEVIDS_GIVEN=1; shift;;
   --diskutil) DISKUTIL=${2:-}; shift;; --tools) TOOLS=${2:-}; shift;; --kc-work) KCWORK=${2:-}; shift;; --lay-work) LAYWORK=${2:-}; shift;; --preboot) PREBOOT=${2:-}; shift;; --step-log) STEPLOG=${2:-}; shift;;
   --cpu-vendor) CPUV=${2:-}; shift;; --laptop) LAPTOP=${2:-}; shift;;
   --display) DISPLAYS="$DISPLAYS ${2:-}"; DISPLAYS_GIVEN=1; shift;; --apple-id) APPLEIDS="$APPLEIDS ${2:-}"; APPLEIDS_GIVEN=1; shift;;
@@ -333,6 +333,25 @@ stage_need_kb() {  # the copy of EFI/OC and the kit's kexts. The packages stay i
   echo $(( $(du -sk "$EFI/OC" | awk '{print $1}') + $(du -sk "$KIT/Kexts" | awk '{print $1}') + ESP_MARGIN_KB ))
 }
 free_kb() { df -k "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
+# Room on the startup partition. It is a small partition (100 or 200 MB on most PCs), and what users read as "disk
+# space" in the first reports was this. OpenCore writes a start-up log there on every start when its logging is on,
+# a quarter of a megabyte each; one test machine held 182 of them. Those are the one thing there that is safe to
+# remove without asking: the three newest are kept for a report, the rest go when staging needs the room.
+esp_free_kb() { case "$ESPFREE" in ''|*[!0-9]*) free_kb "$ROOT";; *) echo "$ESPFREE";; esac; }   # --esp-free-kb: a test's stand-in
+esp_old_logs() {   # every OpenCore start-up log but the three newest; the names carry the date, so they sort by age
+  local all n
+  all=$(ls -1 "$ROOT" 2>/dev/null | grep -E '^opencore-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}\.txt$' | sort)
+  n=$(printf '%s\n' "$all" | grep -c .); [ "$n" -gt 3 ] || return 0
+  printf '%s\n' "$all" | head -n $((n - 3))
+}
+esp_old_logs_kb() { local f t=0; while IFS= read -r f; do [ -n "$f" ] && [ -f "$ROOT/$f" ] && [ ! -L "$ROOT/$f" ] && t=$((t + $(du -k "$ROOT/$f" | awk '{print $1}'))); done <<EOT
+$(esp_old_logs)
+EOT
+  echo "$t"; }
+esp_remove_old_logs() { local f; while IFS= read -r f; do [ -n "$f" ] && [ -f "$ROOT/$f" ] && [ ! -L "$ROOT/$f" ] && rm -f "$ROOT/$f"; done <<EOT
+$(esp_old_logs)
+EOT
+}
 laydown_or_stop() {    # the kit's lay-down script, in its private copy: LDIR/linst
   local d; d=$(kv laydown.dir); linst=$(kv laydown.installer)
   case "$d" in ''|*/*|.*) stop "the v3 kit carries no lay-down step. Nothing was changed";; esac
@@ -408,7 +427,7 @@ gb1() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }     # bytes a
 vfield() { printf '%s' "$1" | plutil -extract "$2" raw -o - - 2>/dev/null; }
 mac27_volumes() {
   local rec="$GGDIR/macos27-volumes" su du here si di
-  SYS=""; DATA=""; WHY=""
+  SYS=""; DATA=""; WHY=""; SYSID=""; DATAID=""
   chain_trusted "$GGDIR" || { WHY="the folder of Golden Gate's records ($GGDIR) is not one only root can write"; return 1; }
   [ -f "$rec" ] && [ ! -L "$rec" ] || { WHY="no macOS 27 has been laid down by this app on this Mac (there is no record of its volumes)"; return 1; }
   su=$(sed -n 's/^system //p' "$rec" | head -n 1); du=$(sed -n 's/^data //p' "$rec" | head -n 1)
@@ -420,7 +439,7 @@ mac27_volumes() {
   [ "$(vfield "$si" FilesystemType)" = apfs ] && [ "$(vfield "$di" FilesystemType)" = apfs ] \
     && [ "$(vfield "$si" APFSContainerReference)" = "$here" ] && [ "$(vfield "$di" APFSContainerReference)" = "$here" ] \
     || { WHY="the recorded macOS 27 volumes are not APFS volumes on the disk this macOS runs from"; return 1; }
-  SYS=$(vfield "$si" MountPoint); DATA=$(vfield "$di" MountPoint)
+  SYS=$(vfield "$si" MountPoint); DATA=$(vfield "$di" MountPoint); SYSID=$su; DATAID=$du
   # The lay-down step leaves both volumes unmounted. A step that works on them (asked with "mount") mounts the two
   # recorded volumes itself; a step that only reports does not change what is mounted.
   if [ "${1:-}" = mount ] && { [ -z "$SYS" ] || [ -z "$DATA" ]; }; then
@@ -432,6 +451,22 @@ mac27_volumes() {
   [ -n "$SYS" ] && [ -d "$SYS/System/Library/CoreServices" ] || { WHY="the macOS 27 volume is not mounted (mount it in Disk Utility)"; SYS=""; DATA=""; return 1; }
   [ -n "$DATA" ] && [ -d "$DATA" ] && [ "$DATA" != "$SYS" ] || { WHY="the macOS 27 data volume is not mounted (mount it in Disk Utility)"; SYS=""; DATA=""; return 1; }
   return 0
+}
+# The two macOS 27 volumes must keep file owners. A volume can be mounted with owners ignored (macOS does that to a
+# volume it treats as external, and remembers the choice per volume): every file then reads back as owner 99, the
+# change of owner reports success and does nothing, and the kernel refuses a shared cache that is not root's. The
+# first PC this happened on stopped in the middle of the system package. So owners are switched on here, before
+# anything is written, and the answer is read back.
+owners_or_stop() {
+  local id name
+  for id in "$SYSID" "$DATAID"; do
+    [ "$(vfield "$("$DISKUTIL" info -plist "$id" 2>/dev/null)" GlobalPermissionsEnabled)" = false ] || continue
+    name=$(vfield "$("$DISKUTIL" info -plist "$id" 2>/dev/null)" MountPoint)
+    "$DISKUTIL" enableOwnership "$id" >/dev/null 2>&1
+    [ "$(vfield "$("$DISKUTIL" info -plist "$id" 2>/dev/null)" GlobalPermissionsEnabled)" != false ] \
+      || stop "the macOS 27 volume at $name ignores file owners and that could not be changed. In Terminal run: sudo diskutil enableOwnership \"$name\" - then run this step again. Nothing was changed"
+    note "file owners were switched off on $name; they are on now"
+  done
 }
 # put_on_data <file> <path below the data volume>: a root write onto the new data volume. No part of the path may be
 # a symbolic link (a link there would send the write anywhere), folders are made root-owned 0755, and the file is
@@ -828,7 +863,7 @@ preflight)
   from_ok; check $? "this Mac runs macOS ${MAJOR:-?}; Golden Gate starts from macOS 15 or 26"
   [ $GPUS_GIVEN = 1 ] || GPUS=$(nvidia_ids)
   hit=""; for g in $GPUS; do g=$(upper "$g"); card_supported "$g" && { hit=$g; break; }; done
-  UNTRIED=""
+  UNTRIED=""; ESPHELP=""
   GFX=""
   if [ -n "$hit" ]; then check 0 "NVIDIA card $(card_name "$hit") ($hit) is one the driver takes"
     card_tried "$hit" || UNTRIED="macOS 27 has not been run on $(card_name "$hit") yet (so far: $(cards_tried)). This is a beta: it may not start"
@@ -868,8 +903,14 @@ preflight)
     else check 0 "the startup files at $EFI/OC are a 1401 build"; fi
   else check 1 "the startup files at $EFI/OC are a 1401 build"; fi
   if [ -f "$C" ]; then
-    need=$(stage_need_kb); free=$(free_kb "$ROOT")
-    [ -n "$free" ] && [ "$free" -ge "$need" ]; check $? "room on the startup partition: $(( ${free:-0} / 1024 )) MB free, $((need / 1024)) MB needed"
+    need=$(stage_need_kb); free=$(esp_free_kb); gain=$(esp_old_logs_kb)
+    if [ -n "$free" ] && [ "$free" -ge "$need" ]; then check 0 "room on the startup partition: $(( free / 1024 )) MB free, $((need / 1024)) MB needed"
+    elif [ -n "$free" ] && [ $((free + gain)) -ge "$need" ]; then
+      check 0 "room on the startup partition: $(( free / 1024 )) MB free, $((need / 1024)) MB needed; staging removes old OpenCore start-up logs there ($((gain / 1024)) MB) to make the room"
+    else
+      check 1 "room on the startup partition: $(( ${free:-0} / 1024 )) MB free, $((need / 1024)) MB needed. This is the small EFI partition OpenCore starts from ($ROOT), not the disk macOS is on"
+      ESPHELP="to make room on the startup partition: remove what you do not need from $ROOT (old copies of the EFI folder, another boot loader's files), or put OpenCore on an EFI partition of 200 MB or more. A second macOS 27 copy of EFI/OC is kept beside the macOS 26 one, which is why it needs $((need / 1024)) MB"
+    fi
   fi
   [ -n "$DISK_GB" ] || DISK_GB=$(( $(free_kb /System/Volumes/Data) / 1048576 ))
   # What an earlier run already downloaded is on the disk now and is not downloaded again, so its size comes off the
@@ -888,6 +929,7 @@ preflight)
   need_gb=$((MIN_DISK_GB - have_gb))
   [ "${DISK_GB%%.*}" -ge "$need_gb" ] 2>/dev/null; check $? "room for macOS 27: ${DISK_GB} GB free, $need_gb GB needed$([ "$have_gb" = 0 ] || echo " ($have_gb GB is already downloaded)")"
   if ST=$(read_state) && layout_ok "$ST"; then check 0 "Golden Gate state: $ST"; else check 1 "the startup partition matches its Golden Gate record"; fi
+  [ -z "$ESPHELP" ] || note "$ESPHELP"
   [ $fails = 0 ] || stop "$fails check(s) failed. Nothing was changed"
   # What the later steps need from this macOS is asked for now, before anything is staged: the system tools, and
   # then the two kit scripts' own dry runs. A failure that is the running system's is said in one fixed sentence.
@@ -918,8 +960,15 @@ stage)
   state_or_stop
   [ "$ST" = none ] || stop "Golden Gate is already $ST on this partition; cancel it first to stage again"
   startup_ok || stop "the startup files here were not made by 1401. Nothing was changed"
-  need=$(stage_need_kb); free=$(free_kb "$ROOT")
-  [ -n "$free" ] && [ "$free" -ge "$need" ] || stop "the startup partition has $(( ${free:-0} / 1024 )) MB free and the macOS 27 copy needs $((need / 1024)) MB. Nothing was changed"
+  need=$(stage_need_kb); free=$(esp_free_kb)
+  if [ -n "$free" ] && [ "$free" -lt "$need" ]; then
+    gain=$(esp_old_logs_kb)
+    if [ "$gain" -gt 0 ] && [ $((free + gain)) -ge "$need" ]; then
+      esp_remove_old_logs; note "removed old OpenCore start-up logs from the startup partition ($((gain / 1024)) MB); the three newest are kept"
+      case "$ESPFREE" in ''|*[!0-9]*) free=$(free_kb "$ROOT");; *) free=$((free + gain));; esac
+    fi
+  fi
+  [ -n "$free" ] && [ "$free" -ge "$need" ] || stop "the startup partition (the small EFI partition OpenCore starts from, $ROOT - not the disk macOS is on) has $(( ${free:-0} / 1024 )) MB free and the macOS 27 copy needs $((need / 1024)) MB. Nothing was changed"
   # the copy is changed in a scratch folder and moved into place in one rename, so a stopped run leaves no half-made folder
   SCR="$EFI/.golden-gate-scratch"; rm -rf "$SCR"
   undo() { rm -rf "$SCR" "$EFI/$STAGED" "$ROOT/$DRIVER"; }
@@ -1213,6 +1262,7 @@ finish)
   case "$(plutil -extract ProductVersion raw -o - "$SYS/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)" in 27.*) ;;
     *) stop "the volume this app laid down does not hold macOS 27. Nothing was changed";; esac
   [ -d "$DATA/Library" ] && [ ! -L "$DATA/Library" ] || stop "the macOS 27 data volume ($DATA) has no Library folder of its own. Nothing was changed"
+  owners_or_stop
   step "Checking the macOS 27 system install (dry run)"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
   /bin/bash "$SPAY/$sinst" --payload "$SPAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --dry-run || stop "the v3 system installer refused its dry run. Nothing was changed"

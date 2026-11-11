@@ -67,6 +67,8 @@ DISKUTIL_STUB = """#!/bin/bash
 d=$(dirname "$0")
 # and for: diskutil mount <volume identifier>, on a stand-in volume that can be mounted
 if [ "$1" = mount ] && [ -f "$d/$2.mounted.plist" ]; then cp "$d/$2.mounted.plist" "$d/$2.plist"; exit 0; fi
+# and for: diskutil enableOwnership <volume identifier>; it works only on a stand-in volume that allows it
+if [ "$1" = enableOwnership ]; then echo "owners $2" >> "$d/disk-calls.log"; [ -f "$d/$2.owned.plist" ] && cp "$d/$2.owned.plist" "$d/$2.plist"; exit 0; fi
 # and for the two calls that take a volume away; each is written down
 if [ "$1 $2" = "unmount force" ]; then echo "unmount $3" >> "$d/disk-calls.log"; exit 0; fi
 if [ "$1 $2" = "apfs deleteVolume" ]; then echo "delete $3" >> "$d/disk-calls.log"; [ ! -e "$d/refuse-delete" ] || exit 1; rm -f "$d/$3.plist"; exit 0; fi
@@ -146,6 +148,41 @@ with tempfile.TemporaryDirectory() as td:
                              ("a full disk", ["--macos-major", "26", "--gpu-id", "2D05", "--disk-free-gb", "59"] + PC, "FAIL room for macOS 27")):
         rc, out = run("preflight", fx.efi, fx.kit_path, *args)
         arm(f"preflight refuses {name} and names it", rc == 1 and word in out and out.count("FAIL ") == 1, out)
+
+    # 2a2. the startup partition is small. A refusal says which partition is meant; old OpenCore start-up logs are
+    # the one thing staging removes to make room, and the three newest stay.
+    esp = fresh(td, "esp-room")
+    logs = ["opencore-2026-11-%02d-101010.txt" % d for d in range(1, 8)]
+    for n in logs:
+        with open(os.path.join(esp.efi, n), "wb") as fh:
+            fh.write(b"x" * 300000)
+    with open(os.path.join(esp.efi, "opencore-notes.txt"), "w") as fh:
+        fh.write("mine")
+    rc, out = run("preflight", esp.efi, esp.kit_path, *READY, "--esp-free-kb", "1")
+    arm("too little room on the startup partition is refused, and the refusal says it is the EFI partition and not the disk",
+        rc == 1 and "FAIL room on the startup partition: 0 MB free" in out and "small EFI partition OpenCore starts from" in out
+        and "not the disk macOS is on" in out and "NOTE to make room on the startup partition" in out, out)
+    need_kb = int(subprocess.run(["du", "-sk", os.path.join(esp.efi, "EFI", "OC")], capture_output=True, text=True).stdout.split()[0]) + \
+        int(subprocess.run(["du", "-sk", os.path.join(esp.kit_path, "Kexts")], capture_output=True, text=True).stdout.split()[0]) + 8192
+    short = str(need_kb - 600)
+    rc, out = run("preflight", esp.efi, esp.kit_path, *READY, "--esp-free-kb", short)
+    arm("room that old OpenCore start-up logs would give is counted, and the check says staging removes them",
+        rc == 0 and "staging removes old OpenCore start-up logs there" in out and all(os.path.exists(os.path.join(esp.efi, n)) for n in logs), out)
+    rc, out = run("stage", esp.efi, esp.kit_path, "--esp-free-kb", short)
+    left = sorted(n for n in os.listdir(esp.efi) if n.startswith("opencore-"))
+    arm("staging then removes all but the three newest logs, keeps a file that only looks like one, and says what it did",
+        rc == 0 and left == logs[-3:] + ["opencore-notes.txt"] and "NOTE removed old OpenCore start-up logs" in out, out + repr(left))
+    esp2 = fresh(td, "esp-room-plenty")
+    for n in logs:
+        with open(os.path.join(esp2.efi, n), "wb") as fh:
+            fh.write(b"x" * 300000)
+    rc, out = run("stage", esp2.efi, esp2.kit_path)
+    arm("control: with room to spare staging removes no log", rc == 0 and sorted(n for n in os.listdir(esp2.efi) if n.startswith("opencore-")) == logs and "removed old" not in out, out)
+    esp3 = fresh(td, "esp-room-none")
+    b3 = tree(esp3.efi)
+    rc, out = run("stage", esp3.efi, esp3.kit_path, "--esp-free-kb", "1")
+    arm("staging with no room and nothing to remove stops, names the EFI partition, and changes nothing",
+        rc == 1 and "small EFI partition OpenCore starts from" in out and tree(esp3.efi) == b3, out)
 
     # 2b. different PCs. Every PC the driver runs on under macOS 26 may try macOS 27; what has not been started yet
     # is said, with the way back and how a failure reaches us. Only a card the driver does not take is refused.
@@ -633,6 +670,31 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
         and not os.path.lexists(os.path.join(g.efi, gg.DRIVER)) and not any("install-macos27.sh" in p for p in tree(g.efi))
         and "drv" not in script_text[script_text.index("stage_need_kb() {"):script_text.index("free_kb() {")]
         and 'cp -R "$KIT/$ddir"' not in script_text, tree(g.efi).keys())
+    # 7a0. a macOS 27 volume that ignores file owners: switched on before anything is written, or the step stops
+    def owners_off(vols, fixable):
+        for uuid in (DATA_UUID,):
+            p = os.path.join(vols.gg, uuid + ".plist")
+            f = plistlib.load(open(p, "rb"))
+            if fixable:
+                plistlib.dump(dict(f, GlobalPermissionsEnabled=True), open(os.path.join(vols.gg, uuid + ".owned.plist"), "wb"))
+            plistlib.dump(dict(f, GlobalPermissionsEnabled=False), open(p, "wb"))
+
+    gown = active("fin-owners")
+    vown = volumes("vols-owners-fixed")
+    owners_off(vown, True)
+    rc, out = run("finish", gown.efi, gown.kit_path, *FIN, vown)
+    dc = open(os.path.join(vown.gg, "disk-calls.log")).read() if os.path.exists(os.path.join(vown.gg, "disk-calls.log")) else ""
+    arm("a data volume that ignores file owners has them switched on before the installers run, and the result says so",
+        rc == 0 and f"owners {DATA_UUID}" in dc and f"owners {SYS_UUID}" not in dc and "file owners were switched off on" in out
+        and out.index("file owners were switched off") < out.index("Checking the macOS 27 system install"), out + dc)
+    gown2 = active("fin-owners-stuck")
+    vown2 = volumes("vols-owners-stuck")
+    owners_off(vown2, False)
+    b4 = tree(gown2.efi)
+    rc, out = run("finish", gown2.efi, gown2.kit_path, *FIN, vown2)
+    arm("when owners cannot be switched on the step stops before any installer runs and gives the command",
+        rc == 1 and "ignores file owners and that could not be changed" in out and "sudo diskutil enableOwnership" in out
+        and calls(vown2) == [] and tree(gown2.efi) == b4, out + repr(calls(vown2)))
     vols = volumes("vols-both")
     before = tree(g.efi)
     rc, out = run("finish", g.efi, g.kit_path, *FIN, vols)
