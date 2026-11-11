@@ -302,6 +302,71 @@ with tempfile.TemporaryDirectory() as td:
     arm("stage refuses them too", rc == 1 and "not made by 1401" in out, out)
     arm("preflight and the refused stage changed nothing", {k: v for k, v in tree(fx.efi).items()} == {k: v for k, v in before.items() if k != ".1401-build"})
 
+    # 2d. a real Mac. Its OpenCore files are not a 1401 build (OpenCore Legacy Patcher writes them); what marks
+    # them as a Mac's is that no kext stands in for Apple's SMC chip. Such a config gives its kexts the limit
+    # 27.99.99 as a matter of course, which is not proof that they run on macOS 27: on the first real Mac that let
+    # the kernel-patching kexts into the macOS 27 kernel and it never reached its first service.
+    def kx(name, mx):
+        return {"Arch": "x86_64", "BundlePath": name, "Comment": "", "Enabled": True, "ExecutablePath": "Contents/MacOS/" + name[:-5],
+                "MaxKernel": mx, "MinKernel": "", "PlistPath": "Contents/Info.plist"}
+
+    def real_mac(name, smc_on=False):
+        m = Fixture(os.path.join(td, name))                    # no .1401-build marker
+        cp = os.path.join(m.efi, "EFI", "OC", "config.plist")
+        c = plistlib.load(open(cp, "rb"))
+        for k in c["Kernel"]["Add"]:
+            if k["BundlePath"] == "VirtualSMC.kext":
+                k["Enabled"] = smc_on
+            if k["BundlePath"] == "AMFIPass.kext":
+                k["MaxKernel"] = "27.99.99"                    # a capped kext that already carries the patcher's limit
+        c["Kernel"]["Add"] += [kx("RestrictEvents.kext", "27.99.99"), kx("CatalinaIntelI210Ethernet.kext", ""),
+                               kx("AppleIntelCPUPowerManagement.kext", ""), kx("OldOnly.kext", "24.99.99")]
+        c["PlatformInfo"]["Generic"]["SystemProductName"] = ""  # a patcher config keeps the Mac's own identity
+        plistlib.dump(c, open(cp, "wb"))
+        return m
+
+    def mac_kit(name, **extra):
+        k = os.path.join(td, name)
+        shutil.copytree(fx.kit_path, k)
+        m = json.load(open(os.path.join(k, v3_macos27.MANIFEST)))
+        m.update(extra)
+        json.dump(m, open(os.path.join(k, v3_macos27.MANIFEST), "w"))
+        return k
+
+    MACARGS = ["--macos-major", "26", "--disk-free-gb", "110", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS,
+               "--display", "1002:6810", "--apple-id", "1002:6810"]
+    mkit = mac_kit("kit-mac", graphics=["nvidia", "apple"], only={"nvidia": ["NetArm2x86IOAPIC.kext"], "pc": ["-vsmcbeta"]},
+                   known_27_mac=["CatalinaIntelI210Ethernet.kext", "AppleIntelCPUPowerManagement.kext"])
+    mac1 = real_mac("mac1")
+    rc, out = run("preflight", mac1.efi, mkit, *MACARGS)
+    arm("a real Mac's own OpenCore files are accepted, said to be a Mac's, and said to be untried",
+        rc == 0 and "FAIL" not in out and "are a Mac's own OpenCore files (not a 1401 build)" in out
+        and "macOS 27 with this kit has not been started on a real Mac yet" in out and "NOTE graphics path: apple" in out, out)
+    pcish = real_mac("pcish", smc_on=True)
+    rc, out = run("preflight", pcish.efi, mkit, *MACARGS)
+    arm("control: the same files with an SMC stand-in enabled are a PC's, and without 1401's mark they are refused",
+        rc == 1 and "FAIL the startup files" in out, out)
+    rc, out = run("stage", mac1.efi, mkit, *[a for a in MACARGS if a not in ("--disk-free-gb", "110", "--tools", TOOLS)])
+    sc = plistlib.load(open(os.path.join(mac1.efi, "EFI", gg.STAGED, "config.plist"), "rb")) if rc == 0 else {"Kernel": {"Add": []}, "NVRAM": {"Add": {}}, "PlatformInfo": {"Generic": {}}}
+    lim = {k["BundlePath"]: k.get("MaxKernel", "") for k in sc["Kernel"]["Add"] if k.get("Enabled")}
+    args27 = " " + " ".join(v.get("boot-args", "") for v in sc["NVRAM"]["Add"].values() if isinstance(v, dict)) + " "
+    arm("staging a real Mac: a limit that only reaches 27 is treated like none, so a kext nobody has run on 27 stops at 26",
+        rc == 0 and lim.get("RestrictEvents.kext") == "26.99.99" and "NOTE RestrictEvents.kext was never run on macOS 27" in out, out + repr(lim))
+    arm("and a kext the kit caps is capped even when the patcher had written 27.99.99 on it", lim.get("AMFIPass.kext") == "26.99.99", repr(lim))
+    arm("the Mac's own hardware kexts the kit names as known on 27 keep loading", lim.get("CatalinaIntelI210Ethernet.kext") == "" and lim.get("AppleIntelCPUPowerManagement.kext") == "", repr(lim))
+    arm("a limit below 27 is left exactly as it was", lim.get("OldOnly.kext") == "24.99.99", repr(lim))
+    arm("what the kit marks for an NVIDIA machine is left out on other graphics, and the rest of the kit is there",
+        "NetArm2x86IOAPIC.kext" not in lim and "A2XACPIPlatform.kext" in lim and "a2x_exec_hook.kext" in lim, repr(sorted(lim)))
+    arm("what the kit marks for a PC is left out on a Mac, and the other kit arguments are added", " -vsmcbeta " not in args27 and " -no_compat_check " in args27, args27)
+    arm("a real Mac keeps its own model, and is told so", sc["PlatformInfo"]["Generic"].get("SystemProductName") == "" and "NOTE model: this Mac's own (not changed)" in out, out)
+    pc2 = fresh(td, "pc-after-mac")
+    rc, out = run("stage", pc2.efi, mkit, "--gpu-id", "2D05")
+    pcc = plistlib.load(open(os.path.join(pc2.efi, "EFI", gg.STAGED, "config.plist"), "rb")) if rc == 0 else {"Kernel": {"Add": []}, "NVRAM": {"Add": {}}, "PlatformInfo": {"Generic": {}}}
+    pargs = " " + " ".join(v.get("boot-args", "") for v in pcc["NVRAM"]["Add"].values() if isinstance(v, dict)) + " "
+    arm("control: the same kit on an NVIDIA PC stages everything, with the PC's model",
+        rc == 0 and any(k["BundlePath"] == "NetArm2x86IOAPIC.kext" and k.get("Enabled") for k in pcc["Kernel"]["Add"])
+        and " -vsmcbeta " in pargs and pcc["PlatformInfo"]["Generic"].get("SystemProductName") not in ("", "MacPro7,1"), out)
+
     # 3. stage makes what the builder makes, and leaves EFI/OC alone
     a, b = fresh(td, "py"), fresh(td, "sh")
     oc_before = tree(os.path.join(b.efi, "EFI", "OC"))
