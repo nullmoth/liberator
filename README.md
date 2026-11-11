@@ -40,6 +40,9 @@ macOS 27 volumes Liberator made.
 
 - No Wi-Fi and no Bluetooth on macOS 27.
 - Books, Journal, Maps, Reminders and Voice Memos do not work yet.
+- Spotlight search does not work.
+- The login window can show a message that the System keychain cannot be found. Press Cancel.
+- System Integrity Protection is lowered and Apple's code-signing enforcement is off on macOS 27. Treat it as a test system.
 - The Dock and other glass surfaces can look flat and dark.
 - A run that fails after the system copy can leave one extra volume named "Macintosh HD" in the same container.
   Delete it in Disk Utility before the next try.

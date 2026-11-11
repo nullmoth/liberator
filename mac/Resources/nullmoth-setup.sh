@@ -567,11 +567,14 @@ m27_state() {
 m27_bringup_logs() {
   m27_tail "display pipe outcome this boot" /var/run/nvload.pipe 2000
   m27_tail "WindowServer gate marker this boot" /var/run/ws-gate.done 2000
-  m27_tail "display hand-over at boot" /var/tmp/nvload.log 120000
-  m27_tail "WindowServer and login window gates" /var/tmp/ws-gate.log 60000
+  # The kit keeps these three logs in /var/log, which only root can write to; an install made by an earlier kit has
+  # them in /var/tmp.
+  m27_log() { if [ -e "$1" ]; then echo "$1"; else echo "$2"; fi; }
+  m27_tail "display hand-over at boot" "$(m27_log /var/log/nullmoth-nvload.log /var/tmp/nvload.log)" 120000
+  m27_tail "WindowServer and login window gates" "$(m27_log /var/log/nullmoth-ws-gate.log /var/tmp/ws-gate.log)" 60000
   m27_tail "login window gate" /var/tmp/lw-gate.log 30000
-  m27_tail "WindowServer output" /var/tmp/ws-stderr.log 60000
-  m27_stops /var/tmp/ws-stderr.log
+  m27_tail "WindowServer output" "$(m27_log /var/log/nullmoth-ws-stderr.log /var/tmp/ws-stderr.log)" 60000
+  m27_stops "$(m27_log /var/log/nullmoth-ws-stderr.log /var/tmp/ws-stderr.log)"
   m27_tail "kernel collection loader" /var/log/auxkcload.log 30000
   m27_tail "redirect keep-alive" /var/log/a2x-keepalive.log 20000
   m27_tail "driver boot log" /var/log/nvrm-boot.log 60000
@@ -693,10 +696,11 @@ gg_other_volume() {  # <root of this macOS>: what a macOS 27 that is not running
   gg_tail "lay-down log (copy on the new volume)" "$data" Library/NullMoth/golden-gate/laydown.log 20000
   gg_tail "kernel collection loader" "$data" private/var/log/auxkcload.log 30000
   gg_tail "redirect keep-alive" "$data" private/var/log/a2x-keepalive.log 20000
-  gg_tail "display hand-over at boot" "$data" private/var/tmp/nvload.log 120000
-  gg_tail "window server and login window gates" "$data" private/var/tmp/ws-gate.log 60000
-  gg_tail "window server output" "$data" private/var/tmp/ws-stderr.log 60000
-  echo "== interpreter stop lines in the window server output"; gg_lines "$data" private/var/tmp/ws-stderr.log; echo
+  gg_log() { if [ -e "$data/$1" ]; then echo "$1"; else echo "$2"; fi; }
+  gg_tail "display hand-over at boot" "$data" "$(gg_log private/var/log/nullmoth-nvload.log private/var/tmp/nvload.log)" 120000
+  gg_tail "window server and login window gates" "$data" "$(gg_log private/var/log/nullmoth-ws-gate.log private/var/tmp/ws-gate.log)" 60000
+  gg_tail "window server output" "$data" "$(gg_log private/var/log/nullmoth-ws-stderr.log private/var/tmp/ws-stderr.log)" 60000
+  echo "== interpreter stop lines in the window server output"; gg_lines "$data" "$(gg_log private/var/log/nullmoth-ws-stderr.log private/var/tmp/ws-stderr.log)"; echo
   gg_tail "driver boot log" "$data" private/var/log/nvrm-boot.log 60000
   # names are read one per line with pattern expansion off: a name may hold a space or a wildcard character
   echo "== interpreter stop records (private/var/tmp/a2x-reports)"
