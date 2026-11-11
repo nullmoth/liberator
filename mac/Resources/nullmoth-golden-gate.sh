@@ -516,6 +516,11 @@ not_for_this() {
   [ "$EFIKIND" = mac ] && in_kit_list only.pc "$1" && return 0
   return 1
 }
+# A kext's upper kernel limit lets it load on macOS 27 when it is empty or names kernel 27 or later. A config made
+# by OpenCore Legacy Patcher gives its kexts the limit 27.99.99 as a matter of course, which says nothing about
+# whether they were ever run on macOS 27: on the first real Mac this let six kernel-patching kexts into the macOS 27
+# kernel, and it never reached its first service. So a limit that reaches 27 is treated like no limit at all.
+reaches_27() { case "${1%%.*}" in '') return 0;; *[!0-9]*) return 1;; esac; [ "${1%%.*}" -ge 27 ]; }
 NOT27=""; NOTABLES=0     # what apply_kit reports: kexts kept off macOS 27, and identity tables it could not write
 apply_kit() {    # $1 = the OC folder to change
   local oc=$1 n i name when pos idx have p m li j key type val parent args a added s0 u0 hex fresh k b
@@ -562,7 +567,7 @@ apply_kit() {    # $1 = the OC folder to change
     printf '%s' "$val" | grep -Eq '^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}$' || { bad "bad cap for $name"; return 1; }
     n=$(cget Kernel.Add); i=0
     # an upper limit the PC's own config already gives is kept: it is never raised
-    while [ "$i" -lt "$n" ]; do [ "$(bundle_at "$i")" = "$name" ] && [ -z "$(cget "Kernel.Add.$i.MaxKernel")" ] && sets "Kernel.Add.$i.MaxKernel" "$val"; i=$((i + 1)); done
+    while [ "$i" -lt "$n" ]; do [ "$(bundle_at "$i")" = "$name" ] && reaches_27 "$(cget "Kernel.Add.$i.MaxKernel")" && sets "Kernel.Add.$i.MaxKernel" "$val"; i=$((i + 1)); done
     j=$((j + 1)); done
 
   # a block that takes Apple's own kext away for an injected one stops where the injected one stops
@@ -571,7 +576,7 @@ apply_kit() {    # $1 = the OC folder to change
     printf '%s' "$val" | grep -Eq '^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}$' || { bad "bad block cap for $name"; return 1; }
     n=$(cget Kernel.Block); [ -n "$n" ] || n=0; i=0
     while [ "$i" -lt "$n" ]; do
-      [ "$(cget "Kernel.Block.$i.Identifier")" = "$name" ] && [ "$(cget "Kernel.Block.$i.Enabled")" = true ] && [ -z "$(cget "Kernel.Block.$i.MaxKernel")" ] && sets "Kernel.Block.$i.MaxKernel" "$val"
+      [ "$(cget "Kernel.Block.$i.Identifier")" = "$name" ] && [ "$(cget "Kernel.Block.$i.Enabled")" = true ] && reaches_27 "$(cget "Kernel.Block.$i.MaxKernel")" && sets "Kernel.Block.$i.MaxKernel" "$val"
       i=$((i + 1)); done
     j=$((j + 1)); done
 
@@ -682,7 +687,7 @@ EOF
     n=$(cget Kernel.Add); i=0
     while [ "$i" -lt "$n" ]; do
       name=$(bundle_at "$i"); exe=$(cget "Kernel.Add.$i.ExecutablePath")
-      if [ "$(cget "Kernel.Add.$i.Enabled")" = true ] && [ -n "$exe" ] && [ -z "$(cget "Kernel.Add.$i.MaxKernel")" ]; then
+      if [ "$(cget "Kernel.Add.$i.Enabled")" = true ] && [ -n "$exe" ] && reaches_27 "$(cget "Kernel.Add.$i.MaxKernel")"; then
         case "$keep" in *" $name "*) ;; *)
           sets "Kernel.Add.$i.MaxKernel" 26.99.99 || { bad "could not limit $name"; return 1; }
           NOT27="$NOT27 $name";; esac
