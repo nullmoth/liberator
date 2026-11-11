@@ -1,0 +1,14 @@
+{
+  "OpCore-Simplify": {
+    "url": "https://github.com/lzhoang2801/OpCore-Simplify",
+    "commit": "814061d40d6292d7c656c90e7cc715a250db89b6",
+    "committed": "2026-11-04T08:19:01+07:00",
+    "license": "BSD-3-Clause"
+  },
+  "Hardware-Sniffer": {
+    "url": "https://github.com/lzhoang2801/Hardware-Sniffer",
+    "commit": "6570f91c33c63f5bf481db31789f903b0d12099f",
+    "committed": "2026-08-16T08:36:19+07:00",
+    "license": "BSD-3-Clause"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "about": "Per-system driver rules. A rule applies when every key in its match is true for this machine. conf entries are written to /Library/GPUBundles/nvmtl/nvrm610.conf (the driver reads them at load); builtin rules live in the driver's code and are listed so reports show which ones this machine gets.",
+  "rules": [
+    {
+      "id": "nvenc-not-on-ada",
+      "why": "The driver has hardware encoders for Turing (GTX 16 and RTX 20), Ampere and Blackwell, but none yet for Ada; on Ada apps use Apple's software encoder instead of failing. This rule once covered Turing and Ampere too and kept their encoders off after the driver gained them.",
+      "evidence": ["Discord 2026-10-07: RTX 3050 can decode but not encode (before the Ampere encoder)", "Discord 2026-10-20: RTX 3080 Ti encodes H.264 and HEVC 8/8 once this rule's knobs are removed"],
+      "match": {"arch": ["ada"]},
+      "conf": {"NVMTL_NO_NVENC": "1", "NVMTL_NO_NVENC_HEVC": "1"}
+    },
+    {
+      "id": "turing-copy-engine",
+      "builtin": true,
+      "why": "Turing needs the graphics engine's partner copy engine named when its copy object is made (driver 1.0.7).",
+      "evidence": ["GTX 1650 Mobile: VK_ERROR_UNKNOWN at the copy object"],
+      "match": {"arch": ["turing"]}
+    },
+    {
+      "id": "turing-uncached-gpu-memory",
+      "why": "On Turing the desktop starts only when command buffers and system memory are not cached by the GPU; an RTX 2060 SUPER boot-looped at login without these two knobs and loads to a Metal 3 desktop with them (driver 1.0.11, no boot-arg needed).",
+      "evidence": ["GitHub issue 5 RTX 2060 SUPER: CE0 runlist errors, login loop; fixed by these two knobs alone"],
+      "match": {"arch": ["turing"]},
+      "conf": {"NVK_CMDPOOL_GPU_UNCACHED": "1", "NVK_SYSMEM_GPU_UNCACHED": "1"}
+    },
+    {
+      "id": "image-size-pre-blackwell",
+      "builtin": true,
+      "why": "Tiled images are sized to the 64 KB range they are bound with, before Blackwell (driver 1.0.6/1.0.7).",
+      "evidence": ["RTX 3050: WindowServer abort on a resolution change"],
+      "match": {"arch": ["turing", "ampere", "ada"]}
+    },
+    {
+      "id": "egpu-bar-left-in-place",
+      "builtin": true,
+      "why": "Behind Thunderbolt or a PCIe switch the driver does not move the card's memory window (driver 1.0.6).",
+      "evidence": ["RTX 3070 eGPU: kbusVerifyBar2 NV_ERR_MEMORY_ERROR"],
+      "match": {"egpu": true}
+    },
+    {
+      "id": "bar1-resize-8gb",
+      "builtin": true,
+      "why": "A card that starts with a small BAR1 is resized to at most 8 GB (driver 1.0.6).",
+      "evidence": ["RTX 3060 and RTX 5080 stopped at 16 GB"],
+      "match": {}
+    }
+  ]
+}
