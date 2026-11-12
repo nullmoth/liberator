@@ -902,6 +902,12 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
         rc == 0 and dmax(gg.STAGED).get("VoodooPS2Controller.kext") == "" and "VoodooPS2Controller" not in open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.txt")).read(), out)
     arm("the log holds every change, oldest first", len(open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.log")).read().splitlines()) == 5,
         open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.log")).read())
+    setup_drv = (ROOT / "Resources/nullmoth-setup.sh").read_text()
+    arm("Send logs carries the driver choices and the log of changes from the startup partition",
+        '"$mp/EFI/golden-gate-drivers.txt"' in setup_drv and '"$mp/EFI/golden-gate-drivers.log"' in setup_drv and "driver changes (newest 40)" in setup_drv, "")
+    kit_tool = (ROOT.parent / "tools/v3_kit.py").read_text()
+    arm("the kit tool writes both driver lists into every kit it makes, and no driver is on both or on the known list",
+        'manifest["try_27"] = list(TRY_27)' in kit_tool and 'manifest["may_27"] = list(MAY_27)' in kit_tool, "")
     # --- preflight on a Mac where macOS 27 is already laid down (an update to a newer release of this app) ---
     # The first such PC was refused "51 GB free, 67 GB needed" for download room it would never use.
     def pre_calls(vols):

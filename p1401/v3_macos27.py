@@ -160,6 +160,9 @@ def load_kit(path):
     for n in m.get("known_27", []):
         if not isinstance(n, str) or not _KEXT.match(n):
             raise KitError(f"bad kext name in the v3 kit's list of kexts known on macOS 27: {n!r}")
+    for n in m.get("try_27", []) + m.get("may_27", []):
+        if not isinstance(n, str) or not _KEXT.match(n):
+            raise KitError(f"bad kext name in the v3 kit's lists of kexts to try on macOS 27: {n!r}")
     if "csr_active_config" in m and not re.match(r"[0-9a-f]{8}\Z", str(m["csr_active_config"])):
         raise KitError(f"bad system-protection value in the v3 kit manifest: {m['csr_active_config']!r}")
     if "platform" in m:
@@ -377,7 +380,7 @@ def apply(efi_dir, kit, notices, report=None, kit_model=False):
     # A kext of the PC's own build that has code, that the kit neither brings nor knows, and that has no upper limit
     # of its own, stops at macOS 26. The result names each one.
     if kit.get("known_27"):
-        keep = set(kit["known_27"]) | {k["name"] for k in kit["kexts"]}
+        keep = set(kit["known_27"]) | set(kit.get("try_27", [])) | {k["name"] for k in kit["kexts"]}
         for e in add:
             if e.get("Enabled") and e.get("ExecutablePath") and not e.get("MaxKernel") and _bundle(e) not in keep:
                 e["MaxKernel"] = UNKNOWN_MAX

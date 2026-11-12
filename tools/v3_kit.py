@@ -60,6 +60,17 @@ TAHOE_MAX = "26.99.99"
 # Ethernet drivers after it did not, and stay open because a 27 without a network cannot send its logs. Every other
 # kext with code in it that the kit does not bring stops at macOS 26: an unknown kext on a new kernel is the likeliest
 # reason for a start that hangs, and it then hangs with no log.
+# Drivers that link against the macOS 27 kernel (checked with the import check, 2026-11-12) but that nobody has run
+# there yet. They are kept ON: a laptop without its keyboard, trackpad and battery drivers cannot be used on macOS 27
+# at all. The user can turn any of them off from macOS 26 (the drivers step), which is the way back into macOS 27
+# when one of them stops it from starting.
+TRY_27 = ["VoodooPS2Controller.kext", "VoodooPS2Keyboard.kext", "VoodooPS2Trackpad.kext", "VoodooPS2Mouse.kext",
+          "VoodooInput.kext", "VoodooI2C.kext", "VoodooI2CServices.kext", "VoodooGPIO.kext", "VoodooI2CHID.kext",
+          "VoodooI2CELAN.kext", "VoodooI2CSynaptics.kext", "VoodooI2CFTE.kext", "VoodooI2CAtmelMXT.kext",
+          "SMCBatteryManager.kext", "SMCLightSensor.kext", "SMCDellSensors.kext", "ECEnabler.kext",
+          "BrightnessKeys.kext", "IntelSnowMausi.kext"]
+# Drivers the kit holds at macOS 26 by default, that link on macOS 27 and that a user may turn on there to try.
+MAY_27 = ["SMCSuperIO.kext", "AppleALC.kext", "NVMeFix.kext", "WhateverGreen.kext"]
 KNOWN_27 = ["Lilu.kext", "VirtualSMC.kext", "SMCProcessor.kext", "AppleMCEReporterDisabler.kext", "USBToolBox.kext",
             "RTL812xLucy.kext",
             "LucyRTL8125Ethernet.kext", "IntelMausi.kext", "AppleIGC.kext", "AppleIGB.kext", "IntelLucy.kext",
@@ -126,6 +137,8 @@ def make(config, kexts, out):
     manifest["caps"] += [{"name": n, "max_kernel": TAHOE_MAX} for n in TAHOE_ONLY if n not in capped]
     manifest["block_caps"] = [{"identifier": i, "max_kernel": TAHOE_MAX} for i in BLOCK_CAPS]
     manifest["known_27"] = list(KNOWN_27)
+    manifest["try_27"] = list(TRY_27)
+    manifest["may_27"] = list(MAY_27)
     # Kernel patches of a PC's own config that may be carried to macOS 27, and ours that stand in for one that may not:
     # tools/kernel_patches_27.py check wrote the file from the macOS 26 and 27 kernels. A kit without the file carries
     # none, which is what every kit did before.

@@ -1237,6 +1237,9 @@ rollback|cancel|remove)
     ok "Golden Gate cancelled: the startup partition is as it was"
   elif [ "$STEP" != rollback ]; then ok "Golden Gate was not started on this partition - nothing to cancel"; fi
   [ "$STEP" = remove ] || { echo "RESULT ok"; exit 0; }
+  # Removing macOS 27 also takes the driver choices and their log off the startup partition: they are about a
+  # macOS 27 that is no longer there. Cancel keeps them, because an update cancels and stages again.
+  rm -f "$EFI/$CHOICES" "$EFI/$DRVLOG" "$EFI/$CHOICES.old" 2>/dev/null
 
   # remove: with the startup files back, the macOS 27 this app laid down goes too (checked above, before any change)
   if [ -z "$rec" ]; then

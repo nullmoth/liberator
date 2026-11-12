@@ -639,6 +639,12 @@ gg_partition() {  # <mounted startup partition> <label>: the Golden Gate record 
     if [ ${#s} -gt 4 ]; then s="...${s: -4}"; elif [ -n "$s" ]; then s="...(short)"; else s="none"; fi
     echo "  EFI/$d: model $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$c" 2>/dev/null || echo unread), serial $s, kernel entries $(plutil -extract Kernel.Add raw -o - "$c" 2>/dev/null || echo ?)"
   done
+  # the user's own choices for single drivers on macOS 27 and every change made to them, for the report on a
+  # driver that stopped macOS 27 from starting
+  if [ -f "$mp/EFI/golden-gate-drivers.txt" ] && [ ! -L "$mp/EFI/golden-gate-drivers.txt" ]; then
+    echo "  driver choices:"; head -c 4096 "$mp/EFI/golden-gate-drivers.txt" | tr '\t' ' ' | sed 's/^/    /'; fi
+  if [ -f "$mp/EFI/golden-gate-drivers.log" ] && [ ! -L "$mp/EFI/golden-gate-drivers.log" ]; then
+    echo "  driver changes (newest 40):"; tail -n 40 "$mp/EFI/golden-gate-drivers.log" | cut -c1-200 | sed 's/^/    /'; fi
   echo
 }
 # The macOS 27 whose logs are read is the one this app laid down, found by the two volume identifiers the install step
