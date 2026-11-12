@@ -771,10 +771,53 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
     json.dump(rec, open(os.path.join(kc.efi, "EFI", "golden-gate.json"), "w"))
     rc, out = run("kit-current", kc.efi, kc.kit_path)
     arm("a record naming a different kit reads as another kit", rc == 1 and "were staged from another kit" in out, out)
+    # --- refresh: the startup files in use, made again from a newer kit (the update run on macOS 27 itself) ---
+    rf = fresh(td, "refresh")
+    def md5_of(path):
+        return hashlib.md5(open(path, "rb").read()).hexdigest()
+    def rstate():
+        return json.load(open(os.path.join(rf.efi, "EFI", "golden-gate.json")))
+    run("stage", rf.efi, rf.kit_path, *PCARGS); run("activate", rf.efi, rf.kit_path, "--confirm")
+    kept_cfg = os.path.join(rf.efi, "EFI", "OC-26", "config.plist"); kept_before = md5_of(kept_cfg)
+    marker = os.path.join(rf.efi, "EFI", "OC", "FROM-THE-OLDER-KIT"); open(marker, "w").close()
+    old_md5 = rstate()["kit_md5"]
+    rc, out = run("refresh", rf.efi, rf.kit_path, "--confirm", *PCARGS)
+    arm("refresh with the kit the files came from changes nothing and says so",
+        rc == 0 and "already this kit's" in out and os.path.exists(marker), out)
+    edit(rf.kit_path, lambda m: m.update({"kit": m.get("kit", "kit") + " (newer)"}))
+    new_md5 = md5_of(os.path.join(rf.kit_path, "v3-kit.json"))
+    rc, out = run("refresh", rf.efi, rf.kit_path, *PCARGS)
+    arm("refresh without confirmation changes nothing", rc == 1 and "only when you confirm" in out and os.path.exists(marker) and rstate()["kit_md5"] == old_md5, out)
+    rc, out = run("refresh", rf.efi, rf.kit_path, "--confirm", "--macos-major", "27", "--gpu-id", "0000", "--cpu-vendor", "GenuineIntel", "--laptop", "no")
+    arm("refresh from macOS 27 on a PC whose graphics path is not the NVIDIA one is refused, and nothing is changed",
+        rc == 1 and "renewed from macOS 26" in out and os.path.exists(marker) and rstate()["kit_md5"] == old_md5
+        and not os.path.exists(os.path.join(rf.efi, "EFI", ".golden-gate-scratch")), out)
+    rc, out = run("refresh", rf.efi, rf.kit_path, "--confirm", "--macos-major", "27", "--gpu-id", "2D05", "--cpu-vendor", "GenuineIntel", "--laptop", "no")
+    efi_names = sorted(os.listdir(os.path.join(rf.efi, "EFI")))
+    arm("refresh with a newer kit, run on macOS 27, replaces the startup files in use with ones made from the kept macOS 26 files",
+        rc == 0 and "are now this kit's" in out and not os.path.exists(marker)
+        and os.path.isfile(os.path.join(rf.efi, "EFI", "OC", "config.plist")) and os.path.isdir(os.path.join(rf.efi, "EFI", "OC", "Kexts")), out + repr(efi_names))
+    arm("after refresh the record is active and names the newer kit, the kept macOS 26 files are untouched, and nothing is left over",
+        rstate()["state"] == "active" and rstate()["kit_md5"] == new_md5 and new_md5 != old_md5 and md5_of(kept_cfg) == kept_before
+        and "OC-27-old" not in efi_names and ".golden-gate-scratch" not in efi_names and "OC-27-staged" not in efi_names, repr(efi_names) + repr(rstate()))
+    rc, out = run("kit-current", rf.efi, rf.kit_path)
+    arm("after refresh kit-current says yes", rc == 0, out)
+    os.rename(os.path.join(rf.efi, "EFI", "OC"), os.path.join(rf.efi, "EFI", "OC-27-old"))
+    rc, out = run("kit-current", rf.efi, rf.kit_path)
+    arm("a refresh stopped between its two renames is healed by the next step: the startup files it set aside are the default again",
+        rc == 0 and os.path.isdir(os.path.join(rf.efi, "EFI", "OC")) and not os.path.exists(os.path.join(rf.efi, "EFI", "OC-27-old"))
+        and "the macOS 27 startup files it had set aside are back" in out, out)
+    rs = fresh(td, "refresh-staged"); run("stage", rs.efi, rs.kit_path, *PCARGS)
+    edit(rs.kit_path, lambda m: m.update({"kit": m.get("kit", "kit") + " (newer)"}))
+    rc, out = run("refresh", rs.efi, rs.kit_path, "--confirm", *PCARGS)
+    arm("refresh is refused where the macOS 27 startup files are only staged", rc == 1 and "nothing to renew" in out, out)
     setup_all = (ROOT / "Resources/nullmoth-setup.sh").read_text()
     i_kc = setup_all.find('"$GGS" kit-current'); i_cancel = setup_all.find('"$GGS" cancel --root', i_kc); i_case = setup_all.find('none) ggmark "STAGE check"; gg preflight')
     arm("the one-button run asks kit-current first, takes an older kit's startup files back, and then runs as a first run does",
         0 < i_kc < i_cancel < i_case, repr((i_kc, i_cancel, i_case)))
+    arm("the update run on macOS 27 renews the startup files after the packages, on the partition this Mac started from",
+        'V3REFRESH=1' in setup_all and setup_all.find('V3REFRESH=1') < setup_all.find('"$GGS" refresh --root "$MOUNT_POINT"')
+        and 'd=$(booted_part) || d=$(boot_esp)' in setup_all, "")
     arm("the one-button run makes no kernel collections and lays nothing down where macOS 27 is already on its volumes",
         '[ $gglaid = 1 ] || gg collections' in setup_all and 'if [ $gglaid = 1 ]; then echo "OK macOS 27 is already on its own volumes"; else gg installer' in setup_all, "")
     # --- preflight on a Mac where macOS 27 is already laid down (an update to a newer release of this app) ---
@@ -1243,7 +1286,7 @@ echo "$me $mode" >> "@LOG@"
     arm("setup hands a macOS 27 install to the local step only with a kit, before any disk is looked at or a package opened, and confirms only for apply",
         0 < setup_src.index('[ "$(id -u)" = 0 ] ||') < v3i < setup_src.index("driver_os_ok() {") < setup_src.index('step "Checking the driver package"')
         and '[ -f "${GGKIT:-}/v3-kit.json" ] || { echo "STOP macOS 27 is not offered by this build of 1401. Nothing was changed"' in setup_src[v3i:v3i + 700]
-        and 'if [ "$V3I" = apply ]; then /bin/bash "$GGS" local --kit "$GGKIT" --confirm; else /bin/bash "$GGS" local --kit "$GGKIT"; fi\n  exit $?' in setup_src[v3i:v3i + 900]
+        and 'if [ "$V3I" = apply ]; then /bin/bash "$GGS" local --kit "$GGKIT" --confirm; v3rc=$?; else /bin/bash "$GGS" local --kit "$GGKIT"; exit $?; fi\n  [ $v3rc = 0 ] || exit $v3rc' in setup_src[v3i:v3i + 900]
         and "--pkg" not in setup_src[v3i:v3i + 900] and "$PKG" not in setup_src[v3i:v3i + 900])
 
     # 7b. the kit is trusted by owner and place only, and what its manifest may change is a fixed list

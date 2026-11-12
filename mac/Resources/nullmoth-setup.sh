@@ -107,8 +107,11 @@ if [ -n "${V3I:-}" ]; then
   case "$V3I" in dry|apply) ;; *) echo "STOP --v3-install takes dry or apply"; echo "RESULT stop"; exit 2;; esac
   [ -f "${GGKIT:-}/v3-kit.json" ] || { echo "STOP macOS 27 is not offered by this build of 1401. Nothing was changed"; echo "RESULT stop"; exit 1; }
   GGS="$(dirname "$0")/nullmoth-golden-gate.sh"; [ -f "$GGS" ] || { echo "STOP this build of 1401 has no Golden Gate script"; echo "RESULT stop"; exit 1; }
-  if [ "$V3I" = apply ]; then /bin/bash "$GGS" local --kit "$GGKIT" --confirm; else /bin/bash "$GGS" local --kit "$GGKIT"; fi
-  exit $?
+  if [ "$V3I" = apply ]; then /bin/bash "$GGS" local --kit "$GGKIT" --confirm; v3rc=$?; else /bin/bash "$GGS" local --kit "$GGKIT"; exit $?; fi
+  [ $v3rc = 0 ] || exit $v3rc
+  # The packages are on. The startup files this Mac starts macOS 27 from are renewed next, further down, once the
+  # helpers that find the startup partition exist.
+  V3REFRESH=1
 fi
 # true when a driver from this package may be installed on macOS "$1" (a full version such as 26.7.1)
 driver_os_ok() { case "${1%%.*}" in 15|26) return 0;; esac; return 1; }
@@ -262,6 +265,20 @@ boot_esp() {    # the EFI partition on the physical disk this macOS runs from
   diskutil list "$w" | awk '/ EFI /{print $NF}' | grep -E '^disk[0-9]+s[0-9]+$' | head -1; }
 on_usb() {      # true when the partition is on an external or removable disk (a 1401 stick)
   diskutil info "$1" 2>/dev/null | grep -q -E 'Removable Media: *(Removable|Yes)|Device Location: *External|Protocol: *USB'; }
+# An install on macOS 27 itself, second half: the startup files. The packages alone left the older kit's startup files
+# (its platform driver, its kernel patches) in place for good on a Mac that is updated from macOS 27. The partition is
+# the one OpenCore started this Mac from; when it cannot be found nothing is guessed, and the user is told the way
+# that does work.
+if [ -n "${V3REFRESH:-}" ]; then
+  d=$(booted_part) || d=$(boot_esp)
+  if [ -n "$d" ] && mount_efi "$d" && [ "$(ocrel_in "$MOUNT_POINT")" = EFI/OC ]; then
+    /bin/bash "$GGS" refresh --root "$MOUNT_POINT" --kit "$GGKIT" --confirm $([ -z "${GGCARDMODEL:-}" ] && echo --kit-model); v3rc=$?
+  else
+    echo "NOTE the partition this Mac starts from was not found from macOS 27, so its startup files were not renewed. To renew them, start macOS 26 and run the update there"
+    echo "RESULT ok"; v3rc=0
+  fi
+  cleanup; exit $v3rc
+fi
 bidx() { local i=0 p; while p=$(plutil -extract Kernel.Block.$i.Identifier raw -o - "$C" 2>/dev/null); do [ "$p" = com.apple.iokit.IONDRVSupport ] && { echo $i; return; }; i=$((i+1)); done; }
 loads_emulated_nvram() {  # true when the OpenCore config at $C loads OpenVariableRuntimeDxe.efi (an opt-in 1401 build)
   local i=0 p

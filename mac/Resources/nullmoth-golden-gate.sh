@@ -58,7 +58,7 @@ umask 022
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 PB=/usr/libexec/PlistBuddy
 HERE=$(cd "$(dirname "$0")" && pwd)
-STAGED=OC-27-staged; KEPT=OC-26; DRIVER=NullMoth-v3; STATE=golden-gate.json; MANIFEST=v3-kit.json
+STAGED=OC-27-staged; KEPT=OC-26; RENEWED=OC-27-old; DRIVER=NullMoth-v3; STATE=golden-gate.json; MANIFEST=v3-kit.json
 FROM_MAJOR=26; TARGET=27.2
 # One number for the room macOS 27 needs on the disk this macOS runs from, from the kit scripts' own figures: 35 GB
 # for the new volumes, and 49 GB of work files while it runs (26 GB downloaded from Apple, 23 GB unpacked), which are
@@ -176,8 +176,8 @@ kit_ok() {
   [ $seen = 1 ]
 }
 
-case "$STEP" in preflight|stage|activate|rollback|cancel|installer|collections|finish|local|status|laid|kit-current|downloads|clear-downloads|remove) ;;
-  *) echo "STOP the step must be preflight, stage, activate, rollback, cancel, installer, collections, finish, local, status, laid, kit-current, downloads, clear-downloads or remove"; echo "RESULT stop"; exit 2;; esac
+case "$STEP" in preflight|stage|activate|rollback|cancel|installer|collections|finish|local|status|laid|kit-current|refresh|downloads|clear-downloads|remove) ;;
+  *) echo "STOP the step must be preflight, stage, activate, rollback, cancel, installer, collections, finish, local, status, laid, kit-current, refresh, downloads, clear-downloads or remove"; echo "RESULT stop"; exit 2;; esac
 # The way back (rollback, cancel) and status need no kit: they must work on a Mac whose kit is gone.
 kit_allowed() {  # stops, naming it, on a config key or boot argument the manifest may not set
   local key a n i
@@ -229,6 +229,12 @@ write_state() {  # $1 = state, $2 = driver note, $3 = driver installer, $4 = sys
     "$1" "$FROM_MAJOR" "$TARGET" "$(date +%s)" "$2" "$3" "${4:-}" "$km" > "$tmp" && mv -f "$tmp" "$EFI/$STATE"
 }
 heal() {         # a swap stopped between its two renames leaves no EFI/OC: put macOS 26's files back (golden_gate.py _heal)
+  # the refresh step's swap, stopped between its two renames: the startup files it had set aside go back
+  if [ ! -d "$EFI/OC" ] && [ -d "$EFI/$RENEWED" ] && [ -d "$EFI/$KEPT" ]; then
+    mv "$EFI/$RENEWED" "$EFI/OC" || stop "EFI/OC is missing and the macOS 27 startup files could not be put back from EFI/$RENEWED"
+    note "a stopped run had left no EFI/OC; the macOS 27 startup files it had set aside are back as the default"
+    return 0
+  fi
   [ ! -d "$EFI/OC" ] && [ -d "$EFI/$STAGED" ] && [ -d "$EFI/$KEPT" ] || return 0
   mv "$EFI/$KEPT" "$EFI/OC" || stop "EFI/OC is missing and macOS 26's startup files could not be put back from EFI/$KEPT"
   note "a stopped run had left no EFI/OC; macOS 26's startup files are back as the default"
@@ -1207,6 +1213,47 @@ kit-current)
   have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)
   if [ -n "$want" ] && [ "$have" = "$want" ]; then ok "the macOS 27 startup files were staged from this kit"; echo "RESULT ok"; exit 0; fi
   note "the macOS 27 startup files were staged from another kit"; echo "RESULT stop"; exit 1;;
+
+refresh)
+  # The macOS 27 startup files, made again from this kit on a Mac that already starts from them. It is what an update
+  # of the app run on macOS 27 itself needs: the packages are renewed by the local step, and without this the older
+  # kit's startup files (its platform driver, its kernel patches) stayed for good. The new set is built the way the
+  # stage step builds it, from the macOS 26 files kept at EFI/OC-26, in a scratch folder; the set in use is replaced
+  # by two renames only after the new one is complete, and goes back if the second rename or the record fails.
+  [ $CONFIRM = 1 ] || stop "the macOS 27 startup files are renewed only when you confirm it. Nothing was changed"
+  state_or_stop
+  [ "$ST" = active ] || stop "this Mac does not start from the macOS 27 startup files (state: $ST), so there is nothing to renew. Nothing was changed"
+  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)
+  if [ -n "$want" ] && [ "$have" = "$want" ]; then ok "the macOS 27 startup files are already this kit's"; echo "RESULT ok"; exit 0; fi
+  step "Making the macOS 27 startup files again from this kit"
+  C="$EFI/$KEPT/config.plist"
+  startup_ok || stop "the macOS 26 startup files kept at EFI/$KEPT were not made by 1401. Nothing was changed"
+  need=$(stage_need_kb); free=$(esp_free_kb)
+  if [ -n "$free" ] && [ "$free" -lt "$need" ]; then
+    gain=$(esp_old_logs_kb)
+    if [ "$gain" -gt 0 ] && [ $((free + gain)) -ge "$need" ]; then
+      esp_remove_old_logs; note "removed old OpenCore start-up logs from the startup partition ($((gain / 1024)) MB); the three newest are kept"
+      case "$ESPFREE" in ''|*[!0-9]*) free=$(free_kb "$ROOT");; *) free=$((free + gain));; esac
+    fi
+  fi
+  [ -n "$free" ] && [ "$free" -ge "$need" ] || stop "the startup partition (the small EFI partition OpenCore starts from, $ROOT - not the disk macOS is on) has $(( ${free:-0} / 1024 )) MB free and the new macOS 27 copy needs $((need / 1024)) MB. Nothing was changed"
+  SCR="$EFI/.golden-gate-scratch"; rm -rf "$SCR" "$EFI/$RENEWED"
+  mkdir "$SCR" && cp -R "$EFI/$KEPT" "$SCR/OC" || { rm -rf "$SCR"; stop "could not copy the startup files. EFI/OC is unchanged"; }
+  stage_path
+  # Which graphics path a PC takes is read from the macOS that is running. For an NVIDIA card it is the card alone
+  # that decides, so macOS 27 gives the answer macOS 26 gave. For the other paths it is not known to, so from
+  # macOS 27 they are refused, never guessed.
+  [ "$GFX" = nvidia ] || from_ok || { rm -rf "$SCR"; stop "on this PC's graphics the startup files are renewed from macOS 26: start macOS 26 and update there. Nothing was changed"; }
+  apply_kit "$SCR/OC" || { rm -rf "$SCR"; stop "the macOS 27 startup files could not be made again ($WHY). EFI/OC is unchanged"; }
+  mv "$EFI/OC" "$EFI/$RENEWED" || { rm -rf "$SCR"; stop "could not set the startup files in use aside. Nothing was changed"; }
+  mv "$SCR/OC" "$EFI/OC" || { mv "$EFI/$RENEWED" "$EFI/OC"; rm -rf "$SCR"; stop "the new startup files could not be put in place; the ones in use are back"; }
+  STATE_KIT=$want
+  write_state active "$(plutil -extract driver raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract driver_installer raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract system raw -o - "$EFI/$STATE" 2>/dev/null)" \
+    || { rm -rf "$EFI/OC"; mv "$EFI/$RENEWED" "$EFI/OC"; rm -rf "$SCR"; stop "could not record the change; the startup files in use are back"; }
+  rm -rf "$EFI/$RENEWED" "$SCR"
+  ok "the macOS 27 startup files are now this kit's; macOS 26's are still kept at EFI/$KEPT. Restart to use them"
+  [ $((PATCH_ON + PATCH_OWN)) = 0 ] || note "kernel patches for macOS 27: $PATCH_ON carried as they are$([ $PATCH_OWN = 0 ] || echo ", $PATCH_OWN replaced by the kit's own")"
+  echo "RESULT ok"; exit 0;;
 
 laid)
   # Whether the volumes the install step recorded are there and hold macOS 27. The one-button run asks this so that
