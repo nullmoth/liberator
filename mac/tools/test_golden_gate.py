@@ -755,7 +755,16 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
     arm("kit-current says no where nothing is staged", rc == 1 and "no macOS 27 startup files are staged" in out, out)
     rc, out = run("stage", kc.efi, kc.kit_path, *PCARGS)
     rec = json.load(open(os.path.join(kc.efi, "EFI", "golden-gate.json")))
-    want_md5 = hashlib.md5(open(os.path.join(kc.kit_path, "v3-kit.json"), "rb").read()).hexdigest()
+    def kit_id(kit):
+        """The same value the script works out: the manifest's checksum, then one line per Kexts file, hashed."""
+        lines = hashlib.md5(open(os.path.join(kit, "v3-kit.json"), "rb").read()).hexdigest() + "\n"
+        kx = os.path.join(kit, "Kexts"); files = []
+        for root, _, names in os.walk(kx):
+            files += ["./" + os.path.relpath(os.path.join(root, n), kx) for n in names]
+        for f in sorted(files, key=lambda x: x.encode()):
+            lines += hashlib.md5(open(os.path.join(kx, f[2:]), "rb").read()).hexdigest() + " " + f + "\n"
+        return hashlib.md5(lines.encode()).hexdigest()
+    want_md5 = kit_id(kc.kit_path)
     arm("stage records the checksum of the kit's manifest in the state record", rc == 0 and rec.get("kit_md5") == want_md5, out + repr(rec))
     rc, out = run("kit-current", kc.efi, kc.kit_path)
     arm("kit-current says yes for the kit the files were staged from", rc == 0 and "OK the macOS 27 startup files were staged from this kit" in out, out)
@@ -771,6 +780,15 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
     json.dump(rec, open(os.path.join(kc.efi, "EFI", "golden-gate.json"), "w"))
     rc, out = run("kit-current", kc.efi, kc.kit_path)
     arm("a record naming a different kit reads as another kit", rc == 1 and "were staged from another kit" in out, out)
+    rec["kit_md5"] = want_md5
+    json.dump(rec, open(os.path.join(kc.efi, "EFI", "golden-gate.json"), "w"))
+    rc, out = run("kit-current", kc.efi, kc.kit_path)
+    arm("with the right record again kit-current says yes (control for the next arm)", rc == 0, out)
+    kfile = next(os.path.join(r, n) for r, _, ns in os.walk(os.path.join(kc.kit_path, "Kexts")) for n in ns)
+    with open(kfile, "ab") as fh: fh.write(b"\x00newer build")
+    rc, out = run("kit-current", kc.efi, kc.kit_path)
+    arm("a kit whose manifest is unchanged but that carries a different build of a kext reads as another kit",
+        rc == 1 and "were staged from another kit" in out, out + kfile)
     # --- refresh: the startup files in use, made again from a newer kit (the update run on macOS 27 itself) ---
     rf = fresh(td, "refresh")
     def md5_of(path):
@@ -785,7 +803,7 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
     arm("refresh with the kit the files came from changes nothing and says so",
         rc == 0 and "already this kit's" in out and os.path.exists(marker), out)
     edit(rf.kit_path, lambda m: m.update({"kit": m.get("kit", "kit") + " (newer)"}))
-    new_md5 = md5_of(os.path.join(rf.kit_path, "v3-kit.json"))
+    new_md5 = kit_id(rf.kit_path)
     rc, out = run("refresh", rf.efi, rf.kit_path, *PCARGS)
     arm("refresh without confirmation changes nothing", rc == 1 and "only when you confirm" in out and os.path.exists(marker) and rstate()["kit_md5"] == old_md5, out)
     rc, out = run("refresh", rf.efi, rf.kit_path, "--confirm", "--macos-major", "27", "--gpu-id", "0000", "--cpu-vendor", "GenuineIntel", "--laptop", "no")

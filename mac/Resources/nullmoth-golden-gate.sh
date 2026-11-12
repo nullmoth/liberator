@@ -218,6 +218,14 @@ layout_ok() {    # the folders must be the ones the state names
   [ -d "$EFI/OC" ] && oc=1; [ -d "$EFI/$STAGED" ] && st=1; [ -d "$EFI/$KEPT" ] && kp=1
   case "$1" in none) [ "$oc$st$kp" = 100 ];; staged) [ "$oc$st$kp" = 110 ];; active) [ "$oc$st$kp" = 101 ];; *) return 1;; esac
 }
+# What names a kit for the startup files: its manifest and every file of its Kexts folder, since those are what the
+# startup files are made from. The manifest alone is not enough: a kit can carry a newer build of a kext under the
+# same name with the same manifest, and the startup files would then never be made again.
+kit_id() {
+  { md5 -q "$KIT/$MANIFEST" 2>/dev/null || return 1
+    (cd "$KIT/Kexts" 2>/dev/null && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(md5 -q "$f")" "$f"; done)
+  } | md5 -q
+}
 write_state() {  # $1 = state, $2 = driver note, $3 = driver installer, $4 = system package note
   # kit_md5 names the kit the startup files were staged from (its manifest's checksum). The stage step sets it; every
   # later write carries the recorded value on. A record without it was written by a release that did not keep it,
@@ -1047,7 +1055,7 @@ stage)
     [ ! -L "$KIT/$sdir" ] && [ -f "$KIT/$sdir/$sinst" ] && [ ! -L "$KIT/$sdir/$sinst" ] || { undo; stop "the v3 kit names a system installer that is not there. EFI/OC is unchanged"; }
     SNOTE="in the kit with its installer $sinst"
   fi
-  STATE_KIT=$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)
+  STATE_KIT=$(kit_id)
   write_state staged "$DNOTE" "$DINST" "$SNOTE" || { undo; stop "could not record the state. EFI/OC is unchanged"; }
   ok "macOS 27 startup files staged at EFI/$STAGED; this Mac still starts from EFI/OC"
   if [ "$EFIKIND" = mac ]; then note "model: this Mac's own (not changed)"
@@ -1210,7 +1218,7 @@ kit-current)
   # this question the startup files of the older kit stayed in place for good while only the packages were renewed.
   state_or_stop
   [ "$ST" != none ] || { note "no macOS 27 startup files are staged on this partition"; echo "RESULT stop"; exit 1; }
-  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)
+  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(kit_id)
   if [ -n "$want" ] && [ "$have" = "$want" ]; then ok "the macOS 27 startup files were staged from this kit"; echo "RESULT ok"; exit 0; fi
   note "the macOS 27 startup files were staged from another kit"; echo "RESULT stop"; exit 1;;
 
@@ -1223,7 +1231,7 @@ refresh)
   [ $CONFIRM = 1 ] || stop "the macOS 27 startup files are renewed only when you confirm it. Nothing was changed"
   state_or_stop
   [ "$ST" = active ] || stop "this Mac does not start from the macOS 27 startup files (state: $ST), so there is nothing to renew. Nothing was changed"
-  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)
+  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(kit_id)
   if [ -n "$want" ] && [ "$have" = "$want" ]; then ok "the macOS 27 startup files are already this kit's"; echo "RESULT ok"; exit 0; fi
   step "Making the macOS 27 startup files again from this kit"
   C="$EFI/$KEPT/config.plist"
