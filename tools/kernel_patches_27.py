@@ -328,28 +328,48 @@ def check(k26, k27, kexts, plists):
     images = {"kernel": (Image.load(k26), Image.load(k27))}
     for ident, (a, b) in kexts.items():
         images[ident] = (Image.load(a), Image.load(b))
-    carried, left, seen = [], [], set()
+    patches = []
     for path in plists:
         with open(path, "rb") as fh:
-            patches = plistlib.load(fh).get("Kernel", {}).get("Patch", [])
-        for p in patches:
-            if not covers_26(p):
-                continue
+            patches += plistlib.load(fh).get("Kernel", {}).get("Patch", [])
+    carried, left = judge_all(patches, images)
+    return carried, left, build_own(OWN, images)
+
+
+def variants(p):
+    """The patch as written, then the same entry with its Base trimmed when the Base has a space at either end.
+    The patch is named by mark(), which includes Base, so a config that carries the clean name has a different mark
+    from one with the space. A list in this repo only ever holds one of the two, while users hold either: both are
+    judged, each on its own, and the trimmed one is only ever derived from a real entry, never written by hand."""
+    yield p, ""
+    base = p.get("Base") or ""
+    if base and base.strip() != base and base.strip():
+        yield dict(p, Base=base.strip()), f"the same patch with its Base written {base.strip()!r}, without the space"
+
+
+def judge_all(patches, images):
+    """(carried, left) for a list of plist entries; see the module docstring for what carried means."""
+    carried, left, seen = [], [], set()
+    for entry in patches:
+        if not covers_26(entry):
+            continue
+        for p, note in variants(entry):
             m = mark(p)
             if m in seen:
                 continue
             seen.add(m)
             ident = p.get("Identifier", "")
+            row = {"comment": p.get("Comment", ""), **({"variant": note} if note else {})}
             if ident not in images:
-                left.append({"comment": p.get("Comment", ""), "why": f"no macOS 26 and 27 binaries were given for {ident!r}"})
+                left.append({**row, "why": f"no macOS 26 and 27 binaries were given for {ident!r}"})
                 continue
             ok, why, detail = judge(p, *images[ident])
-            row = {"comment": p.get("Comment", ""), "identifier": ident, **detail}
+            row.update({"identifier": ident, **detail})
             if ok:
                 carried.append({"mark": m, **row})
             else:
                 left.append({**row, "why": why})
-    return carried, left, build_own(OWN, images)
+    return carried, left
 
 
 def sha256_of(path):
@@ -488,6 +508,18 @@ def selftest():
         not ok and "'_first '" in why and "never applied on macOS 26 either" in why, why)
     ok, why, _ = judge(dict(spaced, Base="_nothere"), a, b_same)
     arm("control: a symbol that is simply missing keeps the plain reason", not ok and "is not in this binary" in why and "space" not in why, why)
+    spaced_masked = dict(masked, Base="_second ", MinKernel="20.4.0", MaxKernel="25.99.99", Comment="spaced")
+    car, lft = judge_all([spaced_masked], {"kernel": (a, b_same)})
+    clean = dict(spaced_masked, Base="_second")
+    arm("the clean-Base form of a patch written with a space is derived, judged on its own, and carried under its own mark",
+        [r["mark"] for r in car] == [mark(clean)] and "without the space" in car[0].get("variant", "") and car[0]["in"] == ["_second"], car)
+    arm("and the spaced form stays left out with its reason, under the mark a config with the space has",
+        len(lft) == 1 and "never applied on macOS 26 either" in lft[0]["why"] and mark(spaced_masked) not in [r["mark"] for r in car], lft)
+    car, lft = judge_all([spaced_masked], {"kernel": (a, nosym)})
+    arm("a clean-Base form that fails a check on macOS 27 is NOT carried, and says why",
+        car == [] and len(lft) == 2 and "'_second' is not in this binary" in lft[1]["why"] and "without the space" in lft[1]["variant"], (car, lft))
+    car, lft = judge_all([dict(masked, MinKernel="20.4.0", MaxKernel="25.99.99")], {"kernel": (a, b_same)})
+    arm("control: a patch with a clean Base is judged once, with no derived form", len(car) == 1 and "variant" not in car[0] and lft == [], (car, lft))
     print(f"{len(fails)} failed")
     return 1 if fails else 0
 

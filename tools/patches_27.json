@@ -89,6 +89,17 @@
    ]
   },
   {
+   "mark": "893c553adeef53590b4a035f86ae01b195efae3ca9e4752506b3ca15bdbcabd8",
+   "comment": "algrey | _cpuid_set_cpufamily | Force CPUFAMILY_INTEL_PENRYN | 11.3+",
+   "variant": "the same patch with its Base written '_cpuid_set_info', without the space",
+   "identifier": "kernel",
+   "found_26": 1,
+   "found_27": 1,
+   "in": [
+    "_cpuid_set_info"
+   ]
+  },
+  {
    "mark": "3eb73d3ba4ad973531d0821eef5ae3a53581164d8ae997b2f7feff1803d512cc",
    "comment": "algrey | _i386_init | Remove 3 rdmsr calls | 10.13+",
    "identifier": "kernel",

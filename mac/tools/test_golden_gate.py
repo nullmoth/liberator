@@ -473,6 +473,26 @@ with tempfile.TemporaryDirectory() as td:
     rc, out = run("stage", amd3.efi, badkit, *AMDARGS)
     arm("a kit patch with text that would break out of its field is refused and nothing is staged",
         rc == 1 and "a kit kernel patch has a field 1401 will not write" in out and tree(amd3.efi) == b3, out)
+    # The Penryn patch as the community list writes it (clean Base) and as one config writes it (a space after the
+    # name). The kit's list comes from the real patches_27.json, so this ties the tool's mark to the script's mark.
+    p27 = json.load(open(os.path.join(os.path.dirname(os.path.abspath(kp27.__file__)), "patches_27.json")))
+    penryn = [r["mark"] for r in p27["carried"] if "CPUFAMILY_INTEL_PENRYN" in r["comment"]]
+    clean = kpatch("penryn clean", bytes.fromhex("803d000000000675"), Base="_cpuid_set_info", Mask=bytes.fromhex("ffff00000000ffff"),
+                   mn="20.4.0", Replace=bytes.fromhex("8a0500000000eb00"))
+    spaced = dict(clean, Comment="penryn spaced", Base="_cpuid_set_info ")
+    arm("the carried Penryn mark in patches_27.json is the mark of the clean-Base entry, not of the spaced one",
+        penryn == [kp27.mark(clean)] and kp27.mark(spaced) not in [r["mark"] for r in p27["carried"]], penryn)
+    amd4 = fresh(td, "amd-pc-penryn")
+    c4 = plistlib.load(open(os.path.join(amd4.efi, "EFI", "OC", "config.plist"), "rb"))
+    c4["Kernel"]["Patch"] = [clean, spaced]
+    plistlib.dump(c4, open(os.path.join(amd4.efi, "EFI", "OC", "config.plist"), "wb"))
+    pkit = mac_kit("kit-amd-penryn", patches_27=[r["mark"] for r in p27["carried"]], patches_27_own=p27["own"])
+    rc, out = run("stage", amd4.efi, pkit, *AMDARGS)
+    sp4 = {q["Comment"]: q for q in plistlib.load(open(os.path.join(amd4.efi, "EFI", gg.STAGED, "config.plist"), "rb"))["Kernel"]["Patch"]} if rc == 0 else {}
+    arm("the script's mark of a clean-Base config matches the carried one: the patch is carried to macOS 27",
+        sp4.get("penryn clean", {}).get("MaxKernel") == "27.99.99", out + repr(sp4.get("penryn clean")))
+    arm("and the same patch with the space keeps its macOS 26 limit and is named",
+        sp4.get("penryn spaced", {}).get("MaxKernel") == "25.99.99" and "penryn spaced" in out, out)
     pc2 = fresh(td, "pc-after-mac")
     rc, out = run("stage", pc2.efi, mkit, "--gpu-id", "2D05")
     pcc = plistlib.load(open(os.path.join(pc2.efi, "EFI", gg.STAGED, "config.plist"), "rb")) if rc == 0 else {"Kernel": {"Add": []}, "NVRAM": {"Add": {}}, "PlatformInfo": {"Generic": {}}}
