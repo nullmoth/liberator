@@ -176,8 +176,8 @@ kit_ok() {
   [ $seen = 1 ]
 }
 
-case "$STEP" in preflight|stage|activate|rollback|cancel|installer|collections|finish|local|status|laid|downloads|clear-downloads|remove) ;;
-  *) echo "STOP the step must be preflight, stage, activate, rollback, cancel, installer, collections, finish, local, status, laid, downloads, clear-downloads or remove"; echo "RESULT stop"; exit 2;; esac
+case "$STEP" in preflight|stage|activate|rollback|cancel|installer|collections|finish|local|status|laid|kit-current|downloads|clear-downloads|remove) ;;
+  *) echo "STOP the step must be preflight, stage, activate, rollback, cancel, installer, collections, finish, local, status, laid, kit-current, downloads, clear-downloads or remove"; echo "RESULT stop"; exit 2;; esac
 # The way back (rollback, cancel) and status need no kit: they must work on a Mac whose kit is gone.
 kit_allowed() {  # stops, naming it, on a config key or boot argument the manifest may not set
   local key a n i
@@ -219,9 +219,14 @@ layout_ok() {    # the folders must be the ones the state names
   case "$1" in none) [ "$oc$st$kp" = 100 ];; staged) [ "$oc$st$kp" = 110 ];; active) [ "$oc$st$kp" = 101 ];; *) return 1;; esac
 }
 write_state() {  # $1 = state, $2 = driver note, $3 = driver installer, $4 = system package note
-  local tmp="$EFI/$STATE.tmp"
-  printf '{\n "state": "%s",\n "from_major": %s,\n "target": "%s",\n "staged_at": %s,\n "driver": "%s",\n "driver_installer": "%s",\n "system": "%s"\n}\n' \
-    "$1" "$FROM_MAJOR" "$TARGET" "$(date +%s)" "$2" "$3" "${4:-}" > "$tmp" && mv -f "$tmp" "$EFI/$STATE"
+  # kit_md5 names the kit the startup files were staged from (its manifest's checksum). The stage step sets it; every
+  # later write carries the recorded value on. A record without it was written by a release that did not keep it,
+  # and is read as "another kit": that is how a newer release knows the startup files must be made again.
+  local tmp="$EFI/$STATE.tmp" km="${STATE_KIT:-}"
+  [ -n "$km" ] || km=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null)
+  case "$km" in *[!0-9a-f]*) km="";; esac
+  printf '{\n "state": "%s",\n "from_major": %s,\n "target": "%s",\n "staged_at": %s,\n "driver": "%s",\n "driver_installer": "%s",\n "system": "%s",\n "kit_md5": "%s"\n}\n' \
+    "$1" "$FROM_MAJOR" "$TARGET" "$(date +%s)" "$2" "$3" "${4:-}" "$km" > "$tmp" && mv -f "$tmp" "$EFI/$STATE"
 }
 heal() {         # a swap stopped between its two renames leaves no EFI/OC: put macOS 26's files back (golden_gate.py _heal)
   [ ! -d "$EFI/OC" ] && [ -d "$EFI/$STAGED" ] && [ -d "$EFI/$KEPT" ] || return 0
@@ -1036,6 +1041,7 @@ stage)
     [ ! -L "$KIT/$sdir" ] && [ -f "$KIT/$sdir/$sinst" ] && [ ! -L "$KIT/$sdir/$sinst" ] || { undo; stop "the v3 kit names a system installer that is not there. EFI/OC is unchanged"; }
     SNOTE="in the kit with its installer $sinst"
   fi
+  STATE_KIT=$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)
   write_state staged "$DNOTE" "$DINST" "$SNOTE" || { undo; stop "could not record the state. EFI/OC is unchanged"; }
   ok "macOS 27 startup files staged at EFI/$STAGED; this Mac still starts from EFI/OC"
   if [ "$EFIKIND" = mac ]; then note "model: this Mac's own (not changed)"
@@ -1191,6 +1197,16 @@ rollback|cancel|remove)
   else ok "the recorded macOS 27 volumes were already gone; their record is removed"; fi
   [ "$(dl_bytes)" = 0 ] || note "the downloads are kept ($(gb1 "$(dl_bytes)") GB); Clear downloads removes them"
   echo "RESULT ok"; exit 0;;
+
+kit-current)
+  # Whether the macOS 27 startup files on this partition were staged from the kit given. The one-button run asks
+  # this on a Mac that is already staged or active: after an update of the app the kit is a newer one, and without
+  # this question the startup files of the older kit stayed in place for good while only the packages were renewed.
+  state_or_stop
+  [ "$ST" != none ] || { note "no macOS 27 startup files are staged on this partition"; echo "RESULT stop"; exit 1; }
+  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)
+  if [ -n "$want" ] && [ "$have" = "$want" ]; then ok "the macOS 27 startup files were staged from this kit"; echo "RESULT ok"; exit 0; fi
+  note "the macOS 27 startup files were staged from another kit"; echo "RESULT stop"; exit 1;;
 
 laid)
   # Whether the volumes the install step recorded are there and hold macOS 27. The one-button run asks this so that

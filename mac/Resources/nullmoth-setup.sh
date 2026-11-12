@@ -1497,15 +1497,30 @@ if [ -n "${GG:-}" ]; then
     # and the app asked the user about it before this run started.
     ggst=$(/bin/bash "$GGS" status --root "$MP" 2>/dev/null | sed -n 's/^OK Golden Gate state: //p')
     ggrc=0
+    # Startup files staged from an older kit are made again from this one. Without this an update of the app renewed
+    # the packages on macOS 27 and left the older kit's startup files (its platform driver, its kernel patches) in
+    # place for good. The way there is the ordinary one: the startup files go back to macOS 26's (cancel), and the
+    # run goes on as a first one does, ending with the switch. A stop in between leaves this Mac starting macOS 26.
+    case "$ggst" in staged|active)
+      if ! /bin/bash "$GGS" kit-current --root "$MP" ${GGKIT:+--kit "$GGKIT"} 2>/dev/null | grep -q '^OK '; then
+        echo "NOTE the macOS 27 startup files here were made by an older kit: they are made again from this one"
+        if /bin/bash "$GGS" cancel --root "$MP" ${GGCONFIRM:+--confirm}; then ggst=none
+        else echo "STOP the older startup files could not be taken back. Nothing else was changed"; ggrc=1; ggst=stop; fi
+      fi;;
+    esac
     case "$ggst" in
+      stop) ;;
       none) ggmark "STAGE check"; gg preflight && { ggmark "STAGE stage"; gg stage; } || ggrc=1;;
       staged) echo "NOTE the macOS 27 startup files are already staged";;
       active) echo "NOTE this Mac already starts from the macOS 27 startup files";;
       *) echo "STOP the Golden Gate state on the startup partition could not be read. Nothing was changed"; ggrc=1;;
     esac
     # A stage that an earlier run finished is passed over at once: the next STAGE line counts it as done.
-    [ $ggrc = 0 ] && { ggmark "STAGE collections"; gg collections || ggrc=1; }
-    [ $ggrc = 0 ] && { ggmark "STAGE install"; /bin/bash "$GGS" laid --root "$MP" 2>/dev/null | grep '^OK ' || gg installer || ggrc=1; }
+    # The kernel collections are made for the lay-down alone. Where macOS 27 is already on its volumes neither is
+    # done again: making the collections would download a Kernel Debug Kit and need 8 GB for nothing.
+    gglaid=0; [ $ggrc = 0 ] && /bin/bash "$GGS" laid --root "$MP" 2>/dev/null | grep -q '^OK ' && gglaid=1
+    [ $ggrc = 0 ] && { ggmark "STAGE collections"; [ $gglaid = 1 ] || gg collections || ggrc=1; }
+    [ $ggrc = 0 ] && { ggmark "STAGE install"; if [ $gglaid = 1 ]; then echo "OK macOS 27 is already on its own volumes"; else gg installer || ggrc=1; fi; }
     [ $ggrc = 0 ] && { ggmark "STAGE setup"; gg finish || ggrc=1; }
     [ $ggrc = 0 ] && [ "$ggst" != active ] && { ggmark "STAGE switch"; gg activate || ggrc=1; }
     [ $ggrc = 0 ] && ggmark "STAGE done"

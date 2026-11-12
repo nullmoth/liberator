@@ -748,6 +748,35 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
     vols = volumes("vols-old", versions=("26.7",))
     rc, out = run("finish", g.efi, g.kit_path, *FIN, vols)
     arm("a recorded volume that does not hold macOS 27 is refused", rc == 1 and "does not hold macOS 27" in out and calls(vols) == [], out)
+    # --- which kit the startup files came from: an update of the app must be able to tell an older kit's files ---
+    kc = fresh(td, "kit-current")
+    PCARGS = ["--macos-major", "26", "--gpu-id", "2D05", "--cpu-vendor", "GenuineIntel", "--laptop", "no"]
+    rc, out = run("kit-current", kc.efi, kc.kit_path)
+    arm("kit-current says no where nothing is staged", rc == 1 and "no macOS 27 startup files are staged" in out, out)
+    rc, out = run("stage", kc.efi, kc.kit_path, *PCARGS)
+    rec = json.load(open(os.path.join(kc.efi, "EFI", "golden-gate.json")))
+    want_md5 = hashlib.md5(open(os.path.join(kc.kit_path, "v3-kit.json"), "rb").read()).hexdigest()
+    arm("stage records the checksum of the kit's manifest in the state record", rc == 0 and rec.get("kit_md5") == want_md5, out + repr(rec))
+    rc, out = run("kit-current", kc.efi, kc.kit_path)
+    arm("kit-current says yes for the kit the files were staged from", rc == 0 and "OK the macOS 27 startup files were staged from this kit" in out, out)
+    rc, out = run("activate", kc.efi, kc.kit_path, "--confirm")
+    rec = json.load(open(os.path.join(kc.efi, "EFI", "golden-gate.json")))
+    arm("the switch carries the recorded kit on", rc == 0 and rec.get("state") == "active" and rec.get("kit_md5") == want_md5, out + repr(rec))
+    del rec["kit_md5"]
+    json.dump(rec, open(os.path.join(kc.efi, "EFI", "golden-gate.json"), "w"))
+    rc, out = run("kit-current", kc.efi, kc.kit_path)
+    arm("a record without a kit checksum (written by the first release) reads as another kit",
+        rc == 1 and "were staged from another kit" in out, out)
+    rec["kit_md5"] = "0" * 32
+    json.dump(rec, open(os.path.join(kc.efi, "EFI", "golden-gate.json"), "w"))
+    rc, out = run("kit-current", kc.efi, kc.kit_path)
+    arm("a record naming a different kit reads as another kit", rc == 1 and "were staged from another kit" in out, out)
+    setup_all = (ROOT / "Resources/nullmoth-setup.sh").read_text()
+    i_kc = setup_all.find('"$GGS" kit-current'); i_cancel = setup_all.find('"$GGS" cancel --root', i_kc); i_case = setup_all.find('none) ggmark "STAGE check"; gg preflight')
+    arm("the one-button run asks kit-current first, takes an older kit's startup files back, and then runs as a first run does",
+        0 < i_kc < i_cancel < i_case, repr((i_kc, i_cancel, i_case)))
+    arm("the one-button run makes no kernel collections and lays nothing down where macOS 27 is already on its volumes",
+        '[ $gglaid = 1 ] || gg collections' in setup_all and 'if [ $gglaid = 1 ]; then echo "OK macOS 27 is already on its own volumes"; else gg installer' in setup_all, "")
     # --- preflight on a Mac where macOS 27 is already laid down (an update to a newer release of this app) ---
     # The first such PC was refused "51 GB free, 67 GB needed" for download room it would never use.
     def pre_calls(vols):
