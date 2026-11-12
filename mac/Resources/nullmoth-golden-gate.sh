@@ -452,6 +452,27 @@ mac27_volumes() {
   [ -n "$DATA" ] && [ -d "$DATA" ] && [ "$DATA" != "$SYS" ] || { WHY="the macOS 27 data volume is not mounted (mount it in Disk Utility)"; SYS=""; DATA=""; return 1; }
   return 0
 }
+# mac27_laid_down: yes when the volumes this app recorded are there and hold macOS 27, the same test the "laid" step
+# makes. It is asked from preflight, which only reports, so a volume it had to mount to read the version is unmounted
+# again afterwards and the Mac is left as it was found.
+mac27_laid_down() {
+  local pre_s="" pre_d="" ver id
+  if ! mac27_volumes; then
+    [ -n "$SYSID" ] && [ -n "$DATAID" ] || return 1
+    pre_s=$(vfield "$("$DISKUTIL" info -plist "$SYSID" 2>/dev/null)" MountPoint)
+    pre_d=$(vfield "$("$DISKUTIL" info -plist "$DATAID" 2>/dev/null)" MountPoint)
+    if mac27_volumes mount; then
+      ver=$(plutil -extract ProductVersion raw -o - "$SYS/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)
+    fi
+    for id in $([ -n "$pre_s" ] || echo "$SYSID") $([ -n "$pre_d" ] || echo "$DATAID"); do
+      "$DISKUTIL" unmount "$id" >/dev/null 2>&1
+    done
+  else
+    ver=$(plutil -extract ProductVersion raw -o - "$SYS/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)
+  fi
+  case "$ver" in 27.*) return 0;; esac
+  return 1
+}
 # The two macOS 27 volumes must keep file owners. A volume can be mounted with owners ignored (macOS does that to a
 # volume it treats as external, and remembers the choice per volume): every file then reads back as owner 99, the
 # change of owner reports success and does nothing, and the kernel refuses a shared cache that is not root's. The
@@ -927,7 +948,16 @@ preflight)
     have_gb=$((have_kb / 1048576)); [ "$have_gb" -le "$DOWNLOAD_GB" ] || have_gb=$DOWNLOAD_GB
   fi
   need_gb=$((MIN_DISK_GB - have_gb))
-  [ "${DISK_GB%%.*}" -ge "$need_gb" ] 2>/dev/null; check $? "room for macOS 27: ${DISK_GB} GB free, $need_gb GB needed$([ "$have_gb" = 0 ] || echo " ($have_gb GB is already downloaded)")"
+  # The room is for downloading macOS 27 and laying it down. On a Mac where this app already laid it down (an update
+  # to a newer release of this app) neither happens again, and the first such PC was refused for room it did not
+  # need. The volumes are asked about only when the room is short, and only a yes from mac27_laid_down skips the
+  # room check: anything it cannot decide falls back to the room check as before.
+  room=1; [ "${DISK_GB%%.*}" -ge "$need_gb" ] 2>/dev/null && room=0
+  if [ $room != 0 ] && mac27_laid_down; then
+    check 0 "room for macOS 27: macOS 27 is already on its own volumes, so no download room is needed (${DISK_GB} GB free)"
+  else
+    check $room "room for macOS 27: ${DISK_GB} GB free, $need_gb GB needed$([ "$have_gb" = 0 ] || echo " ($have_gb GB is already downloaded)")"
+  fi
   if ST=$(read_state) && layout_ok "$ST"; then check 0 "Golden Gate state: $ST"; else check 1 "the startup partition matches its Golden Gate record"; fi
   [ -z "$ESPHELP" ] || note "$ESPHELP"
   [ $fails = 0 ] || stop "$fails check(s) failed. Nothing was changed"

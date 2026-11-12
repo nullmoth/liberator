@@ -71,6 +71,8 @@ if [ "$1" = mount ] && [ -f "$d/$2.mounted.plist" ]; then cp "$d/$2.mounted.plis
 if [ "$1" = enableOwnership ]; then echo "owners $2" >> "$d/disk-calls.log"; [ -f "$d/$2.owned.plist" ] && cp "$d/$2.owned.plist" "$d/$2.plist"; exit 0; fi
 # and for the two calls that take a volume away; each is written down
 if [ "$1 $2" = "unmount force" ]; then echo "unmount $3" >> "$d/disk-calls.log"; exit 0; fi
+# and for: diskutil unmount <volume identifier>, the gentle one a reporting step uses to put back what it mounted
+if [ "$1" = unmount ]; then echo "release $2" >> "$d/disk-calls.log"; [ -f "$d/$2.unmounted.plist" ] && cp "$d/$2.unmounted.plist" "$d/$2.plist"; exit 0; fi
 if [ "$1 $2" = "apfs deleteVolume" ]; then echo "delete $3" >> "$d/disk-calls.log"; [ ! -e "$d/refuse-delete" ] || exit 1; rm -f "$d/$3.plist"; exit 0; fi
 [ "$1 $2" = "info -plist" ] || exit 1
 key=$3; [ "$key" = / ] && key=root
@@ -746,6 +748,44 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
     vols = volumes("vols-old", versions=("26.7",))
     rc, out = run("finish", g.efi, g.kit_path, *FIN, vols)
     arm("a recorded volume that does not hold macOS 27 is refused", rc == 1 and "does not hold macOS 27" in out and calls(vols) == [], out)
+    # --- preflight on a Mac where macOS 27 is already laid down (an update to a newer release of this app) ---
+    # The first such PC was refused "51 GB free, 67 GB needed" for download room it would never use.
+    def pre_calls(vols):
+        log = os.path.join(vols.gg, "disk-calls.log")
+        return [ln.split() for ln in open(log).read().splitlines()] if os.path.exists(log) else []
+
+    pf = fresh(td, "pre-room")
+    LOW = ["--macos-major", "26", "--gpu-id", "2D05", "--cpu-vendor", "GenuineIntel", "--laptop", "no", "--tools", TOOLS, "--disk-free-gb", "51"]
+    vols = volumes("pre-laid")
+    rc, out = run("preflight", pf.efi, pf.kit_path, *LOW, vols)
+    arm("with macOS 27 already on its recorded volumes, 51 GB free is not refused for room, and the line says why",
+        rc == 0 and "OK room for macOS 27: macOS 27 is already on its own volumes, so no download room is needed (51 GB free)" in out
+        and "FAIL" not in out and pre_calls(vols) == [], out + repr(pre_calls(vols)))
+    vols = volumes("pre-laid-unmounted", mounted=False, mountable=True)
+    for uuid in (SYS_UUID, DATA_UUID):
+        shutil.copy(os.path.join(vols.gg, uuid + ".plist"), os.path.join(vols.gg, uuid + ".unmounted.plist"))
+    rc, out = run("preflight", pf.efi, pf.kit_path, *LOW, vols)
+    arm("with the laid-down volumes unmounted, preflight mounts them to read the version, passes, and unmounts both again",
+        rc == 0 and "macOS 27 is already on its own volumes" in out and "FAIL" not in out
+        and pre_calls(vols) == [["release", SYS_UUID], ["release", DATA_UUID]]
+        and plistlib.load(open(os.path.join(vols.gg, SYS_UUID + ".plist"), "rb"))["MountPoint"] == ""
+        and plistlib.load(open(os.path.join(vols.gg, DATA_UUID + ".plist"), "rb"))["MountPoint"] == "", out + repr(pre_calls(vols)))
+    vols = volumes("pre-none", record=False)
+    rc, out = run("preflight", pf.efi, pf.kit_path, *LOW, vols)
+    arm("with no record of laid-down volumes and 51 GB free, preflight still refuses for room (control)",
+        rc == 1 and "FAIL room for macOS 27: 51 GB free, 92 GB needed" in out and out.count("FAIL ") == 1, out)
+    vols = volumes("pre-old", versions=("26.7",))
+    rc, out = run("preflight", pf.efi, pf.kit_path, *LOW, vols)
+    arm("with recorded volumes that hold macOS 26, not 27, preflight still refuses for room",
+        rc == 1 and "FAIL room for macOS 27: 51 GB free, 92 GB needed" in out and "already on its own volumes" not in out and out.count("FAIL ") == 1, out)
+    vols = volumes("pre-unmountable", mounted=False, mountable=False)
+    rc, out = run("preflight", pf.efi, pf.kit_path, *LOW, vols)
+    arm("when the recorded volumes cannot be mounted to read, it is undecided and preflight falls back to the room refusal",
+        rc == 1 and "FAIL room for macOS 27: 51 GB free, 92 GB needed" in out and out.count("FAIL ") == 1, out)
+    vols = volumes("pre-roomy")
+    rc, out = run("preflight", pf.efi, pf.kit_path, *LOW[:-1], "110", vols)
+    arm("with room to spare the volumes are not asked about and the room line is the usual one",
+        rc == 0 and "OK room for macOS 27: 110 GB free, 92 GB needed" in out and pre_calls(vols) == [], out)
     # --- Remove macOS 27: the startup files go back and the two recorded volumes are taken away, nothing else ---
     GROUP = DATA_UUID
 
