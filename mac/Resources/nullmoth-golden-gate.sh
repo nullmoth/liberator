@@ -967,10 +967,17 @@ preflight)
   ok "this macOS has the system tools the later steps use"
   if [ "$(kv laydown.dir)" != "" ]; then
     laydown_or_stop
-    step "Asking the lay-down step whether it can run here (dry run)"
-    run_kit "$LDIR/$linst" --no-user --dry-run
-    [ "$RC" != 3 ] || system_stop "$SYSWHY"
-    [ "$RC" = 0 ] || stop "the lay-down step refused its dry run; see its lines above. Nothing was changed"
+    # The lay-down runs once per Mac. Where macOS 27 is already on its volumes (an update to a newer release of this
+    # app) it is not run again, and its dry run refuses there for the very volumes it made: the first such PC was
+    # stopped by that. So the dry run is asked only where the lay-down will really run.
+    if mac27_laid_down; then
+      ok "macOS 27 is already laid down, so the lay-down step is not asked"
+    else
+      step "Asking the lay-down step whether it can run here (dry run)"
+      run_kit "$LDIR/$linst" --no-user --dry-run
+      [ "$RC" != 3 ] || system_stop "$SYSWHY"
+      [ "$RC" = 0 ] || stop "the lay-down step refused its dry run; see its lines above. Nothing was changed"
+    fi
     if [ -f "$LDIR/make-kernel-collections.sh" ] && [ ! -L "$LDIR/make-kernel-collections.sh" ]; then
       { [ -d "$KCWORK" ] || { mkdir -p "$KCWORK" 2>/dev/null && chmod 755 "$KCWORK"; }; } && kc_folder_trusted || stop "the folder for the kernel collections ($KCWORK) is not one only root can write. Nothing was changed"
       step "Asking the kernel collections step whether it can run here (dry run)"

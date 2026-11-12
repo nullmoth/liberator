@@ -1004,6 +1004,19 @@ case " $* " in *" --apply "*) [ "$1" = --out ] && echo boot > "$2/BootKernelExte
     os.remove(os.path.join(td, "lay.log.refuse-dry"))
     arm("install: when the dry run refuses, the real run is never made", rc == 1 and got == ["laydown --no-user --dry-run"]
         and "the lay-down step refused its dry run. Nothing was changed" in out, out + repr(got))
+    # Preflight on a Mac where macOS 27 is already laid down: the lay-down's dry run refuses on the volumes the
+    # lay-down itself made, which stopped the first such PC one line after the room check let it through.
+    fl = lay_kit("lay-pre"); prelog = os.path.join(td, "lay-pre.log"); os.environ["GG_TEST_LOG"] = prelog
+    vols = volumes("pre-laid-dry")
+    rc, out = run("preflight", fl.efi, fl.kit_path, *LOW, vols)
+    arm("with macOS 27 already laid down, the lay-down step's dry run is not asked and the check passes",
+        rc == 0 and "OK macOS 27 is already laid down, so the lay-down step is not asked" in out and "Asking the lay-down step" not in out
+        and not os.path.exists(prelog), out)
+    vols = volumes("pre-none-dry", record=False)
+    rc, out = run("preflight", fl.efi, fl.kit_path, *LOW[:-1], "110", vols)
+    arm("with no macOS 27 laid down, the lay-down step's dry run is still asked (control)",
+        rc == 0 and "Asking the lay-down step whether it can run here (dry run)" in out and "is not asked" not in out
+        and open(prelog).read().splitlines() == ["laydown --no-user --dry-run"], out)
     os.environ["GG_TEST_LOG"] = os.path.join(td, "lay.log")
     rc, out = run("installer", "", f.kit_path, "--macos-major", "27")
     del os.environ["GG_TEST_LOG"]
