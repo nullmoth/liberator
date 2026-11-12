@@ -145,12 +145,41 @@ class Image:
                 hi = mid
         return self._starts[lo - 1][1] if lo else None
 
+    def vm_of(self, off):
+        """The address a file offset is loaded at, or None."""
+        for a, fsz, fo in self.segs:
+            if fo <= off < fo + fsz:
+                return a + (off - fo)
+        return None
+
+    def loads_text(self, at, text, span=64):
+        """Whether a `lea reg, [rip + x]` that loads `text` starts within `span` bytes from the address `at`.
+        A jump to a panic lands just before the instruction that loads the panic's message."""
+        targets, i = set(), self.data.find(text.encode())
+        while i != -1:
+            targets.add(self.vm_of(i))
+            i = self.data.find(text.encode(), i + 1)
+        off = offset_of(self.segs, at)
+        if off is None or not targets:
+            return False
+        for j in range(off, min(off + span, len(self.data) - 7)):
+            d = self.data
+            if d[j] in (0x48, 0x4C) and d[j + 1] == 0x8D and (d[j + 2] & 0xC7) == 0x05:
+                if self.vm_of(j) + 7 + struct.unpack_from("<i", d, j + 3)[0] in targets:
+                    return True
+        return False
+
     def hits(self, p):
         """(list of offsets, reason). reason is None when the search could be made."""
         base = p.get("Base") or ""
         start = 0
         if base:
             if base not in self.syms:
+                if base.strip() != base and base.strip() in self.syms:
+                    # OpenCore looks a symbol up by the exact name in the config and does not trim it, so a name with
+                    # a space at either end is never found: the patch is skipped on every kernel, not only this one.
+                    return None, (f"the patch names its symbol as {base!r}, with a space that is in the config itself; "
+                                  "OpenCore looks a symbol up by exactly that name, so this patch never applied on macOS 26 either")
                 return None, f"the symbol {base!r} is not in this binary"
             start = offset_of(self.segs, self.syms[base])
             if start is None:
@@ -204,38 +233,95 @@ def judge(p, img26, img27):
     return True, "", detail
 
 
-# Patches of ours for macOS 27, each standing in for one macOS 26 patch that cannot be carried.
+# Patches of ours for macOS 27, each added when the user's list holds the macOS 26 patch named in "for".
 #
-# "thread_invoke, thread_dispatch | Remove non-monotonic time panic" matches 13 bytes of which 5 are free and wants the
-# first two matches. In the macOS 26 kernel the first is the check it is named for (sub r14, [rdi+0x488]; jb) and the
-# second is unrelated code that an AMD processor never runs. In the macOS 27 kernel a new first match appears inside
-# do_stackshot, so the patch would cut six bytes out of that function and reach the real check only second. Ours names
-# the check exactly and changes that one place.
+# "thread_invoke, thread_dispatch | Remove non-monotonic time panic" is meant to remove the two scheduler checks that
+# panic with "Non-monotonic time: invoke at ..." and "Non-monotonic time: dispatch at ...". It matches 13 bytes of which
+# 5 are free (a load from +0x480..+0x48f) and changes the first two matches. The checks read +0x490, so on the macOS 26
+# and 27 kernels these were measured on, its matches are other code: _kperf_lazy_wait_sample and _vmx_hv_support on
+# 26, _do_stackshot and _kperf_lazy_wait_sample on 27. It cannot be carried.
+#
+# Ours removes the two jumps that reach those panics, one entry per check:
+#   _thread_block_reason (thread_invoke is inlined there): cmp r12, [r14+0x490]; jb -> "invoke at" panic
+#   _thread_dispatch:                                       sub r15, [rbx+0x490]; jb -> "dispatch at" panic
+# Each jb (0f 82 rel32) becomes one 6-byte no-op (66 0f 1f 44 00 00), and the instruction before it is kept.
+#
+# Two exact entries rather than one masked entry with Count 2: the two sites differ in 5 of their 13 bytes (the
+# instruction, its registers and the jump distance), so one pattern for both would have to free those 5 bytes, which is
+# how the patch above ended up in other code. OpenCore's Base also names a single symbol, so only separate entries can each
+# be fenced to their own function with Base and Limit. Each Find is also exactly once in the whole kernel.
+#
+# judge_own checks every entry against both kernels: each place it changes must lie in the function named in "in",
+# and each jump it removes must lead to the panic named in "reaches". The build stops otherwise.
+SCHED_FOR = {"Identifier": "kernel", "Base": "", "Find": bytes.fromhex("480000800400000f0000000000"),
+             "Mask": bytes.fromhex("480000f0ffffffff0000000000"), "Count": 2, "Limit": 0, "Skip": 0}
 OWN = [
-    {"for": {"Identifier": "kernel", "Base": "", "Find": bytes.fromhex("480000800400000f0000000000"),
-             "Mask": bytes.fromhex("480000f0ffffffff0000000000"), "Count": 2, "Limit": 0, "Skip": 0},
-     "patch": {"Identifier": "kernel", "Base": "", "Comment": "NullMoth | thread_invoke | Remove non-monotonic time check | macOS 27",
-               "Find": bytes.fromhex("4c2bb7880400000f82a9000000"), "Replace": bytes.fromhex("4c2bb788040000669066906690"),
-               "Mask": b"", "ReplaceMask": b"", "Count": 1, "Limit": 0}},
+    {"for": SCHED_FOR, "in": "_thread_block_reason", "reaches": "Non-monotonic time: invoke at",
+     "patch": {"Identifier": "kernel", "Base": "_thread_block_reason",
+               "Comment": "NullMoth | thread_invoke in _thread_block_reason | Remove non-monotonic time check | macOS 27",
+               "Find": bytes.fromhex("4d3ba6900400000f82c8040000"), "Replace": bytes.fromhex("4d3ba690040000660f1f440000"),
+               "Mask": b"", "ReplaceMask": b"", "Count": 1, "Limit": 8192}},
+    {"for": SCHED_FOR, "in": "_thread_dispatch", "reaches": "Non-monotonic time: dispatch at",
+     "patch": {"Identifier": "kernel", "Base": "_thread_dispatch",
+               "Comment": "NullMoth | thread_dispatch | Remove non-monotonic time check | macOS 27",
+               "Find": bytes.fromhex("4c2bbb900400000f8250020000"), "Replace": bytes.fromhex("4c2bbb90040000660f1f440000"),
+               "Mask": b"", "ReplaceMask": b"", "Count": 1, "Limit": 2560}},
 ]
 
 
 def judge_own(own, img26, img27):
-    """An own patch is good when its exact bytes are once in macOS 27, once in macOS 26, and the macOS 26 place is one
-    the patch it stands in for changes there: then it is the same code, named without the loose mask."""
-    p, old = own["patch"], own["for"]
-    h27, _ = img27.hits(p)
-    h26, _ = img26.hits(p)
-    old26, why = img26.hits(old)
-    if why:
-        return False, "macOS 26: " + why
-    if len(h27 or []) != p["Count"]:
-        return False, f"macOS 27 has its bytes {len(h27 or [])} times, not {p['Count']}"
-    if len(h26 or []) != 1 or h26[0] not in old26[:int(old.get("Count") or 0) or len(old26)]:
-        return False, "its bytes are not a place the macOS 26 patch changes"
-    if len(p["Find"]) != len(p["Replace"]):
+    """(ok, reason). An own patch is good when, in macOS 27 and in macOS 26 alike, its exact bytes are found Count times
+    from its Base within its Limit and Count times in the whole binary, every place it changes lies in the function named
+    in "in", and every jump it removes leads to the panic text named in "reaches" (when it names one). macOS 26 is checked
+    too: the same code in the same function there shows the place is the check itself, not a look-alike new to 27."""
+    p, fn, text = own["patch"], own["in"], own.get("reaches")
+    find, repl = bytes(p["Find"]), bytes(p["Replace"])
+    if len(find) != len(repl):
         return False, "it would change the length of the code"
+    if p.get("Mask") or p.get("ReplaceMask"):
+        return False, "it is masked; our own patches name their bytes exactly"
+    changed = [i for i in range(len(find)) if find[i] != repl[i]]
+    if not changed:
+        return False, "it changes nothing"
+    for tag, img in (("macOS 27", img27), ("macOS 26", img26)):
+        h, why = img.hits(p)
+        if why:
+            return False, f"{tag}: {why}"
+        if len(h) != p["Count"]:
+            return False, f"{tag} has its bytes {len(h)} times from its Base, not {p['Count']}"
+        for o in h:
+            where = img.owner(o)
+            if where != fn:
+                return False, f"{tag}: it would change {where}, not {fn}"
+            if text:
+                c = changed[0]
+                if not (find[c] == 0x0F and 0x80 <= find[c + 1] <= 0x8F and changed[-1] - c < 6):
+                    return False, f"{tag}: what it changes in {fn} is not one conditional jump"
+                to = img.vm_of(o + c) + 6 + struct.unpack_from("<i", find, c + 2)[0]
+                if not img.loads_text(to, text):
+                    return False, f"{tag}: the jump it removes in {fn} does not lead to the {text!r} panic"
+        every = find_all(img.data, 0, len(img.data), find, b"")
+        if len(every) != p["Count"]:
+            return False, f"{tag} has its bytes {len(every)} times in the whole binary, not {p['Count']}"
+    if p.get("Base") != fn:
+        return False, f"its Base is {p.get('Base')!r}, not the function it changes ({fn})"
     return True, ""
+
+
+def build_own(owns, images):
+    """The rows for patches_27.json. Stops the build when any own patch does not hold on these binaries."""
+    out = []
+    for o in owns:
+        p = o["patch"]
+        ident = p["Identifier"]
+        ok, why = judge_own(o, *images[ident]) if ident in images else (False, f"no binaries for {ident!r}")
+        if not ok:
+            raise SystemExit(f"own patch {p['Comment']!r} does not hold on these kernels: {why}")
+        b64 = lambda v: base64.b64encode(bytes(v)).decode()  # noqa: E731
+        out.append({"for": mark(o["for"]), "in": o["in"], "patch": {
+            "identifier": ident, "base": p["Base"], "comment": p["Comment"], "count": p["Count"], "limit": p["Limit"],
+            "find": b64(p["Find"]), "replace": b64(p["Replace"]), "mask": b64(p["Mask"]), "replace_mask": b64(p["ReplaceMask"])}})
+    return out
 
 
 def check(k26, k27, kexts, plists):
@@ -263,17 +349,7 @@ def check(k26, k27, kexts, plists):
                 carried.append({"mark": m, **row})
             else:
                 left.append({**row, "why": why})
-    own = []
-    for o in OWN:
-        ident = o["patch"]["Identifier"]
-        ok, why = judge_own(o, *images[ident]) if ident in images else (False, f"no binaries for {ident!r}")
-        if not ok:
-            raise SystemExit(f"own patch {o['patch']['Comment']!r} does not hold on these kernels: {why}")
-        b64 = lambda v: base64.b64encode(bytes(v)).decode()  # noqa: E731
-        p = o["patch"]
-        own.append({"for": mark(o["for"]), "patch": {"identifier": ident, "base": p["Base"], "comment": p["Comment"], "count": p["Count"],
-                    "limit": p["Limit"], "find": b64(p["Find"]), "replace": b64(p["Replace"]), "mask": b64(p["Mask"]), "replace_mask": b64(p["ReplaceMask"])}})
-    return carried, left, own
+    return carried, left, build_own(OWN, images)
 
 
 def sha256_of(path):
@@ -338,14 +414,80 @@ def selftest():
     o27 = image(b"\x49\x39\x0f\x96" + pad + site + pad, {"_shot": 0, "_sched": 4})
     ok, why, _ = judge(loose, o26, o27)
     arm("a loose patch whose first match on macOS 27 is in other code is left out", not ok and "would change ['_shot']" in why, why)
-    mine = {"for": loose, "patch": {"Identifier": "kernel", "Base": "", "Comment": "x", "Find": site, "Replace": b"\x4c\x2b\x66\x90", "Mask": b"", "ReplaceMask": b"", "Count": 1, "Limit": 0}}
-    ok, why = judge_own(mine, o26, o27)
-    arm("our exact patch for the place the loose one changes on macOS 26 holds on both", ok, why)
-    ok, why = judge_own(mine, o26, image(pad + site + site + pad, {"_sched": 0}))
-    arm("our patch is refused when its bytes are twice in macOS 27", not ok and "2 times" in why, why)
-    other = dict(mine, patch=dict(mine["patch"], Find=b"\x90\x90\x90\x4c"))
-    ok, why = judge_own(other, o26, o27)
-    arm("our patch is refused when it is not a place the macOS 26 patch changes", not ok, why)
+    # Own patches. A small kernel laid out like the real one: a profiling routine holding the bytes of the patch we used
+    # to ship, then a scheduler function whose cmp + jb leads to the instruction that loads the panic's text.
+    old_bytes = bytes.fromhex("4c2bb7880400000f82a9000000")
+    text = b"Non-monotonic time: invoke at\0"
+
+    def sched(lead=b"", jump_to_panic=True, twice=False):
+        code = bytearray(pad + old_bytes + pad)            # _kperf_lazy_wait_sample
+        fn = len(code)
+        code += lead + b"\x90" * 8
+        jcc = len(code) + 7
+        code += bytes.fromhex("4d3ba690040000") + b"\x0f\x82" + b"\0\0\0\0" + pad
+        if twice:
+            code += bytes.fromhex("4d3ba690040000") + b"\x0f\x82" + b"\0\0\0\0"
+        lea = len(code)
+        code += b"\x48\x8d\x3d" + b"\0\0\0\0" + pad * 6        # lea rdi, [rip + text]; then 96 bytes of other code
+        other = len(code) - 8
+        code += text
+        struct.pack_into("<i", code, jcc + 2, (lea if jump_to_panic else other) - (jcc + 6))
+        if twice:                                          # the same bytes again, so only the count can refuse it
+            code[jcc + 29:jcc + 35] = code[jcc:jcc + 6]
+        struct.pack_into("<i", code, lea + 3, (len(code) - len(text)) - (lea + 7))
+        return image(code, {"_kperf_lazy_wait_sample": 0, "_thread_block_reason": fn}), bytes(code[jcc - 7:jcc + 6])
+
+    s26, site26 = sched()
+    s27, site27 = sched(lead=b"\xcc" * 5)
+    good = {"for": loose, "in": "_thread_block_reason", "reaches": "Non-monotonic time: invoke at",
+            "patch": {"Identifier": "kernel", "Base": "_thread_block_reason", "Comment": "x", "Find": site27,
+                      "Replace": site27[:7] + bytes.fromhex("660f1f440000"), "Mask": b"", "ReplaceMask": b"", "Count": 1, "Limit": 64}}
+    ok, why = judge_own(good, s26, s27)
+    arm("our exact patch holds when, on both kernels, it lands in the function it names and removes the jump to that panic", ok and site26 == site27, why)
+    wrong = dict(good, patch=dict(good["patch"], Base="", Find=old_bytes, Replace=bytes.fromhex("4c2bb788040000669066906690"), Limit=0))
+    ok, why = judge_own(wrong, s26, s27)
+    arm("NEGATIVE: the patch we used to ship is refused, because its bytes are in _kperf_lazy_wait_sample and not the scheduler",
+        not ok and "_kperf_lazy_wait_sample" in why, why)
+    def own_for(site):
+        return dict(good, patch=dict(good["patch"], Find=site, Replace=site[:7] + bytes.fromhex("660f1f440000")))
+    s26x, x26 = sched(jump_to_panic=False)
+    s27x, x27 = sched(lead=b"\xcc" * 5, jump_to_panic=False)
+    ok, why = judge_own(own_for(x27), s26x, s27x)
+    arm("a jump that does not lead to the panic the patch names is refused", not ok and "does not lead to" in why, why)
+    ok, why = judge_own(dict(good, reaches="Non-monotonic time: dispatch at"), s26, s27)
+    arm("a jump that leads to a different panic than the one named is refused", not ok and "does not lead to" in why, why)
+    s26d, _ = sched(twice=True)
+    s27d, d27 = sched(lead=b"\xcc" * 5, twice=True)
+    ok, why = judge_own(own_for(d27), s26d, s27d)
+    arm("bytes found twice from the Base are refused", not ok and "2 times" in why, why)
+    ok, why = judge_own(dict(good, patch=dict(good["patch"], Base="", Limit=0)), s26, s27)
+    arm("a patch whose Base is not the function it changes is refused", not ok and "Base" in why, why)
+    ok, why = judge_own(dict(good, patch=dict(good["patch"], Replace=good["patch"]["Replace"][:-1])), s26, s27)
+    arm("a patch that would change the length of the code is refused", not ok and "length" in why, why)
+    ok, why = judge_own(good, gone, s27)
+    arm("a patch whose code is not in macOS 26 is refused: a look-alike new to 27 is not the check", not ok and "macOS 26" in why, why)
+    try:
+        build_own([wrong], {"kernel": (s26, s27)})
+        stopped = ""
+    except SystemExit as e:
+        stopped = str(e)
+    arm("the build of patches_27.json stops, naming the function, when an own patch lands outside its function",
+        "_kperf_lazy_wait_sample" in stopped, stopped)
+    rows = build_own([good], {"kernel": (s26, s27)})
+    arm("control: a good own patch is written with its function and the mark of the patch it stands in for",
+        rows[0]["in"] == "_thread_block_reason" and rows[0]["for"] == mark(loose) and rows[0]["patch"]["base"] == "_thread_block_reason", rows)
+    arm("the shipped own patches are the two scheduler checks, exact, fenced by Base, and neither holds the old bytes",
+        sorted(o["in"] for o in OWN) == ["_thread_block_reason", "_thread_dispatch"] and all(o["patch"]["Base"] == o["in"] and o["patch"]["Limit"] > 0
+        and not o["patch"]["Mask"] and old_bytes not in o["patch"]["Find"] for o in OWN))
+    import re  # noqa: PLC0415
+    arm("every shipped own patch's text fields pass the staging script's safe() character set, so it can be written",
+        all(re.fullmatch(r"[A-Za-z0-9 _./|:+-]+", o["patch"][f]) for o in OWN for f in ("Comment", "Base", "Identifier")))
+    spaced = {"Identifier": "kernel", "Base": "_first ", "Find": f1, "Count": 1}
+    ok, why, _ = judge(spaced, a, b_same)
+    arm("a symbol written with a space at the end is left out, and the reason says it never applied on macOS 26 either",
+        not ok and "'_first '" in why and "never applied on macOS 26 either" in why, why)
+    ok, why, _ = judge(dict(spaced, Base="_nothere"), a, b_same)
+    arm("control: a symbol that is simply missing keeps the plain reason", not ok and "is not in this binary" in why and "space" not in why, why)
     print(f"{len(fails)} failed")
     return 1 if fails else 0
 

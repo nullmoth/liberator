@@ -424,7 +424,9 @@ with tempfile.TemporaryDirectory() as td:
     plistlib.dump(ac, open(acp, "wb"))
     own27 = {"for": kp27.mark(loose), "patch": {"identifier": "kernel", "base": "", "comment": "NullMoth | exact | macOS 27", "count": 1, "limit": 0,
                                                  "find": "TCsPgg==", "replace": "TCtmkA==", "mask": "", "replace_mask": ""}}
-    akit = mac_kit("kit-amd", patches_27=[kp27.mark(known), kp27.mark(dict(cored, Replace=b"\xb8\x08\x00"))], patches_27_own=[own27])
+    own27b = {"for": kp27.mark(loose), "patch": dict(own27["patch"], comment="NullMoth | exact - second place | macOS 27", base="_second", limit=64,
+                                                      find="SDsPgg==", replace="SDtmkA==")}
+    akit = mac_kit("kit-amd", patches_27=[kp27.mark(known), kp27.mark(dict(cored, Replace=b"\xb8\x08\x00"))], patches_27_own=[own27, own27b])
     AMDARGS = ["--macos-major", "26", "--gpu-id", "2D05", "--cpu-vendor", "AuthenticAMD", "--laptop", "no"]
     rc, out = run("stage", amd.efi, akit, *AMDARGS)
     sp = plistlib.load(open(os.path.join(amd.efi, "EFI", gg.STAGED, "config.plist"), "rb"))["Kernel"]["Patch"] if rc == 0 else []
@@ -437,7 +439,11 @@ with tempfile.TemporaryDirectory() as td:
     mine = by.get("NullMoth | exact | macOS 27", {})
     arm("and the kit's own patch for it is added, for the macOS 27 kernel only, with its bytes",
         mine.get("MinKernel") == "27.0.0" and mine.get("MaxKernel") == "27.99.99" and mine.get("Find") == b"\x4c\x2b\x0f\x82"
-        and mine.get("Replace") == b"\x4c\x2b\x66\x90" and mine.get("Enabled") is True and mine.get("Count") == 1 and len(sp) == 8, repr(mine))
+        and mine.get("Replace") == b"\x4c\x2b\x66\x90" and mine.get("Enabled") is True and mine.get("Count") == 1 and len(sp) == 9, repr(mine))
+    second = by.get("NullMoth | exact - second place | macOS 27", {})
+    arm("when the kit holds two own patches for one user patch, both are added, each with its own Base and Limit",
+        second.get("Find") == b"\x48\x3b\x0f\x82" and second.get("Base") == "_second" and second.get("Limit") == 64
+        and second.get("MinKernel") == "27.0.0" and [p["Comment"] for p in sp].count("NullMoth | exact - second place | macOS 27") == 1, repr(second))
     arm("a patch the kit does not name keeps its limit and is named in the result, with nothing of its text run",
         lim("stranger; `rm -rf` $(x)") == "25.99.99" and "1 kernel patch(es) of this PC were not checked against macOS 27 and stay off there: stranger" in out, out)
     arm("the result says how many were carried and how many replaced", "NOTE kernel patches for macOS 27: 2 carried as they are" in out and "1 replaced by the kit's own" in out, out)

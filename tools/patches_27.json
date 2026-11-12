@@ -148,7 +148,7 @@
   {
    "comment": "algrey | _cpuid_set_cpufamily | Force CPUFAMILY_INTEL_PENRYN | 11.3+",
    "identifier": "kernel",
-   "why": "macOS 26: the symbol '_cpuid_set_info ' is not in this binary"
+   "why": "macOS 26: the patch names its symbol as '_cpuid_set_info ', with a space that is in the config itself; OpenCore looks a symbol up by exactly that name, so this patch never applied on macOS 26 either"
   },
   {
    "comment": "CaseySJ | probeBusGated | Disable 10 bit tags | 12.0+",
@@ -172,14 +172,30 @@
  "own": [
   {
    "for": "8fc72294d3c15b367c8e453002953f31229ef948be9c7d6c6ca57ee235e61dab",
+   "in": "_thread_block_reason",
    "patch": {
     "identifier": "kernel",
-    "base": "",
-    "comment": "NullMoth | thread_invoke | Remove non-monotonic time check | macOS 27",
+    "base": "_thread_block_reason",
+    "comment": "NullMoth | thread_invoke in _thread_block_reason | Remove non-monotonic time check | macOS 27",
     "count": 1,
-    "limit": 0,
-    "find": "TCu3iAQAAA+CqQAAAA==",
-    "replace": "TCu3iAQAAGaQZpBmkA==",
+    "limit": 8192,
+    "find": "TTumkAQAAA+CyAQAAA==",
+    "replace": "TTumkAQAAGYPH0QAAA==",
+    "mask": "",
+    "replace_mask": ""
+   }
+  },
+  {
+   "for": "8fc72294d3c15b367c8e453002953f31229ef948be9c7d6c6ca57ee235e61dab",
+   "in": "_thread_dispatch",
+   "patch": {
+    "identifier": "kernel",
+    "base": "_thread_dispatch",
+    "comment": "NullMoth | thread_dispatch | Remove non-monotonic time check | macOS 27",
+    "count": 1,
+    "limit": 2560,
+    "find": "TCu7kAQAAA+CUAIAAA==",
+    "replace": "TCu7kAQAAGYPH0QAAA==",
     "mask": "",
     "replace_mask": ""
    }

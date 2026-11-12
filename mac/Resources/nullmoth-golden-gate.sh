@@ -727,10 +727,11 @@ apply_kit() {    # $1 = the OC folder to change
   # Raising every limit is not the answer either. One patch of the usual AMD list matches loosely, and in the macOS 27
   # kernel its first match is in other code. So a patch is carried to macOS 27 only when the kit names it: the kit's
   # maker found its bytes in this macOS 27 kernel, in the same functions as in macOS 26. Where the kit holds its own
-  # patch for one that cannot be carried, that one is added for macOS 27. Any other patch keeps its limit and is named.
+  # patch(es) for one that cannot be carried, each of them is added for macOS 27 (one user patch can stand for several
+  # places, each with its own entry). Any other patch keeps its limit and is named.
   n=$(cget Kernel.Patch); case "$n" in ''|*[!0-9]*) n=0;; esac
   if [ "$n" -gt 0 ] && khas patches_27; then
-    local marks=" " owns=" " mk mx mn nown pcount o key val
+    local marks=" " owns=" " mk mx mn nown pcount o hit key val
     m=$(kv patches_27); case "$m" in ''|*[!0-9]*) m=0;; esac
     j=0; while [ "$j" -lt "$m" ]; do marks="$marks$(kv patches_27.$j) "; j=$((j + 1)); done
     nown=$(kv patches_27_own) || nown=0; case "$nown" in ''|*[!0-9]*) nown=0;; esac
@@ -747,8 +748,11 @@ apply_kit() {    # $1 = the OC folder to change
           sets "Kernel.Patch.$i.MaxKernel" 27.99.99 || { bad "could not carry kernel patch $i"; return 1; }
           PATCH_ON=$((PATCH_ON + 1));;
         *) case "$owns" in *" $mk:"*)
-            o=${owns#* $mk:}; o=${o%% *}
-            add_own_patch "$o" || return 1
+            hit=0
+            for o in $owns; do
+              if [ "${o%%:*}" = "$mk" ]; then add_own_patch "${o#*:}" || return 1; hit=1; fi
+            done
+            [ $hit = 1 ] || { bad "could not find the kit's own patches for kernel patch $i"; return 1; }
             PATCH_OWN=$((PATCH_OWN + 1));;
           *) PATCH_OFF=$((PATCH_OFF + 1))
             val=$(cget "Kernel.Patch.$i.Comment" | tr -c 'A-Za-z0-9 _.,|:+()/-' ' ' | cut -c1-90)

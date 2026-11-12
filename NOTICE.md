@@ -36,6 +36,7 @@ makes to their output lives in `p1401/` and is recorded per build as a named rul
 | Where | Checked against | License of the source |
 |---|---|---|
 | `p1401/guide.py`: which BIOS settings macOS needs and why | Dortania, *OpenCore Install Guide* | CC BY-NC-SA 4.0. 1401 uses its facts only; every sentence in the guide is 1401's own, because NC-SA text cannot go into a GPL-3 program. |
+| `tools/kernel_patches_27.py`: the two macOS 27 scheduler checks (thread_invoke and thread_dispatch, "Non-monotonic time") an AMD processor needs removed | The community project GoldenAlcatraz (github.com/dssoftx/GoldenAlcatraz), which identified them | The idea only. Our patches are written independently against the macOS 27 kernel and checked by the tool; no text or bytes are copied. |
 
 ## Downloaded at build or run time, verified
 
