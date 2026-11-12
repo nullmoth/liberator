@@ -172,7 +172,7 @@ function ggBar(pct, text) {
   $("ggbar").setAttribute("aria-valuenow", S.ggPct);
   $("ggbart").textContent = text;
 }
-const GG_BUTTONS = ["ggprep", "ggkc", "gginst", "ggfin", "ggact", "ggcancel", "ggrm", "ggclr"];
+const GG_BUTTONS = ["ggprep", "ggkc", "gginst", "ggfin", "ggact", "ggcancel", "ggrm", "ggclr", "ggdoff", "ggdon"];
 const GG_NO_KIT = ["ggcancel", "ggrm", "ggclr"];
 // The forward steps need this build's kit on the Mac; getting the kit, cancelling, removing and clearing do not.
 function ggButtons(busy) {
@@ -188,10 +188,12 @@ const GG_DONE = {
   cancel: "Golden Gate cancelled: the startup files are as they were.",
   remove: "The new system is removed and the startup files are as they were. The downloads are kept.",
   "clear-downloads": "The downloads are cleared.",
+  "drivers-off": "The unproven drivers are off for the new system. Restart and choose it; then press Send logs so the driver can be fixed.",
+  "drivers-on": "The drivers are on for the new system again.",
 };
 // "Prepare for Golden Gate" is the whole move in one run (step "all"); the single steps keep their handlers but the
 // page does not show their buttons.
-[["ggprep", "all"], ["gginst", "installer"], ["ggkc", "collections"], ["ggfin", "finish"], ["ggact", "activate"], ["ggcancel", "cancel"], ["ggrm", "remove"], ["ggclr", "clear-downloads"]].forEach(([id, step]) => {
+[["ggprep", "all"], ["gginst", "installer"], ["ggkc", "collections"], ["ggfin", "finish"], ["ggact", "activate"], ["ggcancel", "cancel"], ["ggrm", "remove"], ["ggclr", "clear-downloads"], ["ggdoff", "drivers-off"], ["ggdon", "drivers-on"]].forEach(([id, step]) => {
   $(id).onclick = () => { S.ggStep = step; $("ggt").textContent = ""; ggBar(null); post({ act: "goldengate", step, efi: efi(), bringAccount: !$("ggnew").checked, sizeGB: Number($("ggsize").value) || 0 }); };
 });
 [["ggkit", false], ["ggkitf", true]].forEach(([id, file]) => {

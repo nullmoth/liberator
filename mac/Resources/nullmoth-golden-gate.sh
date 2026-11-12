@@ -1353,6 +1353,12 @@ drivers)
 "; fi
       i=$((i + 1)); done
     [ -n "$names" ] || { ok "no driver is on for macOS 27 without having been proven there"; echo "RESULT ok"; exit 0; }
+  elif [ "$DRVON" = all ]; then
+    # every "off" choice is taken back at once: the drivers go back to what the kit does by default
+    [ ! -f "$EFI/$CHOICES" ] || names=$(awk -F'\t' '$1 == "off" { print $2 }' "$EFI/$CHOICES")
+    [ -n "$names" ] || { ok "no driver is off by your choice"; echo "RESULT ok"; exit 0; }
+    names="$names
+"
   else
     index_of "$want" >/dev/null || stop "this PC's startup files have no driver named $want. Nothing was changed"
     ! kit_brings "$want" || stop "$want is part of macOS 27 support itself and cannot be turned off here. Nothing was changed"
@@ -1367,7 +1373,7 @@ drivers)
   while IFS= read -r nm; do [ -n "$nm" ] || continue
     awk -F'\t' -v k="$nm" '$2 != k' "$CF.new" > "$CF.new2" && mv -f "$CF.new2" "$CF.new" || { rm -f "$CF.new" "$CF.new2"; stop "the record of driver choices could not be written. Nothing was changed"; }
     if [ -n "$DRVOFF" ]; then printf 'off\t%s\n' "$nm" >> "$CF.new"
-    elif in_kit_list may_27 "$nm"; then printf 'on\t%s\n' "$nm" >> "$CF.new"; fi
+    elif [ "$DRVON" != all ] && in_kit_list may_27 "$nm"; then printf 'on\t%s\n' "$nm" >> "$CF.new"; fi
   done <<EOT
 $names
 EOT

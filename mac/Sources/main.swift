@@ -605,6 +605,17 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 guard a.runModal() == .alertSecondButtonReturn else { send("run", ["state": "cancelled", "mode": "goldengate"]); break }
                 extra.append("--confirm")
             }
+            if step == "drivers-off" || step == "drivers-on" {
+                let off = step == "drivers-off"
+                let a = NSAlert()
+                a.messageText = off ? "Turn off the unproven drivers for macOS 27?" : "Turn the drivers back on for macOS 27?"
+                a.informativeText = off
+                    ? "Some of this PC's own drivers (keyboard, trackpad, battery and the like) load on macOS 27 without having been proven there. If macOS 27 did not reach its desktop, one of them may be the reason. This turns them off for macOS 27 only; they keep working on the macOS you are using now. Afterwards press Send logs, so the driver can be fixed."
+                    : "This takes back every driver you turned off for macOS 27. They load there again at the next start."
+                a.addButton(withTitle: "Cancel"); a.addButton(withTitle: off ? "Turn them off" : "Turn them on")
+                guard a.runModal() == .alertSecondButtonReturn else { send("run", ["state": "cancelled", "mode": "goldengate"]); break }
+                extra.append("--confirm")
+            }
             if !kit.isEmpty { extra += ["--v3-kit", kit] }
             // Install: the account comes over unless the page's box for a new Mac is ticked. The script's own default,
             // with no name passed, is Apple's Setup Assistant.

@@ -103,7 +103,7 @@ arm("the build runs the OS gate test and compiles OSGate into the app",
     "tests/os_gate/main.swift" in build and 'Sources/OSGate.swift "$HASHES"' in build)
 arm("nothing a 2.x user sees mentions another driver or macOS 27 (the page, the app's and setup's refusals)",
     "macOS 27" not in appjs and "27 driver" not in (ROOT / "Sources/OSGate.swift").read_text()
-    and "27 driver" not in setup and "[15, 26].includes(m.major)" in appjs)
+    and "27 driver" not in setup and "OS_FROM.includes(m.major)" in appjs and "const OS_FROM = [15, 26]" in appjs)
 arm("on any other macOS a driver release is never offered, and the bundled package is never downloaded",
     '"newer": driverOK && (have.isEmpty' in main and "let driverOK = OSGate.driverInstallAllowed(major: OSGate.currentMajor)" in main
     and main.index("guard OSGate.driverInstallAllowed", main.index("    func download() {")) < main.index("startDownload(name: Package.name"))
@@ -143,11 +143,11 @@ rd = (ROOT / "Sources/ReachedDesktop.swift").read_text()
 arm("  the line is added only on macOS 27 and later",
     "if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 { s += macos27DisplayLine()" in rd)
 
-old_setup = subprocess.run(["git", "-C", str(ROOT), "show", "6474c03:mac/Resources/nullmoth-setup.sh"], capture_output=True, text=True)
-old_main = subprocess.run(["git", "-C", str(ROOT), "show", "6474c03:mac/Sources/main.swift"], capture_output=True, text=True)
-arm("negative control: before this change (6474c03) neither setup nor run() refuses an install by macOS version",
-    old_setup.returncode == 0 and old_main.returncode == 0 and "driver_os_ok" not in old_setup.stdout
-    and "OSGate" not in old_main.stdout, old_setup.stderr + old_main.stderr)
+# The control used to read the two files as they were before the gate existed (commit 6474c03 of the repository this
+# one was started from). That history is not in this repository, so the control that can still be run is the other
+# direction: the two marks every arm above relies on are really in today's files, and each is in use, not only named.
+arm("control: the marks of the OS gate are in today's setup and app, each defined and used",
+    setup.count("driver_os_ok") >= 2 and "driver_os_ok() {" in setup and main.count("OSGate.") >= 2, "")
 
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)

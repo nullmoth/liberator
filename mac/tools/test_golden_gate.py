@@ -902,6 +902,20 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
         rc == 0 and dmax(gg.STAGED).get("VoodooPS2Controller.kext") == "" and "VoodooPS2Controller" not in open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.txt")).read(), out)
     arm("the log holds every change, oldest first", len(open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.log")).read().splitlines()) == 5,
         open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.log")).read())
+    run("drivers", dv.efi, dv.kit_path, "--off", "VoodooPS2Controller.kext", "--confirm")
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--on", "all", "--confirm")
+    arm("turning everything back on takes every off choice away and leaves a driver turned on by hand as it is",
+        rc == 0 and dmax(gg.STAGED).get("VoodooPS2Controller.kext") == "" and dmax(gg.STAGED).get("SMCSuperIO.kext") == ""
+        and open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.txt")).read() == "on\tSMCSuperIO.kext\n", out)
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--on", "all", "--confirm")
+    arm("with nothing turned off, turning everything back on says so", rc == 0 and "no driver is off by your choice" in out, out)
+    page_d = (ROOT / "Resources/index.html").read_text(); js_d = (ROOT / "Resources/app.js").read_text()
+    sw_d = (ROOT / "Sources/OSGate.swift").read_text(); main_d = (ROOT / "Sources/main.swift").read_text()
+    arm("the app has the two driver buttons, sends them as their own steps, asks first, and setup hands them to the drivers step",
+        'id="ggdoff" disabled' in page_d and 'id="ggdon" disabled' in page_d and '["ggdoff", "drivers-off"], ["ggdon", "drivers-on"]' in js_d
+        and '.union(["drivers-off", "drivers-on"])' in sw_d and 'step == "drivers-off" || step == "drivers-on"' in main_d
+        and 'drivers --root "$MP" ${GGKIT:+--kit "$GGKIT"} --off unproven ${GGCONFIRM:+--confirm}' in (ROOT / "Resources/nullmoth-setup.sh").read_text()
+        and 'drivers --root "$MP" ${GGKIT:+--kit "$GGKIT"} --on all ${GGCONFIRM:+--confirm}' in (ROOT / "Resources/nullmoth-setup.sh").read_text(), "")
     setup_drv = (ROOT / "Resources/nullmoth-setup.sh").read_text()
     arm("Send logs carries the driver choices and the log of changes from the startup partition",
         '"$mp/EFI/golden-gate-drivers.txt"' in setup_drv and '"$mp/EFI/golden-gate-drivers.log"' in setup_drv and "driver changes (newest 40)" in setup_drv, "")
@@ -1528,10 +1542,11 @@ single = main.index('a.messageText = "Start this Mac from the macOS 27 startup f
 confirms = [i for i in range(len(main)) if main.startswith('extra.append("--confirm")', i)]
 rm_q = main.index('a.messageText = "Remove macOS 27 from this Mac?"')
 clr_q = main.index('a.messageText = "Clear the Golden Gate downloads?"')
+drv_q = main.index('a.messageText = off ? "Turn off the unproven drivers for macOS 27?"')
 GUARD = "guard a.runModal() == .alertSecondButtonReturn else"
-arm("--confirm is passed only after the user's yes: the whole move, removing macOS 27, clearing the downloads, the single switch",
-    main.count('"--confirm"') == 4 and len(confirms) == 4 and one < confirms[0] < rm_q < confirms[1] < clr_q < confirms[2] < single < confirms[3]
-    and all(GUARD in main[q:c] for q, c in ((one, confirms[0]), (rm_q, confirms[1]), (clr_q, confirms[2]), (single, confirms[3]))))
+arm("--confirm is passed only after the user's yes: the whole move, removing macOS 27, clearing the downloads, the drivers switch, the single switch",
+    main.count('"--confirm"') == 5 and len(confirms) == 5 and one < confirms[0] < rm_q < confirms[1] < clr_q < confirms[2] < drv_q < confirms[3] < single < confirms[4]
+    and all(GUARD in main[q:c] for q, c in ((one, confirms[0]), (rm_q, confirms[1]), (clr_q, confirms[2]), (drv_q, confirms[3]), (single, confirms[4]))))
 arm("the question before removing macOS 27 says that everything inside it is erased, that it cannot be undone, and that the running macOS is not touched",
     all(w in main[rm_q:confirms[1]] for w in ("with everything saved inside it", "It cannot be undone", "The macOS you are using now is not touched")))
 osgate = (ROOT / "Sources/OSGate.swift").read_text()
