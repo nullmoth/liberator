@@ -58,7 +58,7 @@ umask 022
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 PB=/usr/libexec/PlistBuddy
 HERE=$(cd "$(dirname "$0")" && pwd)
-STAGED=OC-27-staged; KEPT=OC-26; RENEWED=OC-27-old; DRIVER=NullMoth-v3; STATE=golden-gate.json; MANIFEST=v3-kit.json
+STAGED=OC-27-staged; KEPT=OC-26; RENEWED=OC-27-old; CHOICES=golden-gate-drivers.txt; DRVLOG=golden-gate-drivers.log; DRIVER=NullMoth-v3; STATE=golden-gate.json; MANIFEST=v3-kit.json
 FROM_MAJOR=26; TARGET=27.2
 # One number for the room macOS 27 needs on the disk this macOS runs from, from the kit scripts' own figures: 35 GB
 # for the new volumes, and 49 GB of work files while it runs (26 GB downloaded from Apple, 23 GB unpacked), which are
@@ -84,7 +84,7 @@ BOOT_ARGS_ALLOWED="-v -lilubetaall -vsmcbeta -no_compat_check a2x_conlive=1 a2xb
 MODEL_RTX50=Mac17,15
 
 STEP=${1:-}; [ $# -gt 0 ] && shift
-ROOT=""; KIT=""; CONFIRM=0; MAJOR=""; GPUS=""; GPUS_GIVEN=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0; ESPFREE=""
+ROOT=""; KIT=""; CONFIRM=0; DRVOFF=""; DRVON=""; MAJOR=""; GPUS=""; GPUS_GIVEN=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0; ESPFREE=""
 DISPLAYS=""; DISPLAYS_GIVEN=0; APPLEIDS=""; APPLEIDS_GIVEN=0
 DISKUTIL=/usr/sbin/diskutil; TOOLS=""
 KITMODEL=0; CPUV=""; LAPTOP=""; ACCOUNT=""
@@ -94,6 +94,7 @@ STEPLOG=/Library/NullMoth/golden-gate/steps.log
 while [ $# -gt 0 ]; do case "$1" in
   --root) ROOT=${2:-}; shift;; --kit) KIT=${2:-}; shift;; --confirm) CONFIRM=1;; --kit-model) KITMODEL=1;;
   --bring-account) ACCOUNT=${2:-}; shift;; --size-gb) SIZE_GB=${2:-}; shift;;
+  --off) DRVOFF=${2:-}; shift;; --on) DRVON=${2:-}; shift;;
   # test-hook-begin
   --macos-major) MAJOR=${2:-}; shift;; --gpu-id) GPUS="$GPUS ${2:-}"; GPUS_GIVEN=1; shift;;
   --disk-free-gb) DISK_GB=${2:-}; shift;; --esp-free-kb) ESPFREE=${2:-}; shift;; --device-id) DEVIDS="$DEVIDS ${2:-}"; DEVIDS_GIVEN=1; shift;;
@@ -176,8 +177,8 @@ kit_ok() {
   [ $seen = 1 ]
 }
 
-case "$STEP" in preflight|stage|activate|rollback|cancel|installer|collections|finish|local|status|laid|kit-current|refresh|downloads|clear-downloads|remove) ;;
-  *) echo "STOP the step must be preflight, stage, activate, rollback, cancel, installer, collections, finish, local, status, laid, kit-current, refresh, downloads, clear-downloads or remove"; echo "RESULT stop"; exit 2;; esac
+case "$STEP" in preflight|stage|activate|rollback|cancel|installer|collections|finish|local|status|laid|kit-current|refresh|drivers|downloads|clear-downloads|remove) ;;
+  *) echo "STOP the step must be preflight, stage, activate, rollback, cancel, installer, collections, finish, local, status, laid, kit-current, refresh, drivers, downloads, clear-downloads or remove"; echo "RESULT stop"; exit 2;; esac
 # The way back (rollback, cancel) and status need no kit: they must work on a Mac whose kit is gone.
 kit_allowed() {  # stops, naming it, on a config key or boot argument the manifest may not set
   local key a n i
@@ -626,6 +627,43 @@ not_for_this() {
 reaches_27() { case "${1%%.*}" in '') return 0;; *[!0-9]*) return 1;; esac; [ "${1%%.*}" -ge 27 ]; }
 NOT27=""; NOTABLES=0     # what apply_kit reports: kexts kept off macOS 27, and identity tables it could not write
 PATCH_ON=0; PATCH_OWN=0; PATCH_OFF=0; PATCH_OFF_NAMES=""   # kernel patches: carried to 27, replaced by the kit's own, left at 26
+kit_brings() { local n j; n=$(kv kexts) || return 1; j=0; while [ "$j" -lt "$n" ]; do [ "$(kv kexts.$j.name)" = "$1" ] && return 0; j=$((j + 1)); done; return 1; }
+choice_of() { [ -f "$EFI/$CHOICES" ] && [ ! -L "$EFI/$CHOICES" ] && awk -F'\t' -v k="$1" '$2 == k { v = $1 } END { print v }' "$EFI/$CHOICES"; }
+# What the user chose for single drivers on this partition, applied to the config at $AC. It comes after every rule
+# of the kit and wins: "off" stops a driver at macOS 26 (never one the kit itself brings); "on" lets a driver the kit
+# holds back by default but allows to be tried (may_27) load on macOS 27. A driver with no choice goes back to the
+# kit's default, so taking a choice away is the same as never having made it. Fills TRY27 (not proven on macOS 27
+# and on), OFF27 and ON27 (the choices that took effect) for the step's notes.
+TRY27=""; OFF27=""; ON27=""
+apply_choices() {
+  local n i name verb mx
+  TRY27=""; OFF27=""; ON27=""
+  n=$(cget Kernel.Add) || n=0; i=0
+  while [ "$i" -lt "$n" ]; do
+    name=$(bundle_at "$i")
+    if [ "$(cget "Kernel.Add.$i.Enabled")" = true ] && [ -n "$(cget "Kernel.Add.$i.ExecutablePath")" ] && ! kit_brings "$name"; then
+      verb=$(choice_of "$name"); mx=$(cget "Kernel.Add.$i.MaxKernel")
+      if [ "$verb" = off ]; then
+        if reaches_27 "$mx"; then sets "Kernel.Add.$i.MaxKernel" 26.99.99 || { bad "could not turn $name off"; return 1; }; fi
+        OFF27="$OFF27 $name"
+      elif [ "$verb" = on ] && in_kit_list may_27 "$name"; then
+        if [ "$mx" = 26.99.99 ]; then sets "Kernel.Add.$i.MaxKernel" "" || { bad "could not turn $name on"; return 1; }; fi
+        ON27="$ON27 $name"
+      elif in_kit_list try_27 "$name" && [ "$mx" = 26.99.99 ]; then
+        sets "Kernel.Add.$i.MaxKernel" "" || { bad "could not turn $name back on"; return 1; }
+      elif in_kit_list may_27 "$name" && reaches_27 "$mx"; then
+        sets "Kernel.Add.$i.MaxKernel" 26.99.99 || { bad "could not hold $name back"; return 1; }
+      fi
+      if in_kit_list try_27 "$name" && reaches_27 "$(cget "Kernel.Add.$i.MaxKernel")"; then TRY27="$TRY27 $name"; fi
+    fi
+    i=$((i + 1)); done
+  return 0
+}
+drv_log() {   # one dated line in the drivers log on the startup partition; the newest 200 lines are kept
+  local f="$EFI/$DRVLOG"
+  [ ! -L "$f" ] || return 0
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$f" 2>/dev/null && tail -n 200 "$f" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f"
+}
 apply_kit() {    # $1 = the OC folder to change
   local oc=$1 n i name when pos idx have p m li j key type val parent args a added s0 u0 hex fresh k b
   AC="$oc/config.plist"; local kd="$oc/Kexts"
@@ -823,6 +861,10 @@ EOF
     # a Mac's own hardware kexts the kit names as known to load on macOS 27 (its Ethernet, its processor's power management)
     if [ "$EFIKIND" = mac ]; then n=$(kv known_27_mac) || n=0; case "$n" in ''|*[!0-9]*) n=0;; esac
       j=0; while [ "$j" -lt "$n" ]; do keep="$keep$(kv known_27_mac.$j) "; j=$((j + 1)); done; fi
+    # drivers that link against the macOS 27 kernel but have not been proven there are kept on as well (try_27):
+    # a laptop without its keyboard, trackpad and battery drivers cannot be used on macOS 27 at all
+    n=$(kv try_27) || n=0; case "$n" in ''|*[!0-9]*) n=0;; esac
+    j=0; while [ "$j" -lt "$n" ]; do keep="$keep$(kv try_27.$j) "; j=$((j + 1)); done
     n=$(cget Kernel.Add); i=0
     while [ "$i" -lt "$n" ]; do
       name=$(bundle_at "$i"); exe=$(cget "Kernel.Add.$i.ExecutablePath")
@@ -833,6 +875,8 @@ EOF
       fi
       i=$((i + 1)); done
   fi
+
+  apply_choices || return 1
 
   # the system-protection value the reference configuration runs macOS 27 with
   if khas csr_active_config; then
@@ -1062,6 +1106,9 @@ stage)
   else note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"; fi
   [ -z "$GFX" ] || note "graphics path: $GFX"
   for k in $NOT27; do note "$k was never run on macOS 27: it stays on macOS 26 and does not load on macOS 27"; done
+  [ -z "$TRY27" ] || note "not proven on macOS 27 yet, and on:$TRY27. If macOS 27 does not reach its desktop, start macOS 26 and turn them off there (Drivers on macOS 27), then send the logs"
+  [ -z "$OFF27" ] || note "off on macOS 27 by your choice:$OFF27"
+  [ -z "$ON27" ] || note "on for macOS 27 by your choice:$ON27"
   [ $((PATCH_ON + PATCH_OWN)) = 0 ] || note "kernel patches for macOS 27: $PATCH_ON carried as they are (checked against this macOS 27 kernel)$([ $PATCH_OWN = 0 ] || echo ", $PATCH_OWN replaced by the kit's own")"
   [ $PATCH_OFF = 0 ] || note "$PATCH_OFF kernel patch(es) of this PC were not checked against macOS 27 and stay off there: $PATCH_OFF_NAMES"
   [ $NOTABLES = 0 ] || [ "$EFIKIND" = mac ] || note "this PC's config has no serial number and UUID of its own, so the Mac identity tables were not written"
@@ -1261,6 +1308,80 @@ refresh)
   rm -rf "$EFI/$RENEWED" "$SCR"
   ok "the macOS 27 startup files are now this kit's; macOS 26's are still kept at EFI/$KEPT. Restart to use them"
   [ $((PATCH_ON + PATCH_OWN)) = 0 ] || note "kernel patches for macOS 27: $PATCH_ON carried as they are$([ $PATCH_OWN = 0 ] || echo ", $PATCH_OWN replaced by the kit's own")"
+  echo "RESULT ok"; exit 0;;
+
+drivers)
+  # The drivers of this PC's own build on macOS 27: which are on, which are off, and the user's own choices. Without
+  # an option it lists. --off NAME stops one driver at macOS 26; --off unproven does that for every driver that is on
+  # without having been proven on macOS 27 (the way back into macOS 27 after a start that did not reach the
+  # desktop); --on NAME takes a choice back, or turns on a driver the kit only allows to be tried. The choice is
+  # kept on the startup partition, so staging again or renewing the startup files keeps it, and every change is
+  # written to a log there that the log collector sends.
+  state_or_stop
+  [ "$ST" != none ] || stop "there are no macOS 27 startup files on this partition yet. Nothing was changed"
+  if [ "$ST" = active ]; then T=OC; else T=$STAGED; fi
+  AC="$EFI/$T/config.plist"; [ -f "$AC" ] || stop "the macOS 27 startup files have no config. Nothing was changed"
+  if [ -z "$DRVOFF" ] && [ -z "$DRVON" ]; then
+    n=$(cget Kernel.Add) || n=0; i=0
+    while [ "$i" -lt "$n" ]; do
+      name=$(bundle_at "$i")
+      if [ "$(cget "Kernel.Add.$i.Enabled")" = true ] && [ -n "$(cget "Kernel.Add.$i.ExecutablePath")" ] && ! kit_brings "$name"; then
+        if reaches_27 "$(cget "Kernel.Add.$i.MaxKernel")"; then on=on; else on=off; fi
+        verb=$(choice_of "$name")
+        if in_kit_list try_27 "$name"; then kind="not proven on macOS 27"
+        elif in_kit_list may_27 "$name"; then kind="held back, may be tried"
+        elif in_kit_list known_27 "$name"; then kind="known on macOS 27"
+        else kind="never run on macOS 27"; fi
+        echo "DRIVER $name|$on|$kind|${verb:+your choice: $verb}"
+      fi
+      i=$((i + 1)); done
+    echo "RESULT ok"; exit 0
+  fi
+  [ $CONFIRM = 1 ] || stop "a driver is turned on or off only when you confirm it. Nothing was changed"
+  [ -z "$DRVOFF" ] || [ -z "$DRVON" ] || stop "turn drivers on or off, not both at once. Nothing was changed"
+  want="$DRVOFF$DRVON"; safe "$want" || stop "that is not a driver's name. Nothing was changed"
+  names=""
+  if [ "$DRVOFF" = unproven ]; then
+    n=$(cget Kernel.Add) || n=0; i=0
+    while [ "$i" -lt "$n" ]; do
+      name=$(bundle_at "$i")
+      if [ "$(cget "Kernel.Add.$i.Enabled")" = true ] && [ -n "$(cget "Kernel.Add.$i.ExecutablePath")" ] && ! kit_brings "$name" \
+         && reaches_27 "$(cget "Kernel.Add.$i.MaxKernel")" && { in_kit_list try_27 "$name" || in_kit_list may_27 "$name"; }; then names="$names$name
+"; fi
+      i=$((i + 1)); done
+    [ -n "$names" ] || { ok "no driver is on for macOS 27 without having been proven there"; echo "RESULT ok"; exit 0; }
+  else
+    index_of "$want" >/dev/null || stop "this PC's startup files have no driver named $want. Nothing was changed"
+    ! kit_brings "$want" || stop "$want is part of macOS 27 support itself and cannot be turned off here. Nothing was changed"
+    if [ -n "$DRVON" ] && [ -z "$(choice_of "$want")" ] && ! in_kit_list may_27 "$want"; then
+      stop "$want is not a driver that may be turned on for macOS 27: it was never run there, or it needs something macOS 27 does not have. Nothing was changed"; fi
+    names="$want
+"
+  fi
+  # the choices file is written first as a copy, then the config as a copy; both go into place only when both are whole
+  CF="$EFI/$CHOICES"; [ ! -L "$CF" ] || stop "the record of driver choices is a link. Nothing was changed"
+  { [ ! -f "$CF" ] || cat "$CF"; } > "$CF.new" || stop "the record of driver choices could not be written. Nothing was changed"
+  while IFS= read -r nm; do [ -n "$nm" ] || continue
+    awk -F'\t' -v k="$nm" '$2 != k' "$CF.new" > "$CF.new2" && mv -f "$CF.new2" "$CF.new" || { rm -f "$CF.new" "$CF.new2"; stop "the record of driver choices could not be written. Nothing was changed"; }
+    if [ -n "$DRVOFF" ]; then printf 'off\t%s\n' "$nm" >> "$CF.new"
+    elif in_kit_list may_27 "$nm"; then printf 'on\t%s\n' "$nm" >> "$CF.new"; fi
+  done <<EOT
+$names
+EOT
+  LIVE=$AC; cp "$LIVE" "$LIVE.new" || { rm -f "$CF.new"; stop "the config could not be copied. Nothing was changed"; }
+  OLDCF="$EFI/$CHOICES.old"; rm -f "$OLDCF"; [ ! -f "$CF" ] || cp "$CF" "$OLDCF"
+  mv -f "$CF.new" "$CF" || { rm -f "$LIVE.new" "$CF.new"; stop "the record of driver choices could not be put in place. Nothing was changed"; }
+  AC="$LIVE.new"
+  if apply_choices && plutil -lint "$AC" >/dev/null 2>&1 && mv -f "$AC" "$LIVE"; then rm -f "$OLDCF"
+  else rm -f "$LIVE.new"; if [ -f "$OLDCF" ]; then mv -f "$OLDCF" "$CF"; else rm -f "$CF"; fi
+    stop "the config could not be changed ($WHY); the choices are as they were. Nothing was changed"; fi
+  while IFS= read -r nm; do [ -n "$nm" ] || continue
+    if [ -n "$DRVOFF" ]; then ok "$nm is off for macOS 27 (it still loads on macOS 26)"; drv_log "off $nm (macOS 27 startup files: $ST)"
+    else ok "$nm is on for macOS 27"; drv_log "on $nm (macOS 27 startup files: $ST)"; fi
+  done <<EOT
+$names
+EOT
+  note "restart into macOS 27 to use this. To report a driver that stopped macOS 27, press Send logs from macOS 26: the report carries this record and what macOS 27 left behind"
   echo "RESULT ok"; exit 0;;
 
 laid)

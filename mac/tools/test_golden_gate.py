@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -838,6 +839,69 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
         and 'd=$(booted_part) || d=$(boot_esp)' in setup_all, "")
     arm("the one-button run makes no kernel collections and lays nothing down where macOS 27 is already on its volumes",
         '[ $gglaid = 1 ] || gg collections' in setup_all and 'if [ $gglaid = 1 ]; then echo "OK macOS 27 is already on its own volumes"; else gg installer' in setup_all, "")
+    # --- drivers: unproven ones on by default, an off switch from macOS 26, choices that survive, a log ---
+    dv = fresh(td, "drivers")
+    def dcfg(folder="OC"):
+        return plistlib.load(open(os.path.join(dv.efi, "EFI", folder, "config.plist"), "rb"))
+    def dmax(folder="OC"):
+        return {k["BundlePath"]: k.get("MaxKernel", "") for k in dcfg(folder)["Kernel"]["Add"] if k.get("Enabled")}
+    c0 = dcfg(); base = dict(next(k for k in c0["Kernel"]["Add"] if k.get("ExecutablePath")))
+    for nm in ("VoodooPS2Controller.kext", "SMCSuperIO.kext", "Mystery.kext"):
+        e = dict(base); e.update({"BundlePath": nm, "ExecutablePath": "Contents/MacOS/" + nm[:-5], "MaxKernel": "", "MinKernel": "", "Enabled": True, "Comment": nm})
+        c0["Kernel"]["Add"].append(e)
+    plistlib.dump(c0, open(os.path.join(dv.efi, "EFI", "OC", "config.plist"), "wb"))
+    edit(dv.kit_path, lambda m: (m.update({"try_27": ["VoodooPS2Controller.kext"], "may_27": ["SMCSuperIO.kext"]}),
+                                 m["caps"].append({"name": "SMCSuperIO.kext", "max_kernel": "26.99.99"})))
+    kitk = json.load(open(os.path.join(dv.kit_path, "v3-kit.json")))["kexts"][0]["name"]
+    rc, out = run("drivers", dv.efi, dv.kit_path)
+    arm("drivers says there is nothing to list before macOS 27 startup files exist", rc == 1 and "no macOS 27 startup files" in out, out)
+    rc, out = run("stage", dv.efi, dv.kit_path, *PCARGS)
+    mx = dmax(gg.STAGED) if rc == 0 else {}
+    arm("staging keeps a driver that links on 27 but is not proven there ON, and says so with the way back",
+        rc == 0 and mx.get("VoodooPS2Controller.kext") == "" and "not proven on macOS 27 yet, and on: VoodooPS2Controller.kext" in out
+        and "turn them off there" in out, out + repr(mx))
+    arm("control: a driver the kit holds back stays off, and one nobody listed is still stopped at macOS 26",
+        mx.get("SMCSuperIO.kext") == "26.99.99" and mx.get("Mystery.kext") == "26.99.99" and "Mystery.kext was never run on macOS 27" in out, out + repr(mx))
+    rc, out = run("drivers", dv.efi, dv.kit_path)
+    arm("drivers lists each of the PC's own drivers with its state on macOS 27 and why",
+        rc == 0 and "DRIVER VoodooPS2Controller.kext|on|not proven on macOS 27|" in out and "DRIVER SMCSuperIO.kext|off|held back, may be tried|" in out
+        and "DRIVER Mystery.kext|off|never run on macOS 27|" in out and ("DRIVER " + kitk) not in out, out)
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--off", "VoodooPS2Controller.kext")
+    arm("turning a driver off without confirmation changes nothing",
+        rc == 1 and "only when you confirm" in out and dmax(gg.STAGED).get("VoodooPS2Controller.kext") == ""
+        and not os.path.exists(os.path.join(dv.efi, "EFI", "golden-gate-drivers.txt")), out)
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--off", "VoodooPS2Controller.kext", "--confirm")
+    choices = open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.txt")).read() if rc == 0 else ""
+    dlog = open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.log")).read() if rc == 0 else ""
+    arm("turning it off stops it at macOS 26 in the staged files, records the choice, and writes a dated log line",
+        rc == 0 and dmax(gg.STAGED).get("VoodooPS2Controller.kext") == "26.99.99" and choices == "off\tVoodooPS2Controller.kext\n"
+        and re.search(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d off VoodooPS2Controller.kext", dlog, re.M) is not None
+        and dmax("OC").get("VoodooPS2Controller.kext") == "", out + choices + dlog)
+    run("activate", dv.efi, dv.kit_path, "--confirm")
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--off", "unproven", "--confirm")
+    arm("with nothing unproven left on, the all-off switch says so and changes nothing", rc == 0 and "no driver is on for macOS 27 without having been proven there" in out, out)
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--on", "SMCSuperIO.kext", "--confirm")
+    arm("a driver the kit allows to be tried can be turned on, in the startup files in use",
+        rc == 0 and dmax("OC").get("SMCSuperIO.kext") == "" and "on\tSMCSuperIO.kext" in open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.txt")).read(), out + repr(dmax("OC")))
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--on", "Mystery.kext", "--confirm")
+    arm("a driver that is on no list cannot be turned on for macOS 27", rc == 1 and "may not" not in out and "not a driver that may be turned on" in out and dmax("OC").get("Mystery.kext") == "26.99.99", out)
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--off", kitk, "--confirm")
+    arm("a driver that is part of macOS 27 support itself cannot be turned off", rc == 1 and "part of macOS 27 support itself" in out, out)
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--off", "unproven", "--confirm")
+    arm("the all-off switch turns off every unproven or tried driver that is on (here the one turned on by hand)",
+        rc == 0 and dmax("OC").get("SMCSuperIO.kext") == "26.99.99" and "SMCSuperIO.kext is off for macOS 27" in out, out)
+    run("drivers", dv.efi, dv.kit_path, "--on", "SMCSuperIO.kext", "--confirm")
+    run("cancel", dv.efi, "", "--confirm")
+    rc, out = run("stage", dv.efi, dv.kit_path, *PCARGS)
+    mx = dmax(gg.STAGED) if rc == 0 else {}
+    arm("the choices survive taking the startup files back and staging again (what an update does)",
+        rc == 0 and mx.get("VoodooPS2Controller.kext") == "26.99.99" and mx.get("SMCSuperIO.kext") == ""
+        and "off on macOS 27 by your choice: VoodooPS2Controller.kext" in out and "on for macOS 27 by your choice: SMCSuperIO.kext" in out, out + repr(mx))
+    rc, out = run("drivers", dv.efi, dv.kit_path, "--on", "VoodooPS2Controller.kext", "--confirm")
+    arm("taking the off choice back puts the driver on again, as if the choice had never been made",
+        rc == 0 and dmax(gg.STAGED).get("VoodooPS2Controller.kext") == "" and "VoodooPS2Controller" not in open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.txt")).read(), out)
+    arm("the log holds every change, oldest first", len(open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.log")).read().splitlines()) == 5,
+        open(os.path.join(dv.efi, "EFI", "golden-gate-drivers.log")).read())
     # --- preflight on a Mac where macOS 27 is already laid down (an update to a newer release of this app) ---
     # The first such PC was refused "51 GB free, 67 GB needed" for download room it would never use.
     def pre_calls(vols):
