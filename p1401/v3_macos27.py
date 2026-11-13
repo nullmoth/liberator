@@ -264,6 +264,34 @@ def _set_path(cfg, dotted, value):
     node[keys[-1]] = value
 
 
+_PCI_PATH = re.compile(r"PciRoot\(0x[0-9A-Fa-f]+\)(/Pci\(0x[0-9A-Fa-f]+,0x[0-9A-Fa-f]+\))+")
+
+
+def builtin_devices(cfg, report):
+    """Marks this PC's own storage and network controllers as built-in (DeviceProperties, "built-in" = 01), the way a
+    Mac's are. Measured on macOS 27.2 without it: the internal disk reads "External" and the wired port reads
+    IOBuiltin = No / IOPrimaryInterface = No. Apple's sign-in check reads the address of the interface that is both,
+    so the Apple account cannot sign in, and the eligibility input "external boot drive" stays failed. With the
+    property on both paths the same machine read Internal, Yes / Yes, and that input passed.
+    Only controllers with a well-formed PCI path from the scan that are not on USB are touched; a value already
+    there is kept.
+    Returns the list of (section, name, path) it added."""
+    added = []
+    add = cfg.setdefault("DeviceProperties", {}).setdefault("Add", {})
+    for section in ("Storage Controllers", "Network"):
+        for name, dev in sorted(((report or {}).get(section) or {}).items()):
+            path = (dev or {}).get("PCI Path") or ""
+            # the scan names a disk controller's bus "NVMe", "SATA" or "PCI"; a device on USB is never built-in
+            if "USB" in str((dev or {}).get("Bus Type") or "").upper() or not _PCI_PATH.fullmatch(path):
+                continue
+            props = add.setdefault(path, {})
+            if "built-in" in props:
+                continue
+            props["built-in"] = b"\x01"
+            added.append((section, name, path))
+    return added
+
+
 def apply(efi_dir, kit, notices, report=None, kit_model=False):
     """Changes the built macOS 26 EFI under efi_dir into a macOS 27 one, as the kit's manifest says. Returns the
     list of changes (for the build log). Raises KitError on anything it cannot do."""
@@ -358,6 +386,9 @@ def apply(efi_dir, kit, notices, report=None, kit_model=False):
     for dotted, value in (kit.get("set") or {}).items():
         _set_path(cfg, dotted, value)
         changes.append({"v3": "set", "key": dotted, "value": value if not isinstance(value, bytes) else value.hex()})
+
+    for section, name, path in builtin_devices(cfg, report):
+        changes.append({"v3": "built-in", "section": section, "device": name, "path": path})
 
     # kit_model: keep the model the kit sets (the one its reference configuration started macOS 27 with) instead of
     # the model for this card's generation. It is the second attempt when macOS 27 does not start with that model.

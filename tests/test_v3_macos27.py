@@ -275,6 +275,27 @@ class ModelIdentity(unittest.TestCase):
                 v3_macos27.IDENTITY["RTX 20"]["model"] = old
             self.assertEqual(fx.built()["PlatformInfo"]["Generic"]["SystemProductName"], "TestModel1,1")
 
+    def test_this_pcs_disk_and_network_controllers_are_marked_built_in(self):
+        from p1401 import v3_macos27 as v
+        nvme, eth = "PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)", "PciRoot(0x2)/Pci(0x1D,0x0)/Pci(0x0,0x0)"
+        cfg = {"DeviceProperties": {"Add": {eth: {"built-in": b"\x00", "other": 1}}}}
+        report = {"Storage Controllers": {"NVMe": {"Bus Type": "NVMe", "PCI Path": nvme},
+                                          "USB stick": {"Bus Type": "USB", "PCI Path": "PciRoot(0x0)/Pci(0x14,0x0)"},
+                                          "Odd": {"Bus Type": "PCI", "PCI Path": "PciRoot(0x0)/garbage"}},
+                  "Network": {"Wired": {"Bus Type": "PCI", "PCI Path": eth}}}
+        added = v.builtin_devices(cfg, report)
+        add = cfg["DeviceProperties"]["Add"]
+        self.assertEqual(added, [("Storage Controllers", "NVMe", nvme)])      # only the well-formed PCI path that had none
+        self.assertEqual(add[nvme]["built-in"], b"\x01")
+        self.assertEqual(add[eth], {"built-in": b"\x00", "other": 1})         # a value already there is kept
+        self.assertEqual(set(add), {nvme, eth})                               # the USB and the malformed path add nothing
+
+    def test_no_scan_adds_no_built_in_property(self):
+        from p1401 import v3_macos27 as v
+        cfg = {}
+        self.assertEqual(v.builtin_devices(cfg, None), [])
+        self.assertEqual(cfg["DeviceProperties"]["Add"], {})
+
     def test_a_pc_with_no_classed_card_gets_no_identity_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             fx = Fixture(tmp)
