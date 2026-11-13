@@ -1,0 +1,18 @@
+{
+  "product": "liberator-mac",
+  "channel": "beta",
+  "version": "0.2.0",
+  "name": "Liberator Beta 2",
+  "tag": "v3.0.0-beta.2",
+  "app": {
+    "file": "Liberator-Mac-0.2.0.zip",
+    "sha256": "@APP_SHA@",
+    "signature": "Liberator-Mac-0.2.0.zip.bsig"
+  },
+  "kit": {
+    "file": "nullmoth-v3-kit-3.0.0-beta.2.tar.gz",
+    "sha256": "@KIT_SHA@"
+  },
+  "release": "https://github.com/nullmoth/nvidia-macos-driver/releases/tag/v3.0.0-beta.2",
+  "replaces": ["0.1.0"]
+}

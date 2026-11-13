@@ -86,7 +86,7 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleName</key><string>Liberator</string>
 <key>CFBundleDisplayName</key><string>Liberator</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleShortVersionString</key><string>0.2.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSHumanReadableCopyright</key><string>© 2026 NullMoth Systems</string>

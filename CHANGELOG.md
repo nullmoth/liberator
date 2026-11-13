@@ -1,5 +1,13 @@
 # Changelog
 
+## Liberator Beta 2
+- Version 0.2.0, built for its own kit (release tag v3.0.0-beta.2).
+- Preparing again renews the macOS 27 startup files made by an older kit, from macOS 26 or from macOS 27; finished steps are not repeated.
+- A PC's disk and wired network controller read as built in under macOS 27; debugging start-up settings are no longer sent to users.
+- Send a report includes the macOS 27 logs again (a duplicated file made Beta 1 reports fail).
+- Room asked for drops from about 102 GB to about 92 GB. A Drivers step lists the extra macOS 27 drivers and keeps your choices.
+- Beta 1 cannot update itself to Beta 2; download the app once by hand.
+
 ## Liberator Beta 1
 - First release. One button, Prepare for Golden Gate, moves an OpenCore PC with an NVIDIA card from macOS 15 or 26 to macOS 27.2: it downloads macOS 27 from Apple, builds the Intel startup files, puts macOS 27 on its own volumes beside the current macOS, installs the NullMoth driver for macOS 27 and the layer that runs Apple's arm64-only programs on Intel, and makes macOS 27 the startup default.
 - Your current macOS is kept. Cancel Golden Gate puts its startup files back; Remove macOS 27 also erases the new volumes.
