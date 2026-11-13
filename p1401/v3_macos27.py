@@ -45,6 +45,13 @@ LILU = "Lilu.kext"
 PLATFORM = "platform.plist"        # the identity tables in a kit, without any machine's own numbers
 PLATFORM_SECTIONS = ("DataHub", "PlatformNVRAM", "SMBIOS")
 UNKNOWN_MAX = "26.99.99"           # where a kext nobody has run on macOS 27 stops
+# Diagnostic boot arguments a developer build carries that must not reach a user: they wait for a debugger on a
+# panic, enlarge the kernel log, or turn on bus/driver logging. Removed from the carried-over boot-args when the
+# macOS 27 config is built. NOT removed: -v (required here - without it 27.2 stops at the progress screen),
+# keepsyms (only makes a panic readable), the driver's own nvfb/nvaccel flags, amfi/amfi_get_out_of_my_way (needed
+# for the unsigned kexts), -no_compat_check. A token with "=" matches by its key; a bare token matches whole.
+DIAG_BOOT_ARGS = ("debug", "msgbuf", "pmsg", "serial", "-liludbgall", "-liludbg", "iog_debug",
+                  "io_debug", "pcidbg", "nvdebug", "-nvdbg", "watchdog")
 
 # Model identity on macOS 27 follows the NVIDIA generation, so the PC presents itself as the Apple silicon class its
 # card is closest to: GTX 16 as M1, RTX 20 as M2, RTX 30 as M3, RTX 40 as M4, RTX 50 as M5 (Mac Studio, M5 Ultra).
@@ -374,6 +381,10 @@ def apply(efi_dir, kit, notices, report=None, kit_model=False):
 
     nv = cfg["NVRAM"]["Add"].setdefault("7C436110-AB2A-4BBB-A880-FE41995C9F82", {})
     args = (nv.get("boot-args") or "").split()
+    removed = [a for a in args if a.split("=", 1)[0] in DIAG_BOOT_ARGS]
+    if removed:
+        args = [a for a in args if a not in removed]
+        changes.append({"v3": "boot-args-diagnostic-removed", "removed": removed})
     # name=value: a value the PC's own config gives that name is replaced, so the name is there once
     for a in kit["boot_args"]:
         if "=" in a:

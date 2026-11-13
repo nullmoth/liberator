@@ -290,6 +290,21 @@ class ModelIdentity(unittest.TestCase):
         self.assertEqual(add[eth], {"built-in": b"\x00", "other": 1})         # a value already there is kept
         self.assertEqual(set(add), {nvme, eth})                               # the USB and the malformed path add nothing
 
+    def test_diagnostic_boot_args_are_removed_but_functional_ones_kept(self):
+        from p1401 import v3_macos27 as v
+        cfg = {"NVRAM": {"Add": {"7C436110-AB2A-4BBB-A880-FE41995C9F82":
+               {"boot-args": "-v debug=0x100 keepsyms=1 msgbuf=67108864 amfi=0x80 nvfb=1 -no_compat_check"}}},
+               "Kernel": {"Add": []}, "DeviceProperties": {"Add": {}}}
+        args = cfg["NVRAM"]["Add"]["7C436110-AB2A-4BBB-A880-FE41995C9F82"]["boot-args"].split()
+        removed = [a for a in args if a.split("=", 1)[0] in v.DIAG_BOOT_ARGS]
+        kept = [a for a in args if a not in removed]
+        self.assertEqual(set(removed), {"debug=0x100", "msgbuf=67108864"})
+        self.assertIn("-v", kept)                # required here
+        self.assertIn("keepsyms=1", kept)        # harmless, kept
+        self.assertIn("amfi=0x80", kept)         # needed for unsigned kexts
+        self.assertIn("nvfb=1", kept)            # the driver's own flag
+        self.assertIn("-no_compat_check", kept)
+
     def test_no_scan_adds_no_built_in_property(self):
         from p1401 import v3_macos27 as v
         cfg = {}
