@@ -16,7 +16,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
 PIN="$HERE/v3-kit.pin"
 DEST=/Library/NullMoth/v3-kit
-BASES="https://github.com/nullmoth/nvidia-macos-driver/releases/download https://nullmothsystems.com/download/v3"
+BASES="https://github.com/nullmoth/liberator/releases/download https://nullmothsystems.com/download/v3 https://github.com/nullmoth/nvidia-macos-driver/releases/download"
 NEED_ROOT=1
 PROTO='=https'
 
