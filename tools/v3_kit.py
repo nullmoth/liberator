@@ -67,13 +67,17 @@ TAHOE_MAX = "26.99.99"
 TRY_27 = ["VoodooPS2Controller.kext", "VoodooPS2Keyboard.kext", "VoodooPS2Trackpad.kext", "VoodooPS2Mouse.kext",
           "VoodooInput.kext", "VoodooI2C.kext", "VoodooI2CServices.kext", "VoodooGPIO.kext", "VoodooI2CHID.kext",
           "VoodooI2CELAN.kext", "VoodooI2CSynaptics.kext", "VoodooI2CFTE.kext", "VoodooI2CAtmelMXT.kext",
-          "SMCBatteryManager.kext", "SMCLightSensor.kext", "SMCDellSensors.kext", "ECEnabler.kext",
+          "SMCBatteryManager.kext", "SMCLightSensor.kext", "SMCDellSensors.kext",
           "BrightnessKeys.kext", "IntelSnowMausi.kext"]
+# Not on any macOS 27 list, so it stops at macOS 26 with every other unknown kext: ECEnabler patches Apple's ACPI
+# platform driver, and macOS 27 runs on the kit's own platform driver, so it has nothing to patch there.
 # Drivers the kit holds at macOS 26 by default, that link on macOS 27 and that a user may turn on there to try.
-MAY_27 = ["SMCSuperIO.kext", "AppleALC.kext", "NVMeFix.kext", "WhateverGreen.kext"]
+# AppleALC and WhateverGreen are not offered: macOS 27 has no AppleHDA and no Apple AMD or Intel graphics driver
+# for them to patch, so turning them on could only add risk.
+MAY_27 = ["SMCSuperIO.kext", "NVMeFix.kext"]
 KNOWN_27 = ["Lilu.kext", "VirtualSMC.kext", "SMCProcessor.kext", "AppleMCEReporterDisabler.kext", "USBToolBox.kext",
             "RTL812xLucy.kext",
-            "LucyRTL8125Ethernet.kext", "IntelMausi.kext", "AppleIGC.kext", "AppleIGB.kext", "IntelLucy.kext",
+            "LucyRTL8125Ethernet.kext", "IntelMausi.kext", "IntelMausiEthernet.kext", "AppleIGC.kext", "AppleIGB.kext", "IntelLucy.kext",
             "RealtekRTL8111.kext", "AtherosE2200Ethernet.kext"]
 # The parts of the identity tables that belong to one machine. They are blanked in the kit and filled from each PC's own
 # config when the kit is applied.
