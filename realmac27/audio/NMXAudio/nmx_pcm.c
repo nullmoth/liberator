@@ -25,6 +25,7 @@ struct pcm_channel {
 	uint32_t format, speed;
 	int running;
 	void *engine;			/* set by the engine; chn_intr reports blocks to it */
+	unsigned engine_readers;	/* drain a pending block notification on detach */
 };
 
 int snd_unit = -1;
@@ -163,7 +164,9 @@ int pcm_unregister(device_t dev)
 	struct snddev_info *sc = softc(dev);
 	if (!sc->registered)
 		return 0;
-	nmx_audio_unpublish(sc);
+	int error = nmx_audio_unpublish(sc);
+	if (error != 0)
+		return error;
 	for (int i = 0; i < sc->nchan; i++) {
 		struct pcm_channel *c = sc->chan[i];
 		if (c->running)
@@ -195,8 +198,11 @@ void pcm_setflags(device_t dev, uint32_t val) { softc(dev)->flags = val; }
 
 void chn_intr(struct pcm_channel *c)
 {
-	if (c->engine != NULL)
-		nmx_audio_block_done(c->engine, c);
+	__atomic_add_fetch(&c->engine_readers, 1, __ATOMIC_SEQ_CST);
+	void *engine = __atomic_load_n(&c->engine, __ATOMIC_SEQ_CST);
+	if (engine != NULL)
+		nmx_audio_block_done(engine, c);
+	__atomic_sub_fetch(&c->engine_readers, 1, __ATOMIC_SEQ_CST);
 }
 
 int snd_setup_intr(device_t dev, struct resource *res, int flags, driver_intr_t hand, void *param, void **cookiep)
@@ -337,11 +343,40 @@ int nmx_chan_stop(struct pcm_channel *c)
 }
 
 uint32_t nmx_chan_getptr(struct pcm_channel *c) { return CHANNEL_GETPTR(c->obj, c->data); }
-void nmx_chan_set_engine(struct pcm_channel *c, void *engine) { c->engine = engine; }
+void nmx_chan_set_engine(struct pcm_channel *c, void *engine)
+{
+	__atomic_store_n(&c->engine, engine, __ATOMIC_RELEASE);
+}
+
+void nmx_chan_clear_engine(struct pcm_channel *c, void *engine)
+{
+	if (__atomic_compare_exchange_n(&c->engine, &engine, NULL, 0,
+	    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+		while (__atomic_load_n(&c->engine_readers, __ATOMIC_SEQ_CST) != 0)
+			pause("nmxengine", 1);
+	}
+}
 
 int nmx_pcm_nchan(struct snddev_info *sc) { return sc->nchan; }
 struct pcm_channel *nmx_pcm_chan(struct snddev_info *sc, int i) { return i >= 0 && i < sc->nchan ? sc->chan[i] : NULL; }
 const char *nmx_pcm_name(struct snddev_info *sc) { return device_get_desc(sc->dev); }
+
+int nmx_hda_display_endpoint(device_t dev, struct nmx_display_endpoint *endpoint);
+int nmx_hda_pcm_label_metadata(device_t dev, int direction,
+	struct nmx_pcm_label_metadata *metadata);
+
+int nmx_pcm_display_endpoint(struct snddev_info *sc, struct nmx_display_endpoint *endpoint)
+{
+	return nmx_hda_display_endpoint(sc->dev, endpoint);
+}
+
+int nmx_pcm_get_label_metadata(struct snddev_info *sc, int direction,
+	struct nmx_pcm_label_metadata *metadata)
+{
+	if (sc == NULL || metadata == NULL)
+		return 0;
+	return nmx_hda_pcm_label_metadata(sc->dev, direction, metadata);
+}
 
 static int child_index(device_t dev)
 {
