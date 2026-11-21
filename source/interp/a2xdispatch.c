@@ -1,9 +1,9 @@
 /* a2xdispatch — the single interpreter the kernel exec hook substitutes.
  *
- * Why this exists at all. The kernel redirect can name exactly one interpreter path, and the
- *    arm64 host's platform is a link-time property it cannot change at runtime: dyld refuses
+ *  WHY THIS EXISTS AT ALL. The kernel redirect can name exactly ONE interpreter path, and the
+ *    arm64 host's platform is a LINK-TIME property it cannot change at runtime: dyld refuses
  *    /System/iOSSupport frameworks to a process whose own LC_BUILD_VERSION platform is MACOS, so a
- *    Mac Catalyst guest needs a macabi-platform host. Measured 2026-10-27, and the reverse is not
+ *    Mac Catalyst guest needs a macabi-platform host. MEASURED 2026-10-27, and the reverse is NOT
  *    symmetric — the Catalyst host is not a superset:
  *
  *      app      macOS host   Catalyst host
@@ -12,27 +12,27 @@
  *
  *    So "just always use the Catalyst host" costs working apps. This picks per guest instead.
  *
- * The discriminator is the guest's own BYTES, never A LIST. A hard-coded list of "the Catalyst
+ *  THE DISCRIMINATOR IS THE GUEST'S OWN BYTES, NEVER A LIST. A hard-coded list of "the Catalyst
  *    apps" poisoned two whole sweeps on 2026-10-27: it ran four plain-macOS apps on the Catalyst
  *    host and missed nine real Catalyst apps. The test is the presence of the literal
  *    "/System/iOSSupport" in the Mach-O, which was validated in both directions across 11 apps.
  *
- * It also sets CFProcessPath. A hosted guest's process executable is the interpreter, which is
+ *  IT ALSO SETS CFProcessPath. A hosted guest's process executable is the interpreter, which is
  *    not inside a bundle, so [[NSBundle mainBundle] bundleIdentifier] is nil and UIKit asserts
  *    'Invalid parameter not satisfying: bundleIdentifier' in
  *    -[UISApplicationState initForCurrentApplication]. CoreFoundation derives the main bundle from
  *    the process path and honours CFProcessPath, so exporting it gives the guest its own bundle,
- *    identifier and name. Measured: the assertion disappears in all five Catalyst apps and the
+ *    identifier and name. MEASURED: the assertion disappears in all five Catalyst apps and the
  *    process renames itself ("Maps application main() started").
  *
- * One exec, not two chained interpreters: this dispatcher execs the host directly, so the kernel
+ *  One exec, not two chained interpreters: this dispatcher execs the host directly, so the kernel
  *    sees a normal x86_64 exec of a thin binary and the activator iteration limit (3) is untouched.
  *
- * It must stay thin x86_64. The kernel reaches it on pass 3 of exec_activate_image (fat guest
+ *  IT MUST STAY THIN x86_64. The kernel reaches it on pass 3 of exec_activate_image (fat guest
  *    header, our redirect, the host); a fat interpreter would need a fourth pass and the exec would
  *    fail with EBADEXEC on exactly the guests a fat file covers.
  *
- * On ANY failure it says why on stderr and exits non-zero. A dispatcher that silently falls back
+ *  ON ANY FAILURE IT SAYS WHY ON stderr AND EXITS NON-ZERO. A dispatcher that silently falls back
  *    to the wrong host would show up as an app-specific bug days later.
  */
 #include <stdio.h>
@@ -43,6 +43,8 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <stdio.h>
+#include <mach/mach.h>
 
 #define HOST_DIR  "/usr/libexec/a2x"
 #define HOST_CAT  HOST_DIR "/a2xhost-cat"
@@ -98,8 +100,8 @@ int main(int argc, char **argv) {
     if (A2X_DBGENV("A2XDISPATCH_TRACE"))
         fprintf(stderr, "a2xdispatch: %s -> %s (catalyst=%d)\n", guest, host, cat);
 
-    /* The app's own argv goes to the host: [guest, original args...]. The guest path rides in A2X_GUEST.
-     * WAS execv(host, [host, guest, args...]): Foundation snapshots argv before the host's main runs, so
+    /* The app's OWN argv goes to the host: [guest, original args...]. The guest path rides in A2X_GUEST.
+     *  WAS execv(host, [host, guest, args...]): Foundation snapshots argv before the host's main runs, so
      *    the app saw [app, app] and AppKit opened its own executable as a document at finishLaunching —
      *    a SIGSEGV in LSCopyKindStringForTypeInfo for Stickies and System Information (10-28, 2/2 each). */
     if (setenv("A2X_GUEST", guest, 1) != 0) {

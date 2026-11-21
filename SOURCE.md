@@ -11,6 +11,7 @@ machine; no Apple or NVIDIA file is part of it.
 | `source/interp` | the interpreter that runs macOS 27's Apple-silicon programs on Intel |
 | `source/translator` | the ahead-of-time translator the interpreter's tables are built from |
 | `source/sandbox` | the Sandbox policy for macOS 27 on Intel (macOS 27 ships none for Intel) |
+| `stock27/` | stock macOS 27 support: the exec-hook kernel extension source (`hook/`, built with its own `Makefile`, with an in-source `-DA2X_SELFTEST` harness), the keepalive start-up script, and the system-volume update payload. See `stock27/README.md` |
 | `realmac27/` | real Mac support (Mac Pro, Late 2013): the platform driver used on PCs and Macs, the HD Audio driver, the AMD shader-compiler hook and helper tools. See `realmac27/README.md` |
 | `upstream/` | third-party projects used as they are, each under its own licence |
 

@@ -1,13 +1,12 @@
-// host.c — run an arm64 Mach-O on x86_64 with no build step for it.
-//
-// This is the shape the goal needs. The per-app pipeline translates one binary on a build machine and
-//    bakes its import bindings into a host built for it alone — which is why every app cost its own build.
-//    Here nothing is generated: the app is mapped at its own addresses, its fixups are read at load time
-//    (machofix.c, validated against dyld on 75 real binaries), imports are dlsym'd straight to the real x86
-//    frameworks, and execution is the interpreter (all 2,224 instruction forms identical to arm64 hardware).
-//    One fixed binary, any arm64 program.
+// host.c — run an arm64 Mach-O on x86_64 with NO build step for it.
+// // THIS IS THE SHAPE THE GOAL NEEDS. The per-app pipeline translates one binary on a build machine and
+// bakes its import bindings into a host built for it alone — which is why every app cost its own build.
+// Here nothing is generated: the app is mapped at its own addresses, its fixups are read at load time
+// (machofix.c, validated against dyld on 75 real binaries), imports are dlsym'd straight to the real x86
+// frameworks, and execution is the certified interpreter (all 2,224 instruction forms identical to an M4).
+// One fixed binary, any arm64 program.
 // It refuses loudly rather than half-running: a segment that will not map where it must, a missing import,
-//    an unimplemented instruction and a branch to nowhere each stop with the address and the reason.
+// an unimplemented instruction and a branch to nowhere each stop with the address and the reason.
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +16,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
+extern int *_NSGetArgc(void);
+extern char ***_NSGetArgv(void);
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sched.h>
@@ -24,11 +25,11 @@
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>   /* mach_vm_remap for shared code pages */
+#include <mach/mach_vm.h>   /* r13m: mach_vm_remap for shared code pages */
 #include <uuid/uuid.h>
 #include <stdbool.h>   /* _NSGetExecutablePath: bundle mode asks where WE are */
 
-/* The suffix that makes this host an app. The launch hook renames an app bundle's own arm64
+/* THE SUFFIX THAT MAKES THIS HOST AN APP. The launch hook renames an app bundle's own arm64
       executable to <name>.a2x64 and puts this host at <name>, so the kernel — which refuses to exec an
       arm64 slice on Intel at all (ml_grade_binary has no CPU_TYPE_ARM64 case, EBADARCH) — execs us
       instead, and we interpret the file beside us. */
@@ -50,16 +51,16 @@ unsigned long __arm_tsd_off;
 
 FILE *a2x_errf(void) { return stderr; }
 
-/* ── the load stage, published for the fault handler ───────────────────────────────────────────────────
-      Several macOS 27 apps died with `guest pc 0x0 (insn 0x00000000), faulting address 0x20` (FindMy, Maps,
+/* ──  THE LOAD STAGE, PUBLISHED FOR THE FAULT HANDLER ───────────────────────────────────────────────────
+       FIVE macOS 27 APPS DIE WITH `guest pc 0x0 (insn 0x00000000), faulting address 0x20` (FindMy, Maps,
          Reminders, Shortcuts, and Notes before the universal trampoline). A zero guest pc means the
          interpreter's per-step publish never happened on that thread, so the fault is in the host's own load
-         and registration work — and a report that names no part of it leaves five apps diagnosed as one
+         and registration work — and the report named no part of it, which left five apps diagnosed as one
          guess. One store per stage, exactly the idiom a64_cur_pc already uses, makes the next single run name
          the stage, the image and the record instead.
-      0x20 is not an arbitrary address. libobjc's objc_class::data() reads `bits` at +0x20, and this tree's
+       0x20 IS NOT AN ARBITRARY ADDRESS. libobjc's objc_class::data() reads `bits` at +0x20, and this tree's
          own RO(c) macro (objc_bridge.c) reads the same word — so a Nil Class handed to the runtime faults at
-         exactly 0x20. objc_bridge.c already records that shape: a Shortcuts category on an
+         EXACTLY 0x20. objc_bridge.c already records that shape once, measured: a Shortcuts category on an
          unrealized Swift class died in prepareMethodLists at fault 0x20. The stage below says which record
          was being handed over; audit_image() below says which records could not survive being handed over. */
 enum {
@@ -73,12 +74,12 @@ static const char *const g_stage_name[ST_N] = {
     "register-objc-protocols", "register-objc-classes", "register-swift-metadata",
     "register-thread-locals", "build-guest-stack", "enter-guest", "guest-running"
 };
-/* volatile, one store each, no lock: the handler only ever reads the last published value. A lock taken in
+/* volatile, one store each, no lock: the handler only ever reads the LAST published value. A lock taken in
       a signal handler is how a crash becomes a hang, and this has to survive being read mid-update. */
 static volatile int g_stage;
 static volatile int g_stage_img = -1;
 static volatile unsigned long g_stage_idx;
-static const char *volatile g_stage_what = "";   /* Static storage only — the handler prints it unchanged */
+static const char *volatile g_stage_what = "";   /* STATIC STORAGE ONLY — the handler prints it unchanged */
 static volatile unsigned long g_stage_thread;
 static int g_stage_live = -1;
 
@@ -87,36 +88,36 @@ static void stage(int s, int img, unsigned long idx, const char *what) {
     g_stage_thread = (unsigned long)(uintptr_t)pthread_self();
     if (g_stage_live < 0)
         g_stage_live = (A2X_DBGENV("ARM2X86_HOST_STAGE") || A2X_DBGENV("ARM2X86_HOST_TRACE")) ? 1 : 0;
-    /* Live printing is not optional for the abort() case: objc_bridge's die2() and libobjc's own
+    /* LIVE PRINTING IS NOT OPTIONAL FOR THE abort() CASE: objc_bridge's die2() and libobjc's own
           _objc_fatal end the process without a signal, so they never reach the fault handler. Without a live
           line the stage dies with the process and the run says nothing. */
     if (g_stage_live > 0)
         fprintf(stderr, "[stage] %-24s image %d index %lu %s\n",
                 g_stage_name[s < 0 || s >= ST_N ? 0 : s], img, idx, g_stage_what);
 }
-/* The index alone, for a loop tight enough that a live line per element would be a flood — Maps has
+/* THE INDEX ALONE, for a loop tight enough that a live line per element would be a flood — Maps has
       32,736 selector references. The stage name has already been printed; the handler reads the index. */
 static inline void stage_idx(unsigned long idx) { g_stage_idx = idx; }
-/* A stage string must outlive the frame that set it: the fault handler prints g_stage_what long after the
+/* A STAGE STRING MUST OUTLIVE THE FRAME THAT SET IT: the fault handler prints g_stage_what long after the
       caller returned, so a path built in a local buffer is copied here first. */
 static char g_stage_path[1024];
 
-/* The guest's address range is reserved at link time, not claimed at run time. MAP_FIXED replaces
-      whatever is already there silently, and by the time main() has opened a file and dlopened a framework
-      the allocator may already own pages at 0x100000000 — the host then maps the guest over its own memory
-      and dies before the first instruction, with nothing in the log to say why. A zerofill segment placed by
+/* THE GUEST'S ADDRESS RANGE IS RESERVED AT LINK TIME, NOT CLAIMED AT RUN TIME. MAP_FIXED replaces
+      whatever is already there SILENTLY, and by the time main() has opened a file and dlopened a framework
+      the allocator may already own pages at 0x100000000 — the host then mapped the guest over its own memory
+      and died before the first instruction, with nothing in the log to say why. A zerofill segment placed by
       the linker exists before any code runs, so the range cannot be taken in the first place; the per-app
-      host carries exactly this reservation. 2 GB is address space, not memory: it costs
+      host has carried exactly this reservation since 10-10. 2 GB is address space, not memory: it costs
       nothing until touched, and no single app image comes near it. */
 #define A2X_GUEST_BASE 0x100000000UL
 #define A2X_GUEST_LEN  0x80000000UL
 __attribute__((section("__ARMRSV,__rsv,zerofill"), used)) static char a2x_rsv[A2X_GUEST_LEN];
 
 /* Guest code pages are sealed PROT_NONE after load, and the interpreter fetches from a read-only alias.
-   A native call into a guest function is an instruction-fetch fault, and in a virtual machine that fault costs 3-24 ms
+   A native call into a guest function is an instruction-fetch fault, and on this VM that fault costs 3-24 ms
    when the page is readable (200-fault loop, native x86 control: RW page 3.4 and 9.3 ms, R page 14.7 and 23.9 ms
    per fault) but 2.7 us when the page is PROT_NONE or unmapped. Calculator makes 1,735 such calls to start,
-   so a readable page costs it about 100 s before the run loop, and a 12 s launch test reads that as no window.
+   so a readable page costs it about 100 s before the run loop, and the 12 s sweep reads that as no window.
    a2x_pg_sealed has one byte per 4 KiB guest page: 1 = the page is PROT_NONE here and its bytes live at
    page + a2x_alias_delta. Anything that touches a sealed page by data access (a literal pool in __text, a
    host peek, a store) takes a fault that unseals just that page and retries, so correctness never depends on
@@ -125,12 +126,12 @@ __attribute__((section("__ARMRSV,__rsv,zerofill"), used)) static char a2x_rsv[A2
 #define A2X_PG_SHIFT   12
 unsigned char *a2x_pg_sealed;
 unsigned long a2x_alias_delta;
-/* 1 = this sealed page's original was released at seal time (it reads as zeros); its only bytes are
+/* 11-02 r13m 1 = this sealed page's original was RELEASED at seal time (it reads as zeros); its only bytes are
       in the alias, which shares the original's physical pages. The first unseal copies them back. */
 static unsigned char *a2x_pg_disc;
 static inline const void *a2x_code_view(unsigned long a) {
     if (a2x_pg_sealed && a >= A2X_GUEST_BASE && a < A2X_GUEST_BASE + A2X_GUEST_LEN
-        && a2x_pg_sealed[(a - A2X_GUEST_BASE) >> A2X_PG_SHIFT] == 1)   /* 2 = unsealed code page, read live */
+        && a2x_pg_sealed[(a - A2X_GUEST_BASE) >> A2X_PG_SHIFT] == 1)   /* B23b: 2 = unsealed code page, read live */
         return (const void *)(uintptr_t)(a + a2x_alias_delta);
     return (const void *)(uintptr_t)a;
 }
@@ -189,7 +190,7 @@ static struct a2x_stk_layout *a2x_stk_scan(unsigned long lr) {
         int best = -1;
         for (int j = 0; j < ns; j++) {
             int al = (expect + st[j].size - 1) & ~(st[j].size - 1);
-            /* the next argument is the one lowest on the stack: after a byte at 0 comes the byte at 1, not the
+            /* the NEXT argument is the one lowest on the stack: after a byte at 0 comes the byte at 1, not the
                8-byte word at 8, which also sits at its own aligned place */
             if (st[j].off == al && (best < 0 || st[j].off < st[best].off)) best = j;
         }
@@ -252,20 +253,20 @@ int a2x_stk_relay(unsigned long lr, unsigned long asp, unsigned long *out, int W
     return 1;
 }
 
-/* Which arguments are function pointers. An arm64 function pointer handed to native code must become a
-      trampoline, or native code jumps into arm64 bytes — for example qsort handed the
-      guest comparator at 0x100000af8 calls it, for a SIGBUS whose faulting address is the comparator
+/* WHICH ARGUMENTS ARE FUNCTION POINTERS. An arm64 function pointer handed to native code must become a
+      trampoline, or native code jumps into arm64 bytes — measured exactly that way: qsort was handed the
+      guest comparator at 0x100000af8 and called it, for a SIGBUS whose faulting address was the comparator
       itself.
-   "any value inside __TEXT" is the wrong rule and would be worse than doing nothing: __cstring lives in
+    "ANY VALUE INSIDE __TEXT" IS THE WRONG RULE and would be worse than doing nothing: __cstring lives in
       __TEXT too, so every string constant passed to native code would be replaced by a trampoline address.
-      The test has to be an exact function start, and LC_FUNCTION_STARTS is precisely that list — every
+      The test has to be an EXACT function start, and LC_FUNCTION_STARTS is precisely that list — every
       function in the image including the static ones, which a symbol table can miss. */
-/* 65,536 is not enough, and the overflow used to be silent. On macOS 27, Maps' executable
+/* 65,536 WAS NOT ENOUGH AND THE OVERFLOW WAS SILENT. Measured on macOS 27: Maps' executable
       alone has 80,734 LC_FUNCTION_STARTS entries, so 15,198 of its functions were invisible to
-      is_function_start() — which means the universal trampoline could not recover a native->guest
+      is_function_start() — which means the universal trampoline could NOT recover a native->guest
       call into any of them and __arm2x86_cbarg could not wrap one as a callback. The truncation
       printed nothing; the resulting crash looked like a translation bug in a random function.
-   The count is now reported when it is exceeded, because a cap that silently drops data is a
+    The count is now reported when it is exceeded, because a cap that silently drops data is a
       measurement that lies. 262,144 entries is 2 MB of BSS against a host that already reserves 2 GB. */
 /* 4,194,304: a browser engine has well over a million functions, and one that is dropped here is called as Intel code */
 #define FSTARTS_MAX (1 << 22)
@@ -285,8 +286,8 @@ static struct { unsigned long lo, hi; } g_nofs[NOFS_MAX];
 static unsigned g_nnofs;
 static unsigned long g_ld_code_lo, g_ld_code_hi;      /* the image being loaded: its code section, if seen */
 static int g_ld_fs_seen;                               /* ...and whether it carried the list */
-/* The reader never sees an array being sorted. is_function_start is called from the fault handler with no lock, so a
-      late guest load builds the merged, sorted array beside the live one and publishes it with one pointer store. Until
+/* THE READER NEVER SEES AN ARRAY BEING SORTED. is_function_start is called from the fault handler with no lock, so a
+      late guest load builds the merged, sorted array BESIDE the live one and publishes it with one pointer store. Until
       the first publish (startup sorts g_fstart in place, before any guest runs) the reader uses g_fstart directly. */
 struct fsnap { unsigned n; unsigned long a[]; };
 static struct fsnap *volatile g_fsnap;
@@ -305,18 +306,35 @@ static int is_function_start(unsigned long a) {
     }
     return lo < n && v[lo] == a;
 }
+#if A2X_SLOTS
+/* [lo, hi) = the function holding a: the last start <= a and the next start. -1 = an image with no list. */
+int a2x_func_bounds(uint64_t a, uint64_t *flo, uint64_t *fhi) {
+    for (unsigned i = 0, nn = __atomic_load_n(&g_nnofs, __ATOMIC_ACQUIRE); i < nn; i++)
+        if (a >= g_nofs[i].lo && a < g_nofs[i].hi) return -1;
+    struct fsnap *sn = __atomic_load_n(&g_fsnap, __ATOMIC_ACQUIRE);
+    const unsigned long *v = sn ? sn->a : g_fstart;
+    unsigned n = sn ? sn->n : g_nfstart;
+    unsigned lo = 0, hi = n;
+    while (lo < hi) { unsigned mid = (lo + hi) / 2; if (v[mid] <= a) lo = mid + 1; else hi = mid; }
+    if (!lo) return -1;
+    *flo = v[lo - 1];
+    *fhi = lo < n ? v[lo] : v[lo - 1] + 0x100000;      /* the last function: the caller clips to its image */
+    return 0;
+}
+#endif
 
 extern unsigned long __arm2x86_cb(unsigned long fn);
 
-/* There is no Swift metadata probe here, and no descriptor+36 patch. Patching that one field moved Tips past
-      the completion function, but it was one data structure's function pointer, and the
-      same fault also arrives from dispatch_once blocks, job continuations and
-      SwiftUI glue. recover_guest_call() below handles every one of them without knowing any layout. */
+/* THE SWIFT METADATA PROBE IS GONE, and so is the descriptor+36 patch it measured. It worked — it
+      moved Tips past the completion function — but it was ONE data structure's function pointer, and the
+      sweep over all 65 apps showed the same fault arriving from dispatch_once blocks, job continuations and
+      SwiftUI glue as well. recover_guest_call() below handles every one of them without knowing any layout,
+      so the measured offset is kept as a FINDING in the memory note, not as code. */
 
 unsigned long __arm2x86_cbarg(unsigned long v) {
-    /* __arm2x86_cb returns anything outside the main image's text unchanged, so testing that range first
+    /* __arm2x86_cb returns anything outside the main image's text unchanged, so testing that range FIRST
        gives the same answer and spares the binary search over up to 262,144 function starts. The fixed-shape
-       door calls this for all eight integer registers of every native call, and nearly all of them are small
+       door calls this for all eight integer registers of EVERY native call, and nearly all of them are small
        integers, heap or stack pointers. */
     if (!v || v < __arm_text_base || v - __arm_text_base >= __arm_text_size || !is_function_start(v)) return v;
     return __arm2x86_cb(v);
@@ -350,10 +368,10 @@ struct linkedit { uint32_t cmd, cmdsize, dataoff, datasize; };
 #define LC_REEXPORT_     0x8000001f
 #define LC_SYMTAB_       0x02
 #define LC_FUNCTION_STARTS_ 0x26
-/* The guest's platform, read only so the host can say what it is. PLATFORM_MACCATALYST = 6, and a Catalyst
+/* THE GUEST'S PLATFORM, read only so the host can SAY what it is. PLATFORM_MACCATALYST = 6, and a Catalyst
       app's frameworks live under /System/iOSSupport — which dyld will not load into a process whose own
       platform is macOS. a2xhost is a plain macOS binary, so those dependencies can fail to load and every
-      import from them resolves to 0. FindMy and Maps are PLATFORM_MACCATALYST and name 15 and 32
+      import from them resolves to 0. MEASURED: FindMy and Maps are PLATFORM_MACCATALYST and name 15 and 32
       /System/iOSSupport dependencies; 235 of FindMy's 353 and 1,834 of Maps' 2,709 class records take their
       superclass from a bind, so a framework that does not load is a NULL superclass pointer per class. */
 #define LC_BUILD_VERSION_   0x32
@@ -361,12 +379,12 @@ struct linkedit { uint32_t cmd, cmdsize, dataoff, datasize; };
 struct build_version { uint32_t cmd, cmdsize, platform, minos, sdk, ntools; };
 
 struct a64_fixup { uint64_t at, target; const char *symbol; int lib_ordinal, weak, is_bind; };
-static int a2x_sysdylib_guest_path(const char *nm, char *out, size_t n);   /* defined after exe_arm64_only */
+static int a2x_sysdylib_guest_path(const char *nm, char *out, size_t n);   /* 11-02 1102h, defined after exe_arm64_only */
 int a64_walk_fixups_slide(const uint8_t *file, size_t flen, uint64_t slide,
                           void (*cb)(const struct a64_fixup *, void *), void *ctx);
 
 /* ── the guest images: the executable plus every arm64 dylib it ships inside its own bundle ──
-   An app's own frameworks are guests too (Books ships 14, Podcasts 15). A system path resolves to the
+    An app's own frameworks are GUESTS too (Books ships 14, Podcasts 15). A system path resolves to the
       real x86 framework through dlopen, but a bundle-relative one is arm64 and must be mapped, rebased and
       fixed up exactly like the executable — otherwise its imports stay unresolved and the first call into it
       lands on zero. */
@@ -377,7 +395,7 @@ struct nlist64 { uint32_t n_strx; uint8_t n_type, n_sect; uint16_t n_desc; uint6
 #define N_SECT_ 0x0e
 
 #define IMAGES_MAX 1024   /* was 64: one media player alone ships over 300 plug-in libraries */
-/* THE ObjC sections, found at load time. xlat2 reads these on the build machine and emits a per-image
+/* THE ObjC SECTIONS, FOUND AT LOAD TIME. xlat2 reads these on the build machine and emits a per-image
       registration call; the host walks the section headers instead — the same data, without the build step.
       Addresses are slid, so they point into the mapped image. */
 struct objc_secs { uint64_t classlist, nclass, catlist, ncat, protolist, nproto,
@@ -405,7 +423,7 @@ struct image {
     uint64_t text_vmaddr, vmend;
     uint64_t code_a[16], code_e[16];   /* __TEXT sections holding instructions (S_ATTR_PURE|SOME_INSTRUCTIONS) */
     unsigned ncode;
-    /* vmlo/vmend bracket what this host actually mapped for the image. guest_mapped() below is
+    /* vmlo/vmend bracket what this host ACTUALLY mapped for the image. guest_mapped() below is
           the only honest answer to "is this pointer one of ours", and every list the ObjC and Swift
           registration dereferences is checked against it before the runtime ever sees it. */
     uint64_t vmlo;
@@ -420,7 +438,7 @@ struct image {
 };
 static struct image g_img[IMAGES_MAX];
 static unsigned g_nimg;
-/* the exception walker (a64_eh.c) reads a guest image's __unwind_info and LSDAs from its file bytes */
+/* 11-04 the exception walker (a64_eh.c) reads a guest image's __unwind_info and LSDAs from its file bytes */
 int a2x_guest_image_at(uint64_t pc, const uint8_t **file, uint64_t *flen, uint64_t *slide) {
     for (unsigned i = 0; i < g_nimg; i++)
         if (pc >= g_img[i].vmlo && pc < g_img[i].vmend) {
@@ -429,7 +447,7 @@ int a2x_guest_image_at(uint64_t pc, const uint8_t **file, uint64_t *flen, uint64
     return 0;
 }
 
-/* Is this address inside something we mapped? The guest's whole range is reserved at link time, so
+/* IS THIS ADDRESS INSIDE SOMETHING WE MAPPED? The guest's whole range is reserved at link time, so
       "inside the reservation" is not the same question — a pointer can be in the reservation and in
       no image at all, which is precisely what an unapplied fixup leaves behind. */
 static int guest_mapped(uint64_t a, uint64_t len) {
@@ -439,7 +457,7 @@ static int guest_mapped(uint64_t a, uint64_t len) {
     return 0;
 }
 
-/* The symbol table is not the export list. A stripped framework keeps its exported names only in the
+/* 10-27 THE SYMBOL TABLE IS NOT THE EXPORT LIST. A stripped framework keeps its exported names only in the
       export trie, so a lookup that reads LC_SYMTAB alone says "missing" for symbols the image defines: Podcasts
       bound 4981 imports to 0 this way — 3485 of ShelfKit's own, 396 of PodcastsPlayback's, 300 of
       PodcastsAppEntities' — and died in the Swift runtime on "Failed to look up symbolic reference ... missing
@@ -496,12 +514,12 @@ static int trie_find(const struct image *im, const char *name, uint64_t *off) {
     return 0;
 }
 
-/* Exports come from LC_SYMTAB first: an external symbol defined in a section is exactly what another
+/* EXPORTS COME FROM LC_SYMTAB first: an external symbol defined in a section is exactly what another
       image's bind needs, and the symbol table says so directly. The export trie is the second source
       (see trie_find) for the images whose table was stripped. */
-/* An export index, built once per image. A linear scan of every symbol of every image,
-      once per bind, is too slow: Freeform spent 96 of 112 main-thread samples in apply/strcmp/dlsym, still binding when a
-      12 s launch test gave up. The index gives the same answer exactly — image order, the first definition wins, the
+/* 10-28 AN EXPORT INDEX, BUILT ONCE PER IMAGE. guest_lookup WAS a linear scan of every symbol of every image,
+      once per bind: measured on Freeform, 96 of 112 main-thread samples in apply/strcmp/dlsym, still binding when the
+      12 s window test gave up. The index gives the old answer exactly — image order, the first definition wins, the
       symbol table before the export trie — and extends itself when an image is added after it was built. */
 struct gx { const char *name; uint64_t addr; };
 static struct gx *g_gx;
@@ -537,7 +555,7 @@ static void gx_sync(void) {
             if (!(n->n_type & N_EXT_)) continue;
             if ((n->n_type & N_TYPE_) != N_SECT_) continue;
             if (!n->n_value) continue;
-            /* n_strx is an index into A table whose size we now know. Unbounded, strcmp() reads
+            /* n_strx IS AN INDEX INTO A TABLE WHOSE SIZE WE NOW KNOW. Unbounded, strcmp() reads
                   past the mapped file and compares whatever is there as a symbol name. */
             if (!im->strs || n->n_strx >= im->strsize) continue;
             gx_put(im->strs + n->n_strx, n->n_value + im->slide);
@@ -580,7 +598,7 @@ static uint64_t guest_lookup(const char *name) {
     return 0;
 }
 
-/* One missing import was named; the rest were A COUNT. For the pre-guest fault that is the wrong way
+/* ONE MISSING IMPORT WAS NAMED; THE REST WERE A COUNT. For the pre-guest fault that is the wrong way
       round: the slot an unresolved bind leaves at 0 may be a class record's metaclass or superclass
       pointer, and that is the 0x20 shape. Keep the first MISSING_MAX names, and count the class ones
       separately so one line of the log answers "did a class pointer stay NULL". */
@@ -591,25 +609,25 @@ struct ctx {
     const char *first_missing;
     const char *missing[MISSING_MAX];
     unsigned long nmissing_cls;
-    unsigned cur;               /* the image being bound: its lib ordinals name its load commands */
+    unsigned cur;               /* the image being bound: its lib ordinals name ITS load commands */
     void *dlh[253];             /* per-image cache: ordinal -> native handle (0 = none) */
     unsigned char dlh_done[253];
     unsigned long n2lvl;        /* binds where the named library's answer differed from the flat one */
 };
 
-/* Who are we calling. The interpreter needs the callee's name at the moment it leaves the images, because
+/* WHO ARE WE CALLING. The interpreter needs the callee's NAME at the moment it leaves the images, because
       the variadic ABI differs between the two architectures and only the symbol says whether that applies.
       Recorded here at bind time: the host is the only place that knows which address got which symbol. */
 #define NAMES_MAX 65536   /* Weather alone binds 23970 imports; past the cap a callee loses its name and takes the wrong door */
 static unsigned g_nnames;
 
-/* Address-keyed hashes, not linear scans. Both lookups below walked their whole table: a64_native_name up
-      to 65,536 entries (Weather binds 23,970) on every door-cache fill — and an unnamed target (a vtable slot, a
+/* 10-31 ADDRESS-KEYED HASHES, NOT LINEAR SCANS. Both lookups below walked their whole table: a64_native_name up
+      to 65,536 entries (Weather binds 23,970) on every door-cache fill — and an UNNAMED target (a vtable slot, a
       witness) is a full miss — and remember() did the same walk per bind, O(n^2) at load (~288M compares for 24k).
-   Same answers as the arrays they replace: an address keeps the first name it was given, nothing is ever removed,
+    Same answers as the arrays they replace: an address keeps the FIRST name it was given, nothing is ever removed,
       and the counts g_nnames / g_nrf (which a64_names_gen() publishes) move exactly when the arrays used to grow.
-   Readers take no lock: a slot's value is written before its key is published with release, and a reader that
-      sees the key with acquire sees the value. Writers (binds) are serialised by g_namesm.
+    Readers take no lock: a slot's value is written before its key is published with RELEASE, and a reader that
+      sees the key with ACQUIRE sees the value. Writers (binds) are serialised by g_namesm.
    Open addressing at <= 50% load (NAMES_MAX entries in 2x slots), linear probe, key 0 = empty (address 0 is never
    bound: a missing import is not remembered). */
 #define NAMES_HN (2 * NAMES_MAX)
@@ -632,7 +650,7 @@ const char *a64_native_name(unsigned long addr) {
         if (k == addr) return g_nh_val[h];
     }
 }
-/* Which native addresses are bridge wrappers. The interpreter asks at the moment it leaves the images:
+/* WHICH NATIVE ADDRESSES ARE BRIDGE WRAPPERS. The interpreter asks at the moment it leaves the images:
       a wrapper is entered through the register file, everything else through the variadic door. */
 int a64_is_rf_callee(unsigned long addr) {
     if (!addr) return 0;
@@ -642,9 +660,9 @@ int a64_is_rf_callee(unsigned long addr) {
         if (k == addr) return 1;
     }
 }
-/* A version of everything the two lookups above read. Both tables only ever grow, and an address keeps the
+/* A VERSION OF EVERYTHING THE TWO LOOKUPS ABOVE READ. Both tables only ever grow, and an address keeps the
       first name it was given, so a verdict about an address stays true until this number changes. The
-      interpreter's per-target door cache keys on it, which is what lets a negative verdict (an unnamed
+      interpreter's per-target door cache keys on it, which is what lets a NEGATIVE verdict (an unnamed
       target: a vtable slot, a witness) be cached too. */
 unsigned a64_names_gen(void) { return __atomic_load_n(&g_nnames, __ATOMIC_ACQUIRE) + __atomic_load_n(&g_nrf, __ATOMIC_ACQUIRE) + 1; }
 static void rf_mark(unsigned long addr) {
@@ -659,7 +677,7 @@ static void rf_mark(unsigned long addr) {
     pthread_mutex_unlock(&g_namesm);
 }
 
-/* What did we bind, and to what. ARM2X86_TRACE_BINDS=1 lists every import with the address it resolved
+/* WHAT DID WE BIND, AND TO WHAT. ARM2X86_TRACE_BINDS=1 lists every import with the address it resolved
       to. A guess about which symbol an app imports is how the Swift probe came back silent: the interception
       was keyed on a name the binary never mentions. */
 static void trace_bind(const char *sym, unsigned long addr, const char *how) {
@@ -670,8 +688,8 @@ static void trace_bind(const char *sym, unsigned long addr, const char *how) {
 
 static int remember(unsigned long addr, const char *name) {
     if (!addr || !name) return 0;
-    /* Test-only miss arm: ARM2X86_TEST_FORGET=<symbol> leaves that one symbol out of the table, so a test
-          can prove a missing hash entry is visible (the callee loses its door). Read once; unset, nothing changes. */
+    /* TEST-ONLY MISS ARM (10-31): ARM2X86_TEST_FORGET=<symbol> leaves that one symbol out of the table, so the gate
+          can prove a missing hash entry is VISIBLE (the callee loses its door). Read once; unset, nothing changes. */
     static const char *forget; static int fr;
     if (!fr) { forget = A2X_DBGENV("ARM2X86_TEST_FORGET"); fr = 1; }
     if (forget && name && !strcmp(forget, name[0] == '_' && forget[0] != '_' ? name + 1 : name)) return 0;
@@ -697,7 +715,7 @@ static int remember(unsigned long addr, const char *name) {
 static int g_libcxx_guest;
 
 static void *a2x_late_wrapper(const char *nm);
-/* the install name of image c->cur's ordinal-th dylib command (1-based, every dylib-loading kind, in order),
+/* 11-01 the install name of image c->cur's ordinal-th dylib command (1-based, every dylib-loading kind, in order),
       opened with RTLD_NOLOAD: the dependency scan already loaded it, and a bind must never load something new. */
 static const uint8_t *slice_arm64(const uint8_t *f, size_t flen, size_t *out);
 static void *a2x_twolevel_sym(struct ctx *c, int ord, const char *nm) {
@@ -705,7 +723,7 @@ static void *a2x_twolevel_sym(struct ctx *c, int ord, const char *nm) {
     if (!c->dlh_done[ord - 1]) {
         c->dlh_done[ord - 1] = 1;
         const struct image *im = &g_img[c->cur];
-        size_t fl = 0;                                   /* im->file is the whole file (fat): take the arm64 slice */
+        size_t fl = 0;                                   /* im->file is the WHOLE file (fat): take the arm64 slice */
         const uint8_t *f = im->file ? slice_arm64(im->file, im->flen, &fl) : 0;
         if (!f || fl < sizeof(struct mh64)) return 0;
         const struct mh64 *mh = (const struct mh64 *)f;
@@ -758,16 +776,16 @@ static void apply(const struct a64_fixup *f, void *vc) {
     struct ctx *c = vc;
     uint64_t *slot = (uint64_t *)(uintptr_t)f->at;
     if (!f->is_bind) { *slot = f->target; c->nrebase++; return; }
-    /* AN IMPORT IS dlsym + store, and that is the whole reason no per-app build is needed: the interpreter
+    /* AN IMPORT IS dlsym + STORE, and that is the whole reason no per-app build is needed: the interpreter
           reads this slot and the native door calls whatever address is in it. */
 
-    /* Some symbols must not be called natively at all. objc_alloc takes a guest class the native
+    /* SOME SYMBOLS MUST NOT BE CALLED NATIVELY AT ALL. objc_alloc takes a GUEST class the native
           runtime has never heard of, objc_msgSend has to find a guest method, swift_once takes a guest
           function pointer — so those bind to the bridge's wrapper instead, and the call goes through the
           register file rather than the variadic door. Without this, objc said exactly what you would
           expect: "Attempt to use unknown class 0x1000080b0", the guest's own class structure handed
           straight to the runtime. The table is generated from xlat2.py (interp/mkrftable.py). */
-    /* The rf_table bridges for libc++ (to_string, stringbuf::str, operator+, filesystem::path) call the native function and
+    /* The rf_table bridges for libc++ (to_string, stringbuf::str, operator+, filesystem::path) call the NATIVE function and
        return a native-layout std::string. With the guest libc++ mapped, the guest definition is the right one. */
     if (g_libcxx_guest && f->symbol && strstr(f->symbol, "St3__1")) {
         uint64_t gl = guest_lookup(f->symbol);
@@ -794,13 +812,13 @@ static void apply(const struct a64_fixup *f, void *vc) {
         return;
     }
 
-    /* A guest export wins over A native one. The app's own framework defines the symbol its executable
+    /* A GUEST EXPORT WINS OVER A NATIVE ONE. The app's own framework defines the symbol its executable
           imports, and resolving that to some same-named native function instead would call the wrong code. */
     uint64_t g = guest_lookup(f->symbol);
     if (g) { *slot = g + f->target; c->nbind++; return; }
     const char *nm = f->symbol;
     if (nm && nm[0] == '_') nm++;                       /* dlsym takes the C name */
-    /* a native C++ function taking std::string gets the guest's arm64-layout strings converted (cxx_bridge.cpp) */
+    /* 11-05 r14s a native C++ function taking std::string gets the guest's arm64-layout strings converted (cxx_bridge.cpp) */
     if (g_libcxx_guest && f->symbol && !strncmp(f->symbol, "__Z", 3) && strstr(f->symbol, "basic_string")) {
         extern void (*a2x_strb_bind(const char *, void *))(void);
         void *nat_ = dlsym(RTLD_DEFAULT, nm);
@@ -813,15 +831,15 @@ static void apply(const struct a64_fixup *f, void *vc) {
             return;
         }
     }
-    void *a = a2x_late_wrapper(nm);                     /* late-load aware CFBundle/dlopen/dlsym */
-    /* x86-64 plain stat/fstat/readdir/... Are the legacy 32-bit-INODE layouts. The arm64 program was built against the
+    void *a = a2x_late_wrapper(nm);                     /* 10-28 late-load aware CFBundle/dlopen/dlsym */
+    /* x86-64 plain stat/fstat/readdir/... ARE THE LEGACY 32-BIT-INODE LAYOUTS. The arm64 program was built against the
           64-bit-inode structs, so a plain dlsym handed it st_size at the wrong offset: Music read ColumnWidths.plist
           as 0 bytes, got no columnWidths, and quit with -192. The $INODE64 entry point is the one with the arm64 layout. */
     {
         static const char *const ino64[] = { "stat", "lstat", "fstat", "fstatat", "statfs", "fstatfs", "getfsstat", "getmntinfo",
             "readdir", "readdir_r", "opendir", "scandir", "seekdir", "telldir", "rewinddir", "fts_open", "fts_read",
             "fts_children", "fts_close", "fts_set", "glob", "ftw", "nftw", "alphasort",
-            /* fdopendir was missing: its legacy DIR read by readdir$INODE64 dropped the first character of
+            /* 11-01 fdopendir was missing: its legacy DIR read by readdir$INODE64 dropped the first character of
                   every name (logd's timesync scan -> EEXIST -> exit 1 x651 -> launchd never left on-demand mode). */
             "fdopendir", "fts_open_b", "glob_b", "scandir_b", "getmntinfo_r_np", "statx_np", "lstatx_np",
             "fstatx_np", 0 };
@@ -831,12 +849,12 @@ static void apply(const struct a64_fixup *f, void *vc) {
             break;
         }
     }
-    /* Two-level NAMESPACE. An import names its library by ordinal; dyld looks only there (and in what that
-          library re-exports or depends on). The flat walk below took the first loaded image with the name, and the
+    /* 11-01 TWO-LEVEL NAMESPACE. An import names its library by ordinal; dyld looks only there (and in what that
+          library re-exports or depends on). The flat walk below took the FIRST loaded image with the name, and the
           stock-27 sshd got EVP_MD_CTX_new from libcrypto.46 but EVP_DigestInit_ex/Update from another library that
           exports the same names: digest_update asserted ctx != NULL and sshd never started.
-       An inserted library (our interposers) or the host itself answering the flat lookup is deliberate and wins.
-       Ordinals 0 (self), 0xfd-0xff (weak / flat / main executable) and a library with no native handle keep the
+        An inserted library (our interposers) or the host itself answering the flat lookup is DELIBERATE and wins.
+        Ordinals 0 (self), 0xfd-0xff (weak / flat / main executable) and a library with no native handle keep the
           old flat path exactly. */
     if (!a && nm && f->lib_ordinal >= 1 && f->lib_ordinal <= 252) {
         void *t = a2x_twolevel_sym(c, f->lib_ordinal, nm);
@@ -853,9 +871,9 @@ static void apply(const struct a64_fixup *f, void *vc) {
             a = t;
         }
     }
-    /* dlsym(RTLD_DEFAULT) walks every loaded image, and the same import (objc_msgSend, swift_retain) is
+    /* 10-28 dlsym(RTLD_DEFAULT) walks every loaded image, and the same import (objc_msgSend, swift_retain) is
           bound once per guest image that uses it. A found answer cannot change while binding, so it is kept; a
-          miss is not kept, because a later dlopen can supply it. */
+          miss is NOT kept, because a later dlopen can supply it. */
     if (!a) {
         static struct gx *nt; static size_t ncap, nn;
         if (!nt) { ncap = 1u << 16; nt = calloc(ncap, sizeof *nt); }
@@ -866,15 +884,15 @@ static void apply(const struct a64_fixup *f, void *vc) {
             if (a && e && (nn + 1) * 2 <= ncap) { e->name = strdup(nm); e->addr = (uint64_t)(uintptr_t)a; nn++; }
         }
     }
-    /* Ask the ObjC runtime when dlsym comes back empty. A framework in the dyld shared cache may
+    /* 10-27 ASK THE ObjC RUNTIME WHEN dlsym COMES BACK EMPTY. A framework in the dyld shared cache may
           omit its _OBJC_CLASS_$_ symbols from the export trie — dyld's ObjC optimisation makes them
-          unnecessary, because the runtime finds a class by name — and then dlsym cannot see a class that is
-          loaded and working. On Photos: 16867 imports bound, 349 missing, and the host's own audit
-          line says 138 of those are _OBJC_CLASS_$_ / _OBJC_METACLASS_$_ — with no dlopen failure anywhere in
+          unnecessary, because the runtime finds a class by NAME — and then dlsym cannot see a class that is
+          loaded and working. Measured on Photos: 16867 imports bound, 349 missing, and the host's own audit
+          line says 138 of those are _OBJC_CLASS_$_ / _OBJC_METACLASS_$_ — with NO dlopen failure anywhere in
           the run, i.e. every one of those frameworks was loaded and answering.
-       Each unresolved one leaves a NULL isa or superclass in a class record, and libobjc reads
-          class->bits at +0x20 on it: the 0x20 fault FindMy and Reminders die on without this.
-       This is what libobjc itself does when it fixes up an image's classrefs, so it is the same answer
+        Each unresolved one leaves a NULL isa or superclass in a class record, and libobjc reads
+          class->bits at +0x20 on it: the exact 0x20 fault that FindMy and Reminders still die on.
+        This is what libobjc itself does when it fixes up an image's classrefs, so it is the same answer
           by the same route — not a substitute for it. */
     if (!a && f->symbol) {
         const char *cn = 0; int want_meta = 0;
@@ -896,21 +914,21 @@ static void apply(const struct a64_fixup *f, void *vc) {
         c->nmissing++;
         if (!c->first_missing) c->first_missing = f->symbol;
         if (c->nmissing <= MISSING_MAX) c->missing[c->nmissing - 1] = f->symbol;
-        /* A missing class import is the most likely source of the 0x20 FAULT. The slot left at 0
+        /* A MISSING CLASS IMPORT IS THE MOST LIKELY SOURCE OF THE 0x20 FAULT. The slot left at 0
               is a class record's metaclass (isa, +0) or superclass (+8) pointer, and libobjc reads
               class->bits at +0x20 — so the registration stage then hands the runtime a Nil Class and
-              it faults at exactly 0x20, with no guest pc because nothing has been interpreted yet.
+              it faults at EXACTLY 0x20, with no guest pc because nothing has been interpreted yet.
               Counted apart from every other missing symbol so the log answers that in one line. */
         if (f->symbol && (!strncmp(f->symbol, "_OBJC_CLASS_$_", 14)
                           || !strncmp(f->symbol, "_OBJC_METACLASS_$_", 18)))
             c->nmissing_cls++;
         /* left as 0 deliberately: reaching it traps at a named address instead of running wild */
-        /* ARM2X86_TRACE_BINDS also names the slot of every unresolved import, so a runtime message that
+        /* ARM2X86_TRACE_BINDS also names the SLOT of every unresolved import, so a runtime message that
            cites a guest address ("pointer at 0x... is likely a reference to a missing weak symbol") maps
            straight to a symbol. */
         if (A2X_DBGENV("ARM2X86_TRACE_BINDS"))
             fprintf(stderr, "[bind-missing] slot 0x%lx  %s\n", (unsigned long)(uintptr_t)slot, f->symbol ? f->symbol : "(null)");
-        { extern void a2x_missing_slot_note(unsigned long, const char *);      /* a call through it is named */
+        { extern void a2x_missing_slot_note(unsigned long, const char *);      /* C1 11-06: a call through it is named */
           a2x_missing_slot_note((unsigned long)(uintptr_t)slot, f->symbol); }
         *slot = 0;
         return;
@@ -924,13 +942,13 @@ static void apply(const struct a64_fixup *f, void *vc) {
 #define CPU_TYPE_ARM64_ 0x0100000c
 static const uint8_t *slice_arm64(const uint8_t *f, size_t flen, size_t *out) {
     *out = 0;
-    /* A file shorter than A MACH-O header was read as one: magic came out of four bytes nobody had
+    /* A FILE SHORTER THAN A MACH-O HEADER WAS READ AS ONE: magic came out of four bytes nobody had
           checked were there. */
     if (flen < sizeof(struct mh64)) return 0;
     uint32_t magic;
     memcpy(&magic, f, 4);
     if (magic != 0xbebafeca) {
-        /* A THIN x86_64 MACH-O has the same 0xfeedfacf MAGIC AS AN arm64 one, and the caller only
+        /* A THIN x86_64 MACH-O HAS THE SAME 0xfeedfacf MAGIC AS AN arm64 ONE, and the caller only
               ever checked the magic. Without a cputype test the host maps an x86_64 binary and
               interprets its bytes as arm64 instructions — nonsense from the first step, with nothing
               in the log to say the file was never ours to run. */
@@ -943,7 +961,7 @@ static const uint8_t *slice_arm64(const uint8_t *f, size_t flen, size_t *out) {
     uint32_t n;
     memcpy(&n, f + 4, 4);
     n = __builtin_bswap32(n);
-    /* The fat header's own array was unbounded: nfat_arch is a file field, and 20 bytes per entry
+    /* THE FAT HEADER'S OWN ARRAY WAS UNBOUNDED: nfat_arch is a file field, and 20 bytes per entry
           past the end of a short file is a read of whatever follows it. */
     const uint8_t *fb = 0; size_t fbz = 0;      /* first arm64-type slice: the fallback when no arm64e exists */
     for (uint32_t k = 0; k < n && (size_t)8 + 20 * ((size_t)k + 1) <= flen; k++) {
@@ -952,7 +970,7 @@ static const uint8_t *slice_arm64(const uint8_t *f, size_t flen, size_t *out) {
         memcpy(&ct, fa, 4); memcpy(&off, fa + 8, 4); memcpy(&sz, fa + 12, 4);
         ct = __builtin_bswap32(ct); off = __builtin_bswap32(off); sz = __builtin_bswap32(sz);
         /* a slice header can name an extent past the end of the file it sits in */
-        /* Apple ships arm64 and arm64e in one fat (same cputype). An arm64e process on Apple silicon
+        /* r13v 11-03: Apple ships arm64 AND arm64e in one fat (same cputype). An arm64e process on Apple silicon
               runs the arm64e slice; the first arm64-type entry may be the non-PAC arm64 one. Prefer subtype 2. */
         uint32_t cs; memcpy(&cs, fa + 4, 4); cs = __builtin_bswap32(cs);
         if (ct == CPU_TYPE_ARM64_ && sz >= sizeof(struct mh64) && (size_t)off + sz <= flen) {
@@ -964,13 +982,13 @@ static const uint8_t *slice_arm64(const uint8_t *f, size_t flen, size_t *out) {
     return 0;
 }
 
-/* A section must lie inside the segment that declares it, and A list section's size must be A whole
-      Number of ENTRIES. Both were trusted: `sc->addr + slide` was recorded without ever asking whether that
+/* A SECTION MUST LIE INSIDE THE SEGMENT THAT DECLARES IT, AND A LIST SECTION'S SIZE MUST BE A WHOLE
+      NUMBER OF ENTRIES. Both were trusted: `sc->addr + slide` was recorded without ever asking whether that
       address is in the range this host just mapped, and `sc->size / 8` silently drops a partial entry. The
       Swift records are the dangerous case — host_doors.c hands libswiftCore a BYTE RANGE and the runtime
       walks it to the end, so a size that is not a multiple of 4 makes it read a record that is partly
       whatever follows the section.
-   Reported BY NAME and left out, never dereferenced: a list we cannot trust is better absent than
+    Reported BY NAME and left out, never dereferenced: a list we cannot trust is better absent than
       registered, and an absent one is visible in the counts the trace already prints. */
 static int sect_ok(const char *path, const struct section64 *sc, const struct seg64 *sg, unsigned ent) {
     char sn[17];
@@ -998,14 +1016,14 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
     if (fd < 0) { fprintf(stderr, "[host] cannot open %s\n", path); return 1; }
     struct stat st;
     if (fstat(fd, &st)) { close(fd); return 1; }
-    /* READ, never mmap(fd). A file mapping is validated against whatever signature the kernel holds
+    /* 10-28 READ, never mmap(fd). A file mapping is validated against whatever signature the kernel holds
           for that vnode (an earlier adopt, an exec of the fat file), and under the union-entitled host an
           invalid page is fatal: a never-adopted copy lived, the same bytes on an adopted vnode died in 1 s.
           Anonymous memory has no signature to fail. Lifetime is unchanged: im->file is never unmapped. */
-    /* Read only the arm64 slice, into page-aligned MEMORY. Every installed route is a fat file whose
+    /* 11-02 r13m READ ONLY THE arm64 SLICE, INTO PAGE-ALIGNED MEMORY. Every installed route is a fat file whose
           x86_64 slice is this host (3.5 MB, already mapped as the executable), and the whole file was read into malloc,
           so every interpreted process paid it again as dirty memory.
-       R12, 63 min: 738 jetsam high-watermark kills (findmylocateagent 354, wifip2pd 341, both at 15 MB).
+        R12, 63 min: 738 jetsam high-watermark kills (findmylocateagent 354, wifip2pd 341, both at 15 MB).
           Every reader of im->file goes through slice_arm64(), which returns a thin arm64 file as itself, so keeping
           the slice alone changes no reader. Page alignment lets __TEXT share these pages instead of copying them. */
     uint8_t hdr_[4096];
@@ -1022,7 +1040,7 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
                 uint32_t ct_, o_, z_;
                 memcpy(&ct_, fa_, 4); memcpy(&o_, fa_ + 8, 4); memcpy(&z_, fa_ + 12, 4);
                 ct_ = __builtin_bswap32(ct_); o_ = __builtin_bswap32(o_); z_ = __builtin_bswap32(z_);
-                uint32_t cs_; memcpy(&cs_, fa_ + 4, 4); cs_ = __builtin_bswap32(cs_);   /* arm64e first */
+                uint32_t cs_; memcpy(&cs_, fa_ + 4, 4); cs_ = __builtin_bswap32(cs_);   /* r13v: arm64e first */
                 if (ct_ == CPU_TYPE_ARM64_ && z_ >= sizeof(struct mh64) && (size_t)o_ + z_ <= (size_t)st.st_size) {
                     if ((cs_ & 0xff) == 2) { soff = (off_t)o_; ssz = z_; found_ = 1; break; }
                     if (!found_) { soff = (off_t)o_; ssz = z_; found_ = 1; }
@@ -1056,14 +1074,14 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
     struct image *im = &g_img[g_nimg];
     memset(im, 0, sizeof *im);
     im->vmlo = (uint64_t)-1;        /* lowered by each mapped segment; vmlo > vmend means nothing yet */
-    im->file = whole; im->flen = ssz; im->slide = slide;   /* the arm64 slice only */
+    im->file = whole; im->flen = ssz; im->slide = slide;   /* r13m: the arm64 slice only */
     snprintf(im->path, sizeof im->path, "%s", path);
 
     long ps = sysconf(_SC_PAGESIZE);
     int have_text = 0;
-    /* Bound every Mach-O walk. ncmds and cmdsize are
+    /* BOUND EVERY MACH-O WALK — the rule, and this one had no bound at all. ncmds and cmdsize are
           file fields: a zero cmdsize spins forever, an unaligned one desynchronises every command
-          after it, and a command that runs past sizeofcmds reads whatever follows in the file as a
+          after it, and a command that runs past sizeofcmds reads whatever follows in the file AS a
           load command. A chance 16-byte match in that garbage sets objc.classlist to a pointer that
           is not a class list, which the registration stage then dereferences. */
     if ((size_t)mh->sizeofcmds > flen - sizeof *mh) {
@@ -1091,7 +1109,7 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
                 c = (const struct lc *)((const uint8_t *)c + c->cmdsize);
                 continue;                               /* __PAGEZERO: the null guard, never a mapping */
             }
-            /* A segment's file extent is A file offset and was never checked: the memcpy below
+            /* A SEGMENT'S FILE EXTENT IS A FILE OFFSET AND WAS NEVER CHECKED: the memcpy below
                   copies filesize bytes out of the slice into a mapping sized from vmsize, so
                   filesize > vmsize writes past the mapping and fileoff + filesize > flen reads past
                   the file. Neither is representable in a well-formed image. */
@@ -1113,10 +1131,10 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
                         path, sg->segname, (unsigned long long)lo, len);
                 return 1;
             }
-            /* The reservation keeps the allocator out; it does not keep one guest off another.
-                  MAP_FIXED replaces whatever is there silently — the finding that cost the host its
+            /* THE RESERVATION KEEPS THE ALLOCATOR OUT; IT DOES NOT KEEP ONE GUEST OFF ANOTHER.
+                  MAP_FIXED replaces whatever is there SILENTLY — the finding that cost the host its
                   own memory before the first instruction — and the slide for each dependency is
-                  derived from the last image's end alone, not from all of them, while the first
+                  derived from the LAST image's end alone, not from all of them, while the first
                   dependency's slide is the fixed 0x140000000 whatever the executable's extent was.
                   An overlap would leave the earlier image's fixups applied to bytes that no longer
                   exist, which is a crash with a plausible address far from its cause. */
@@ -1128,7 +1146,7 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
                             (unsigned long long)g_img[j].vmlo, (unsigned long long)g_img[j].vmend);
                     return 1;
                 }
-            /* __TEXT shares the slice buffer's pages instead of a copy: code is never fixed up, so the
+            /* 11-02 r13m __TEXT SHARES THE SLICE BUFFER'S PAGES instead of a copy: code is never fixed up, so the
                   two copies were byte-identical and both dirty (wifip2pd: 7.5 MB twice). Only a segment of whole pages,
                   at a page-aligned file offset, fully backed by the file; anything else keeps the copy below. */
             int shared_ = 0;
@@ -1154,7 +1172,7 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
             }
             if (lo < im->vmlo) im->vmlo = lo;
             if (want + sg->vmsize > im->vmend) im->vmend = want + sg->vmsize;
-            /* the arm text range spans every guest image: the interpreter asks "is this arm64 code?" and a
+            /* the arm text range spans EVERY guest image: the interpreter asks "is this arm64 code?" and a
                   framework's function is just as much arm64 as the executable's. */
             if (!strcmp(sg->segname, "__TEXT")) {
                 unsigned long tlo = (unsigned long)want, thi = tlo + (unsigned long)sg->vmsize;
@@ -1165,6 +1183,9 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
                         if (!strncmp(sc->sectname, "__text", 16) && sc->addr >= sg->vmaddr && sc->size <= sg->vmsize) {
                             g_ld_code_lo = (unsigned long)(want + (sc->addr - sg->vmaddr));
                             g_ld_code_hi = g_ld_code_lo + (unsigned long)sc->size;
+#if A2X_SLOTS
+                            { extern void a2x_slots_note(unsigned long, unsigned long); a2x_slots_note(g_ld_code_lo, g_ld_code_hi); }
+#endif
                         }
                 }
                 if (!__arm_text_base) { __arm_text_base = tlo; __arm_text_size = thi - tlo; }
@@ -1176,9 +1197,9 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
                 }
             }
             /* the __objc_* lists are sections of this segment; record where they landed */
-            /* The section headers must fit inside the segment's own load command. nsects is a file
+            /* THE SECTION HEADERS MUST FIT INSIDE THE SEGMENT'S OWN LOAD COMMAND. nsects is a file
                   field and the walk below ran nsects * 80 bytes from the command's start, so past its
-                  end it reads the next load command as section headers — and a chance 16-byte match
+                  end it reads the NEXT load command as section headers — and a chance 16-byte match
                   there sets classlist/selrefs to an address that is not a list at all. */
             if (sg->nsects
                 && (uint64_t)sg->cmdsize < sizeof *sg + (uint64_t)sg->nsects * sizeof(struct section64)) {
@@ -1197,16 +1218,16 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
                     else if (!memcmp(sc->sectname, "__objc_catlist2\0", 16)) { if (sect_ok(path, sc, sg, 8)) { im->objc.catlist2 = a_; im->objc.ncat2 = n_; } }
                     else if (!memcmp(sc->sectname, "__objc_protolist", 16)) { if (sect_ok(path, sc, sg, 8)) { im->objc.protolist = a_; im->objc.nproto = n_; } }
                     else if (!memcmp(sc->sectname, "__objc_protorefs", 16)) { if (sect_ok(path, sc, sg, 8)) { im->objc.protorefs = a_; im->objc.nprotoref = n_; } }
-                    /* The last four arguments are classrefs and superrefs, not protorefs and selrefs.
+                    /* THE LAST FOUR ARGUMENTS ARE classrefs AND superrefs, not protorefs and selrefs.
                           Guessed wrong first: the bridge rebuilds each guest class with the native runtime,
-                          so the slots that point at classes have to be repointed — and objc said exactly
+                          so the slots that POINT at classes have to be repointed — and objc said exactly
                           that, "Attempt to use unknown class 0x1000080b0", which is a classref slot. */
                     else if (!memcmp(sc->sectname, "__objc_classrefs", 16)) { if (sect_ok(path, sc, sg, 8)) { im->objc.classrefs = a_; im->objc.nclassref = n_; } }
                     else if (!memcmp(sc->sectname, "__objc_superrefs", 16)) { if (sect_ok(path, sc, sg, 8)) { im->objc.superrefs = a_; im->objc.nsuperref = n_; } }
                     else if (!memcmp(sc->sectname, "__objc_selrefs\0\0", 16)) { if (sect_ok(path, sc, sg, 8)) { im->objc.selrefs = a_; im->objc.nselref = n_; } }
                     /* Swift and TLV sizes are BYTE sizes, not element counts, unlike the lists above */
-                    /* 4-BYTE relative pointers, and the runtime is handed A BYTE range it walks to
-                          The end (host_doors.c) — so a size that is not a multiple of 4 makes
+                    /* 4-BYTE RELATIVE POINTERS, AND THE RUNTIME IS HANDED A BYTE RANGE IT WALKS TO
+                          THE END (host_doors.c) — so a size that is not a multiple of 4 makes
                           libswiftCore read a record that is partly whatever follows the section. */
                     else if (!memcmp(sc->sectname, "__swift5_proto\0\0", 16)) { if (sect_ok(path, sc, sg, 4)) { im->objc.sw_proto = a_; im->objc.nsw_proto = sc->size; } }
                     else if (!memcmp(sc->sectname, "__swift5_types\0\0", 16)) { if (sect_ok(path, sc, sg, 4)) { im->objc.sw_types = a_; im->objc.nsw_types = sc->size; } }
@@ -1229,10 +1250,10 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
         } else if (c->cmd == LC_FUNCTION_STARTS_) {
             /* ULEB128 deltas from the image's __TEXT base — the loader format's own function list */
             const struct linkedit *le = (const struct linkedit *)c;
-            /* A LINKEDIT EXTENT IS A file offset and nothing else checks it. Unbounded, the ULEB
+            /* A LINKEDIT EXTENT IS A FILE OFFSET AND NOTHING ELSE CHECKS IT. Unbounded, the ULEB
                   walk below reads past the mapped file and invents function starts out of whatever is
                   there — and a wrong entry in that list is the one thing that must never be wrong:
-                  the fault handler recovers a native->guest call only at an exact function start. */
+                  the fault handler recovers a native->guest call ONLY at an exact function start. */
             if ((size_t)le->dataoff + le->datasize > flen) {
                 fprintf(stderr, "[host] %s: LC_FUNCTION_STARTS at 0x%x + %u is past the end of the "
                                 "%zu-byte slice — NO function starts recorded for this image, so no "
@@ -1261,7 +1282,7 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
             }
         } else if (c->cmd == LC_SYMTAB_) {
             const struct symtab_cmd *sy = (const struct symtab_cmd *)c;
-            /* The symbol and string tables are file offsets, trusted until now. guest_lookup()
+            /* THE SYMBOL AND STRING TABLES ARE FILE OFFSETS, TRUSTED UNTIL NOW. guest_lookup()
                   walks nsyms entries and indexes the string table by n_strx, so a table that runs
                   past the slice reads unmapped file bytes and compares them as a symbol name — and a
                   chance match would resolve another guest's import to a meaningless address. */
@@ -1309,13 +1330,13 @@ static int load_guest(const char *path, uint64_t slide, int trace, uint64_t *ent
 }
 
 /* resolve an install name the way dyld does, but only for the forms a bundle uses */
-/* @rpath and @executable_path were resolved against the image that named them, not the program. A
+/* 10-27 @rpath AND @executable_path WERE RESOLVED AGAINST THE IMAGE THAT NAMED THEM, NOT THE PROGRAM. A
       framework nested in the app (Podcasts' PodcastsSiriDonation, Books' BooksUI) asks for
       @rpath/PodcastsAppEntities.framework/..., which the program's rpath (@executable_path/../Frameworks)
       finds beside it — but the old rule built <that framework's own dir>/../Frameworks/..., which does not
       exist, so the dependency was dropped and every import from it stayed 0: Podcasts 4981 missing and a
       Swift "Failed to look up symbolic reference ... missing weak symbol" abort; Books 5433 missing.
-   dyld tries every rpath in order, so this does too: the main executable's Frameworks first (it is also the
+    dyld tries every rpath in order, so this does too: the main executable's Frameworks first (it is also the
       spelling the first-level loads already use, which keeps the `already` check by path honest), then the
       loader's own @loader_path/Frameworks and ../Frameworks. The first candidate that exists wins; if none
       does the first is returned so the caller's "does not exist" line still names a path. */
@@ -1426,16 +1447,16 @@ static int bundle_relative(const char *dep, const char *exe_path, const char *ma
 }
 
 
-/* The PRE-registration audit — what we are about to hand libobjc, checked before we hand it over.
-   __arm2x86_objc_register() and __arm2x86_objc_protocols() take a bare (address, count) pair and
-      dereference every entry. One slot whose fixup did not land is an unnamed SIGSEGV in native code with no
+/* THE PRE-REGISTRATION AUDIT — WHAT WE ARE ABOUT TO HAND libobjc, CHECKED BEFORE WE HAND IT OVER.
+    __arm2x86_objc_register() and __arm2x86_objc_protocols() take a bare (address, count) pair and
+      dereference every entry. ONE slot whose fixup did not land is an unnamed SIGSEGV in native code with no
       guest pc to report — which is exactly the five-app shape this file is instrumented for. libobjc reads
-      class->bits at +0x20, so a NULL class record or a NULL metaclass pointer faults at exactly 0x20.
-   This changes nothing about what is registered: it names every record that cannot be valid and counts the
+      class->bits at +0x20, so a NULL class record or a NULL metaclass pointer faults at EXACTLY 0x20.
+    This changes NOTHING about what is registered: it names every record that cannot be valid and counts the
       rest, so one run says which image and which index. ARM2X86_HOST_AUDIT=strict makes the host refuse
       instead, for the case where a named refusal beats a crash; the default is unchanged for every app that
       already works.
-   A non-guest isa or superclass IS NOT A DEFECT — a guest class may legitimately inherit from a native
+    A NON-GUEST isa OR superclass IS NOT A DEFECT — a guest class may legitimately inherit from a native
       one, and dlsym resolves _OBJC_METACLASS_$_NSObject into libobjc. Only a NULL one is reported. */
 #define AUDIT_SHOW 16
 static unsigned long audit_image(const struct image *im, int trace) {
@@ -1456,9 +1477,9 @@ static unsigned long audit_image(const struct image *im, int trace) {
                 why = "its metaclass pointer (isa, +0) is NULL — RO(isa) and libobjc both read +0x20 off it, "
                       "which is EXACTLY the measured faulting address";
         }
-        /* A NULL superclass slot here is an unresolved import, not a root class, and it is the 0x20
-              precondition. In the file, for all five of the apps that fault this way: the +8 slot of
-              a class record carries a bind, not a rebase, for most of their classes — FindMy 235 of 353,
+        /* A NULL SUPERCLASS SLOT HERE IS AN UNRESOLVED IMPORT, NOT A ROOT CLASS, AND IT IS THE 0x20
+              PRECONDITION. MEASURED in the file for all five of the apps that fault this way: the +8 slot of
+              a class record carries a BIND, not a rebase, for most of their classes — FindMy 235 of 353,
               Maps 1834 of 2709, Shortcuts 60 of 60, Notes 248 of 383, Reminders 280 of 338 — and the symbol
               is _OBJC_CLASS_$_NSObject, _OBJC_CLASS_$_UIView or _OBJC_CLASS_$__TtCs12_SwiftObject in the
               overwhelming majority. So a 0 in this slot means dlsym did not resolve that symbol. For a Swift
@@ -1466,7 +1487,7 @@ static unsigned long audit_image(const struct image *im, int trace) {
               supercls->data() — `bits` at +0x20 — on a Nil superclass. Genuine root classes are a handful
               (NSObject, NSProxy) and a translated program normally defines none, so this count is a finding
               every time it is not zero.
-           Counted, not added to `bad`: the bridge already prints one line per class, and Maps would print
+            Counted, not added to `bad`: the bridge already prints one line per class, and Maps would print
               a wall. One line with a number is the diagnosis. */
         if (!why && !((const uint64_t *)(uintptr_t)c)[1]) nullsup++;
         if (!why) continue;
@@ -1497,7 +1518,7 @@ static unsigned long audit_image(const struct image *im, int trace) {
             fprintf(stderr, "[host] AUDIT %s __objc_catlist[%llu] = 0x%llx: %s\n",
                     base, (unsigned long long)k, (unsigned long long)ct, why);
     }
-    /* a2x_map_protocol() guards a NULL entry itself, so only an unmapped one is reported here */
+    /* a2x_map_protocol() guards a NULL entry itself, so only an UNMAPPED one is reported here */
     for (uint64_t k = 0; k < o->nproto; k++) {
         const char *why = 0;
         uint64_t p = 0;
@@ -1523,16 +1544,16 @@ static unsigned long audit_image(const struct image *im, int trace) {
     return bad;
 }
 
-/* A fault in interpreted code must name the guest instruction. Without this the process dies with a bus
+/* A FAULT IN INTERPRETED CODE MUST NAME THE GUEST INSTRUCTION. Without this the process dies with a bus
       error and an x86 pc inside the interpreter, which tells you nothing about which guest address did it —
       and the first callback test lost an hour to exactly that. */
 extern __thread unsigned long a64_cur_pc;
 extern __thread unsigned int a64_cur_insn;
 extern __thread const a64 *a64_cur_state;
-/* Where the guest is, for A REPORT. The decode-cache path of the run loop does not store pc and insn to TLS
+/* 10-31 WHERE THE GUEST IS, FOR A REPORT. The decode-cache path of the run loop does not store pc and insn to TLS
       on every instruction: it publishes its register file (a64_cur_state) and writes a64_cur_pc/a64_cur_insn only when
       control leaves for native code (the call site) or a syscall. So: if the published state's pc is guest text, the
-      fault is inside that instruction (an exec changes pc only for a branch, and a branch touches no memory) and the
+      fault is INSIDE that instruction (an exec changes pc only for a branch, and a branch touches no memory) and the
       word is read back through the code view; otherwise the thread is in native code and the call site is the answer,
       which is what the per-step store used to leave there. The uncached path still stores per step: same answer. */
 static unsigned long a2x_report_pc(unsigned *insn) {
@@ -1551,21 +1572,21 @@ static unsigned long a2x_report_pc(unsigned *insn) {
     }
     return a64_cur_pc;
 }
-/* The universal trampoline — native code calling guest code, without knowing where the pointer came from.
-      Over all 65 macOS 27 system apps, 25 of 29 crashes were the same instruction,
+/* THE UNIVERSAL TRAMPOLINE — NATIVE CODE CALLING GUEST CODE, WITHOUT KNOWING WHERE THE POINTER CAME FROM.
+      MEASURED 10-26 over all 65 macOS 27 system apps: 25 of the 29 crashes were the SAME INSTRUCTION,
       `braa x16, x17` (0xd71f0a11) — the guest tail-jumps through an arm64e auth stub into a framework, and
-      the framework then calls a guest function pointer it read out of guest data: a Swift metadata
+      the framework then CALLS a guest function pointer it read out of guest data: a Swift metadata
       completion function, a dispatch_once block, a job continuation, SwiftUI's glue. Those pointers never
       pass through a register on our side, so __arm2x86_cbarg cannot wrap them, and patching each data
       structure in turn is exactly the app-by-app road this host exists to replace.
-   Guest pages carry no PROT_EXEC, so every such call already faults on the instruction fetch, with
-      si_addr == rip == the guest function. That fault is the trampoline: map the native argument registers
+    Guest pages carry no PROT_EXEC, so every such call ALREADY faults on the instruction fetch, with
+      si_addr == rip == the guest function. That fault IS the trampoline: map the native argument registers
       onto arm64's, interpret the function, leave the result where the native caller will read it, and resume
       at the return address the caller pushed. One mechanism, every data structure, no layout knowledge.
-   Only at an exact function start (LC_FUNCTION_STARTS) and only when rip == si_addr. A fault in the
-      middle of a guest function, or a data fault that merely lands on a function's first byte, is a real
+    ONLY AT AN EXACT FUNCTION START (LC_FUNCTION_STARTS) AND ONLY WHEN rip == si_addr. A fault in the
+      middle of a guest function, or a data fault that merely lands on a function's first byte, is a REAL
       bug: recovering there would resume a half-executed frame and turn a crash into silent corruption.
-   Six integer arguments, exactly like the callback door: the 7th onward sit on the native stack while
+    SIX INTEGER ARGUMENTS, exactly like the callback door: the 7th onward sit on the NATIVE stack while
       arm64 expects them in x6/x7, and a fault carries no signature to say how many there are. Said out loud
       because a 7-argument callback would silently see zero rather than fail. */
 extern void __arm2x86_ensure_stack(void);
@@ -1576,14 +1597,14 @@ extern void a2x_tramp_sret_store(const unsigned long *info, void *buf, const uns
 static int g_trace_tramp = -1;
 static unsigned long g_tramp_n;
 
-/* "the caller's return site starts with `sub $8,%rsp`" does not make the callee async.
-      Popping one extra word whenever the instruction after the native call site is
-      48 83 ec 08, on the theory that the runtime emits it to rebalance a swiftasync callee's `retq $8`, is wrong:
-      ordinary native code emits the same bytes for plain alignment of the next call's stack arguments. In Font Book,
+/* 10-29 "THE CALLER'S RETURN SITE STARTS WITH `sub $8,%rsp`" DOES NOT MAKE THE CALLEE ASYNC.
+      recover_guest_call popped one EXTRA word whenever the instruction after the native call site was
+      48 83 ec 08, on the theory that the runtime emits it to rebalance a swiftasync callee's `retq $8`. Ordinary
+      native code emits the same bytes for plain alignment of the next call's stack arguments. Measured on Font Book:
       guest 0x100094908 (`pacibsp; sub sp,sp,#0x50` — a plain function) returned into SwiftUI at 48 83 ec 08 44 8b 55 18,
       rsp came back 8 high, and the next call chain ran misaligned until `movaps 0x10(%rbp)` in
       LockingConcurrentMap::getOrInsert took a #GP (trapno 13, rbp ending in 8) — the "ret then fault at 0" report.
-   The call site is only half the evidence. The callee must itself be async: its first instructions touch the async
+    The call site is only half the evidence. The callee must itself be async: its first instructions touch the async
       context through x22 (the continuation load of a swift_task_switch thunk, or any ldr/str/ldp/stp based on x22)
       before anything has written x22. A function that overwrites x22 first is using it as an ordinary callee-saved
       register. Scans at most 16 instructions and stops at the first branch or return. */
@@ -1607,7 +1628,7 @@ static int a2x_callee_uses_async_ctx(unsigned long tgt) {
         if (tgt > ~0UL - 4UL * i || !a2x_async_guest_word(tgt + 4UL * i, &ins)) return 0;
         unsigned int rn = (ins >> 5) & 0x1f, rd = ins & 0x1f;
         if (rn == 22 && ((ins & 0x3b000000u) == 0x39000000u || (ins & 0x3a000000u) == 0x28000000u)) return 1;
-        /* `mov x1, x22` IS A read of the ASYNC context too. It is orr xd, xzr, x22 (Rm, not Rn), so the
+        /* 10-30 `mov x1, x22` IS A READ OF THE ASYNC CONTEXT TOO. It is orr xd, xzr, x22 (Rm, not Rn), so the
               load/store test above never sees it. App Store 0x1003b17e4 — `mov x1,x22; ldr x2,[x1,#8]!; ...; braa x2,x16`,
               an await-resume thunk — was judged "not async", took no extra pop, and swift_job_runImpl returned to a
               stack address (SIGBUS, rip = rsp+0x68). x19-x28 are callee-saved, so a read before any write is the
@@ -1620,7 +1641,7 @@ static int a2x_callee_uses_async_ctx(unsigned long tgt) {
     }
     return 0;
 }
-/* The callback door's half of the async check in recover_guest_call. The caller has already seen the rebalancing sub at the
+/* The callback door's half of the rule in recover_guest_call. The caller has already seen the rebalancing sub at the
    return site. A C call site can also be followed by that sub, so the callee or the site must confirm it: an async
    prologue, a callee that reads its context, or a return site inside the Swift concurrency runtime, whose indirect
    calls to a job's resume function are always swiftasync. */
@@ -1642,7 +1663,7 @@ int a2x_cb_async_return(unsigned long tgt, unsigned long ret) {
 }
 /* The Swift Concurrency runtime resumes a task with `callq *0x38(%r15)` (Job::ResumeTask) and rebalances with
    `subq $8,%rsp` at the return site. ResumeTask is the runtime`s own non_future_adapter / future_adapter /
-   task_*_resume_adapter, which loads the closure`s entry from the AsyncContext prefix and tail-jumps to it
+   task_*_resume_adapter, which loads the closure`s entry from the AsyncContext prefix and TAIL-JUMPS to it
    (jmpq *%rax with [rsp] = that return site). The target is a guest async function whose first instructions
    need not read x22 (a closure body that spills other registers first), so the callee test below can say "not
    async" and rsp ends 8 low. The caller is the proof: a call through a 0x38 displacement, in libswift_Concurrency. */
@@ -1679,26 +1700,26 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
         const unsigned long *sa = (const unsigned long *)(uintptr_t)(ss->__rsp + 8);
         xs[6] = sa[0]; xs[7] = sa[1];
     }
-    /* The swift self/error/async registers, carried in only — and that is what makes it safe.
+    /* 10-27 THE SWIFT SELF/ERROR/ASYNC REGISTERS, CARRIED IN ONLY — AND THAT IS WHAT MAKES IT SAFE.
           swiftcc keeps self, error and the async context in x20/x21/x22 on arm64 and in r13/r12/r14 on
-          x86-64, so a native Swift caller entering a guest Swift function left all three at zero. In Maps,
-          a worker thread entered a guest function whose first instruction is
+          x86-64, so a native Swift caller entering a guest Swift function left all three at ZERO. Measured
+          here 10-27 on Maps: a worker thread entered a guest function whose FIRST instruction is
           `ldp x21, x23, [x20, #16]` (insn 0xa9415e95) and took SIGSEGV at faulting address 0x10 — x20 was 0.
           Same shape as the Tips swift_getWitnessTable gap recorded below.
-       Writing them back as well loses ground (across 65 apps, 37 good/24 crashing became 33 good/26
-          crashing): writing the guest's x20/x21/x22 back into r13/r12/r14 on the
-          way out corrupts them. Those three are callee-saved under SysV, so for every callback that is not swiftcc — nearly
-          all of them — the native caller's own saved registers would come back corrupted. The write-back is the
-          part that is wrong, not the read.
-       Why reading them is sound rather than a guess, and why no signature is needed: x19-x28 are
-          callee-saved on arm64. A correct arm64 function therefore never reads x20/x21/x22 before it has
-          written them — the sole exception being a swiftcc entry, for which those registers are incoming
+        THE 10-26 ATTEMPT WENT THE OTHER WAY TOO AND THAT IS WHY IT LOST GROUND (65-app sweep 37 good/24
+          crashing -> 33 good/26 crashing): it also wrote the guest's x20/x21/x22 BACK into r13/r12/r14 on the
+          way out. Those three are callee-saved under SysV, so for every callback that is NOT swiftcc — nearly
+          all of them — the native caller's own saved registers came back corrupted. The write-back is the
+          part that was wrong, not the read.
+        WHY READING THEM IS SOUND RATHER THAN A GUESS, and why no signature is needed: x19-x28 are
+          CALLEE-SAVED on arm64. A correct arm64 function therefore never reads x20/x21/x22 before it has
+          written them — the sole exception being a swiftcc entry, for which those registers ARE incoming
           arguments. So seeding them can only change the behaviour of a function that is swiftcc by
           definition; a C callee spills them, restores them, and never looks at what arrived. Nothing is
           written back, so the native caller's r12/r13/r14 are left exactly as they were.
-       Verify by absence when judging this: the thing that must not appear is a new crash in an app that
-          ran before. The test is the whole app set, not one app. */
-    /* A MEMORY-return method IMP: rdi is the result buffer, so everything shifts down one register
+        VERIFY BY ABSENCE when judging this: the thing that must NOT appear is a NEW crash in an app that
+          ran before. The gate is the whole app sweep, not the one app this was measured on. */
+    /* 10-28 A MEMORY-RETURN METHOD IMP: rdi is the result buffer, so everything shifts down one register
           (see a2x_tramp_sret_probe). Proven against the runtime's own method table, never guessed. */
     unsigned long sinfo[3] = {0, 0, 0};
     int is_sret = a2x_tramp_sret_probe(ss->__rsi, ss->__rdx, tgt, sinfo);
@@ -1715,7 +1736,7 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
     }
     xs[20] = ss->__r13;                                 /* swiftself  : x20 <- r13 */
     xs[21] = ss->__r12;                                 /* swifterror : x21 <- r12 */
-    xs[22] = ss->__r14;                                 /* a by-value struct wider than 16 bytes: see a2x_tramp_byval */
+    xs[22] = ss->__r14;                                 /* swiftasync : x22 <- r14 */
     _STRUCT_X86_FLOAT_STATE64 *fs = &u->uc_mcontext->__fs;
     memcpy(vs +  0, &fs->__fpu_xmm0, 16); memcpy(vs +  16, &fs->__fpu_xmm1, 16);
     memcpy(vs + 32, &fs->__fpu_xmm2, 16); memcpy(vs +  48, &fs->__fpu_xmm3, 16);
@@ -1728,7 +1749,13 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
         a2x_tramp_byval(tgt, is_sret, gp_, (const unsigned long *)(uintptr_t)(ss->__rsp + 8), xm_, xs, vs);
     }
     __arm2x86_ensure_stack();
-    /* restored below: see cb_host.c */
+    /* 10-30 THE 9TH INTEGER ARGUMENT AND BEYOND. x86 passes args 7.. on the stack (words 0,1 became x6/x7 above); arm64
+          passes args 9.. at [sp], [sp+8], ... on entry. Leaving the arm stack untouched handed a guest method with ten
+          integer arguments zeros for the last two. App Store: a guest override of a 10-argument AppStoreKit method read
+          its two stack arguments (ldp x8,x9,[x29,#0x10]), passed them on to the native super implementation, and that
+          dereferenced 0+8 (swift door -> mov 8(%rax),%rax, rax 0). The count is unknown without a signature, so a fixed
+          window of 8 words is copied: the words above a call site are the caller own own frame and always mapped, a callee
+          with fewer arguments never reads them, and nothing is written back. */
     unsigned long asp = (__arm_sp - 64) & ~15UL;
     {
         const unsigned long *sa = (const unsigned long *)(uintptr_t)(ss->__rsp + 8);
@@ -1739,7 +1766,7 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
     unsigned long a2x_sp0 = __arm_sp;   /* restored below: see cb_host.c, 11-01 */
     int a2x_rr = __arm2x86_interp_run(tgt, xs, vs);
     __arm_sp = a2x_sp0;
-    if (a2x_rr) return 0;    /* what the guest popped of its incoming stack arguments (swifttailcc is callee-pop on both sides) */
+    if (a2x_rr) return 0;    /* could not run it: report the fault as before */
     /* r15a: what the guest popped of its incoming stack arguments (swifttailcc is callee-pop on both sides) */
     unsigned long a2x_gpop = xs[31] - asp;
     if (a2x_gpop > 64 || (a2x_gpop & 7)) {
@@ -1781,7 +1808,7 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
             if (g_trace_tramp > 0) fprintf(a2x_errf(), "[tramp] 0x%lx returns into `sub $8,%%rsp` but is not async: no extra pop\n", tgt);
             asyncsite = 0;
         }
-        /* A SWIFTTAILCC callee pops its whole argument area, not just the async word. x86-64 puts
+        /* 11-05 r15a A SWIFTTAILCC CALLEE POPS ITS WHOLE ARGUMENT AREA, not just the async word. x86-64 puts
               integer args 7.. on the stack (arm64: 9..), so an arm64 callee that popped N bytes of stack arguments
               had N + 16 on x86, and the caller sized the area so that it plus the return address is 16-aligned.
               N = 0 gives the 8 this line always popped. sharingd: N = 16 -> 0x28; popping 8 left rsp 0x20 low and
@@ -1798,7 +1825,7 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
             fprintf(a2x_errf(), "[tramp] 0x%lx popped %lu guest stack bytes at a non-async site: left to the caller\n", tgt, a2x_gpop);
         }
     }
-    /* The error A guest swift function throws. swiftcc returns the thrown error in x21 on arm64 and in r12 on
+    /* THE ERROR A GUEST SWIFT FUNCTION THROWS. swiftcc returns the thrown error in x21 on arm64 and in r12 on
        x86-64; the caller zeroes the register before the call and tests it afterwards. x21 was carried in but never
        back, so a guest function that threw looked like one that returned normally and the native caller went on to
        read a result the callee never wrote. Reminders: RemindersUICore calls the application's witness for
@@ -1814,7 +1841,7 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
     }
     ss->__rip = ret;
     g_tramp_n++;
-    /* Success must not be silent — a recovered call leaves no trace of its own, and a mechanism that
+    /* SUCCESS MUST NOT BE SILENT — a recovered call leaves no trace of its own, and a mechanism that
           cannot be seen working cannot be told from one that never fired. */
     if (g_trace_tramp > 0) {
         char b[160];
@@ -1825,28 +1852,26 @@ static int recover_guest_call(void *uc_, unsigned long tgt) {
     return 1;
 }
 
-/* A call through a missing import must not be a bare SIGSEGV at pc 0.
-      27.2 ships daemons for Apple-silicon-only hardware whose frameworks the x86_64 (Rosetta) cache does not carry at
-      all — in the 27.2 dyld_shared_cache_x86_64.map: CoreRepairCore 0, CentauriController 0, SPINANDClient 0 images. The
-      binder leaves those slots 0 (below), the arm64e stub does `adrp/add x17 = slot; ldr x16,[x17]; braa x16,x17`, and
-      the daemon died SIGSEGV with "native rip 0": corerepaird+0x20e4 (a stub), centaurid, IOMFB_bics_daemon, all exit
-      139. Every one is a corpse, and a KeepAlive daemon crash-looping is what fills the kernel corpse cap.
-   x17 is the slot at that braa, so the slot names the symbol: when the interpreter is asked to call native 0 and x17
-      is a slot this binder left empty, the report names the import and the process exits 69 (EX_UNAVAILABLE) — what a
-      daemon whose hardware is absent tells launchd — instead of crashing. A NULL call not through a recorded slot is
-      untouched and still faults exactly as it would on real hardware.
-   The symbol is copied: f->symbol points into the guest file's LINKEDIT buffer, which need not outlive binding. */
-/* C1 A call through A missing import was A BARE SIGSEGV AT pc 0.
+/* THE OS REPORTS ITS OWN FAILURES. When this host was started by launchd or the kernel exec
+      redirect, fd 2 is /dev/null and every report below - the fault handler, the bridge's named
+      aborts, the load stages - vanished. Point fd 2 at /var/tmp/a2x-reports/<program>.log instead.
+    Only when fd 2 IS /dev/null: compared by device number against a fresh open of /dev/null, so a
+      terminal, a pipe or a redirect chosen by the caller is never touched.
+    The directory is 1777 because hosted programs run as many users; the file is truncated per
+      start so a crash loop overwrites one file instead of creating thousands.
+    Stage printing is switched on for these runs: it is ~20 lines, and without it a death inside
+      libobjc's own _objc_fatal (no signal, so no fault handler) would say nothing at all. */
+/* C1 11-06 A CALL THROUGH A MISSING IMPORT WAS A BARE SIGSEGV AT pc 0.
       27.2 ships daemons for Apple-silicon-only hardware whose frameworks the x86_64 (Rosetta) cache does not carry AT
       ALL — m6 27.2 dyld_shared_cache_x86_64.map: CoreRepairCore 0, CentauriController 0, SPINANDClient 0 images. The
       binder leaves those slots 0 (below), the arm64e stub does `adrp/add x17 = slot; ldr x16,[x17]; braa x16,x17`, and
       the daemon died SIGSEGV with "native rip 0": corerepaird+0x20e4 (a stub), centaurid, IOMFB_bics_daemon, all exit
       139 on the box. Every one is a corpse, and a KeepAlive daemon crash-looping is what fills the kernel corpse cap.
-   x17 is the slot at that braa, so the slot names the symbol: when the interpreter is asked to call native 0 and x17
+    x17 IS the slot at that braa, so the slot names the symbol: when the interpreter is asked to call native 0 and x17
       is a slot this binder left empty, the report names the import and the process exits 69 (EX_UNAVAILABLE) — what a
-      daemon whose hardware is absent tells launchd — instead of crashing. A NULL call not through a recorded slot is
+      daemon whose hardware is absent tells launchd — instead of crashing. A NULL call NOT through a recorded slot is
       untouched and still faults exactly as it would on real hardware.
-   The symbol is copied: f->symbol points into the guest file's LINKEDIT buffer, which need not outlive binding. */
+    The symbol is copied: f->symbol points into the guest file's LINKEDIT buffer, which need not outlive binding. */
 #define A2X_MISS_CAP 8192
 static struct { unsigned long slot; char *sym; } a2x_miss[A2X_MISS_CAP];
 static unsigned a2x_miss_n;
@@ -1868,14 +1893,6 @@ void a2x_missing_import_called(unsigned long slot, unsigned long site) {
         if (a2x_miss[k].slot != slot) continue;
         extern void a2x_stop_import(const char *, unsigned long);
         a2x_stop_import(a2x_miss[k].sym ? a2x_miss[k].sym : "(unnamed)", site);
-#if !A2X_SHIP
-        char b[512];
-        int m = snprintf(b, sizeof b, "[host] MISSING IMPORT CALLED: %s (slot %#lx, guest call site %#lx) — no native x86 "
-                         "definition on this OS (Apple-silicon-only library?); exit 69 EX_UNAVAILABLE instead of SIGSEGV at 0\n",
-                         a2x_miss[k].sym ? a2x_miss[k].sym : "(unnamed)", slot, site);
-        if (m > (int)sizeof b - 1) m = (int)sizeof b - 1;
-        ssize_t ig = write(2, b, (size_t)m); (void)ig;
-#endif
         _exit(69);
     }
 }
@@ -1883,7 +1900,7 @@ void a2x_missing_import_called(unsigned long slot, unsigned long site) {
 #define A2X_REPORT_DIR "/var/tmp/a2x-reports"
 static void a2x_report_to_file(const char *gpath, int argc, char **argv) {
     struct stat es, ns;
-    /* fd 2 closed counts as nowhere too: WindowServer crash-looped (exit 139 x9) with no report file. */
+    /* 11-01 fd 2 CLOSED counts as nowhere too: WindowServer crash-looped (exit 139 x9) with no report file. */
     if (getpid() == 1) return;
     int same;
     if (fstat(2, &es) != 0) same = 1;
@@ -1894,55 +1911,50 @@ static void a2x_report_to_file(const char *gpath, int argc, char **argv) {
         close(nfd);
     }
     if (!same) return;
-    if (mkdir(A2X_REPORT_DIR, 01777) == 0) chmod(A2X_REPORT_DIR, 01777);
+    /* Any process may add a report, none may read, replace or delete another's: sticky and write+search only (01733).
+       The installer makes the folder root-owned with the same mode; this covers a run before that. */
+    if (mkdir(A2X_REPORT_DIR, 01733) == 0) chmod(A2X_REPORT_DIR, 01733);
     const char *base = gpath ? strrchr(gpath, '/') : 0;
     base = base ? base + 1 : (gpath ? gpath : "unknown");
     char path[1024];
-    snprintf(path, sizeof path, A2X_REPORT_DIR "/%s.log", base);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    /* A program run by a user other than root writes <name>.<uid>.log, so one account's file never blocks another's. */
+    if (geteuid()) snprintf(path, sizeof path, A2X_REPORT_DIR "/%s.%u.log", base, (unsigned)geteuid());
+    else snprintf(path, sizeof path, A2X_REPORT_DIR "/%s.log", base);
+    /* The folder is shared and writable: never follow a link someone left there, and only reuse a plain file of ours. */
+    int fd = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0600);
     if (fd < 0) return;
-    fchmod(fd, 0666);
+    struct stat fs;
+    if (fstat(fd, &fs) != 0 || !S_ISREG(fs.st_mode) || fs.st_nlink != 1 || fs.st_uid != geteuid()) { close(fd); return; }
+    ftruncate(fd, 0);
     if (fd != 2) { dup2(fd, 2); close(fd); }
-#if !A2X_SHIP
-    g_stage_live = 1;
-    time_t now = time(0);
-    char tb[64];
-    strftime(tb, sizeof tb, "%Y-%m-%d %H:%M:%S", localtime(&now));
-    fprintf(stderr, "[host] report %s pid %d uid %d at %s\n[host] guest %s\n[host] argc %d",
-            path, (int)getpid(), (int)getuid(), tb, gpath ? gpath : "?", argc);
-    for (int i = 0; i < argc && i < 6; i++) fprintf(stderr, " [%s]", argv[i] ? argv[i] : "");
-    fprintf(stderr, "\n");
-#endif
 }
 
-/* Re-seal after one instruction. A permanent unseal means one data read of a code page
-      (a literal pool, a host peek) leaves it readable, and every later native->guest call into it pays the 3-24 ms
-      readable-page fault instead of 2.7 us: remoted took 217,895 of them on one page (0x100001000) in ~10 min,
-      launchd ~11,800 — remoted spent its life in the kernel. So the page is RW for the one faulting instruction
-      (x86 trap flag), then copied into the alias (a store stays visible) and sealed PROT_NONE again.
-   States in a2x_pg_sealed: 1 sealed, 2 open for one instruction (a data fault that sees 2 just retries — the
-      race described at the retry arm below), 0 open for good. A page re-sealed 64 times stays open (a hot literal loop must not pay 2 faults per
-      load forever) and says so once. The trap is probed at install: no SIGTRAP back = re-seal off, old behaviour. */
-/* Re-seal after one instruction. The unseal below used to be permanent: one data read of a code page
+/* 11-01 AT PID 1 THERE IS NO STDERR. Stock 27 launchd under the host died "initproc exited ... exit 139" with
+      an empty serial log: fault() wrote its whole report to fd 2, which the kernel never opens for init.
+      At PID 1 the report goes to /dev/console (the serial log); everywhere else it stays fd 2. */
+/* 11-01 RE-SEAL AFTER ONE INSTRUCTION. The unseal below used to be permanent: one data read of a code page
       (a literal pool, a host peek) left it readable, and every later native->guest call into it paid the 3-24 ms
-      readable-page fault instead of 2.7 us. t18: remoted 217,895 of them on one page (0x100001000) in ~10 min,
+      readable-page fault instead of 2.7 us.  t18: remoted 217,895 of them on ONE page (0x100001000) in ~10 min,
       launchd ~11,800 — remoted spent its life in the kernel. Now the page is RW for the one faulting instruction
       (x86 trap flag), then copied into the alias (a store stays visible) and sealed PROT_NONE again.
    States in a2x_pg_sealed: 1 sealed, 2 open for one instruction (a data fault that sees 2 just retries — the B29
       race shape), 0 open for good. A page re-sealed 64 times stays open (a hot literal loop must not pay 2 faults per
-      load forever) and says so once. The trap is probed at install: no SIGTRAP back = re-seal off, old behaviour. */
+      load forever) and says so once. The trap is PROBED at install: no SIGTRAP back = re-seal off, old behaviour. */
 static int a2x_reseal_on;
 static unsigned char *a2x_pg_count;
-/* Signal handlers on different threads must serialize protection changes and
-   alias refreshes. Otherwise one thread makes the alias read-only during the
-   other thread's copy (see the two-thread re-seal case below). */
+/* 11-05 r14q ONE THREAD'S TRAP RE-SEALED EVERY THREAD'S PAGE. a2x_reseal_now() sealed all pending pages on any
+      thread's single-step trap, including a page another thread had just opened and not yet read. Eight threads reading
+      one page (searchpartyuseragent's crash printers, dladdr on the main header 0x100000000) each re-sealed the others'
+      page before it was used: 57 min at 645% CPU, 97% of it system time, none reached _exit. Now each thread holds a
+      reference on the pages it opened and drops only its own on its trap; a page is sealed when the last one leaves. */
 static unsigned short *a2x_pg_ref;
 static __thread unsigned long t_rs_pg[4];
 static __thread int t_rs_n;
 static unsigned long a2x_reseal_pend[64];
 static volatile int a2x_trap_probe;
-/* A fault taken while holding this lock re-enters the handler on the same thread; without the owner check MenuBarAgent
-   spun at 295% CPU for 4.6 hours, three threads in sched_yield under _sigtramp. The owner proceeds and says so once. */
+/* Signal handlers on different threads must serialize protection changes and
+   alias refreshes. Otherwise one thread makes the alias read-only during the
+   other thread's copy (the previously fixed B32p failure). */
 static int a2x_reseal_lk;
 /* 11-05 r14h: a fault taken while holding this lock re-enters the handler on the same thread. Measured: MenuBarAgent spun
    at 295% CPU for 4.6 hours, three threads in sched_yield under _sigtramp. The owner proceeds and says so once. */
@@ -1952,10 +1964,6 @@ static int a2x_reseal_depth;
 static void a2x_reseal_lock(void) {
     unsigned long me = (unsigned long)pthread_self();
     if (__atomic_load_n(&a2x_reseal_own, __ATOMIC_ACQUIRE) == me) {
-#if !A2X_SHIP
-        static int said;
-        if (!said) { said = 1; static const char m[] = "[host] reseal lock re-entered on its owner thread\n"; ssize_t ig = write(g_errfd, m, sizeof m - 1); (void)ig; }
-#endif
         a2x_reseal_depth++;
         return;
     }
@@ -1981,7 +1989,7 @@ static void a2x_reseal_now(void) {
         if (__atomic_load_n(st, __ATOMIC_ACQUIRE) == 2) {
             unsigned long al = pg + a2x_alias_delta;
             if (mprotect((void *)al, 0x1000, PROT_READ | PROT_WRITE) == 0) {
-                /* the copy-and-seal of reseal_now for one page; the caller holds the lock and saw state 2 */
+                /* the decode cache keys on a64_code_gen: changed bytes must orphan it */
                 if (memcmp((void *)al, (const void *)pg, 0x1000)) { extern unsigned a64_code_gen; __atomic_add_fetch(&a64_code_gen, 1, __ATOMIC_RELEASE); }
                 memcpy((void *)al, (const void *)pg, 0x1000);
                 if (mprotect((void *)al, 0x1000, PROT_READ) == 0) {
@@ -1994,7 +2002,7 @@ static void a2x_reseal_now(void) {
         a2x_reseal_unlock();
     }
 }
-/* this thread will read page pg for one instruction; the caller holds the lock. 0 = no table or no slot (old path) */
+/* r14q: the copy-and-seal of reseal_now for one page; the caller holds the lock and saw state 2 */
 static void a2x_reseal_page_locked(unsigned long pg) {
     unsigned char *st = &a2x_pg_sealed[(pg - A2X_GUEST_BASE) >> A2X_PG_SHIFT];
     unsigned long al = pg + a2x_alias_delta;
@@ -2005,7 +2013,7 @@ static void a2x_reseal_page_locked(unsigned long pg) {
     __atomic_store_n(st, 1, __ATOMIC_RELEASE);
     if (mprotect((void *)pg, 0x1000, PROT_NONE)) __atomic_store_n(st, 0, __ATOMIC_RELEASE);
 }
-/* on this thread's trap, drop its own references; the last one out seals */
+/* r14q: this thread will read page pg for one instruction; the caller holds the lock. 0 = no table or no slot (old path) */
 static int a2x_join_open(unsigned long pg, void *uc) {
     if (!a2x_pg_ref || !uc) return 0;
     unsigned long ix = (pg - A2X_GUEST_BASE) >> A2X_PG_SHIFT;
@@ -2018,9 +2026,7 @@ static int a2x_join_open(unsigned long pg, void *uc) {
     ((ucontext_t *)uc)->uc_mcontext->__ss.__rflags |= 0x100ULL;
     return 1;
 }
-/* A fault inside native SwiftUI shows only addresses. Names every struct, enum and optional metadata pointer in the
-       first 600 stack words, plus the words of each pointer that a metadata word sits beside. The process is already dying, so a
-       runtime call is acceptable; every read goes through vm_read_overwrite so a stale word cannot fault here. */
+/* r14q: on this thread's trap, drop its own references; the last one out seals */
 static void a2x_release_own(void) {
     for (int i = 0; i < t_rs_n; i++) {
         unsigned long pg = t_rs_pg[i], ix = (pg - A2X_GUEST_BASE) >> A2X_PG_SHIFT;
@@ -2081,35 +2087,18 @@ static void fault_lowstack_check(int sig, unsigned long fa, void *uc) {
     unsigned long rsp = (unsigned long)((ucontext_t *)uc)->uc_mcontext->__ss.__rsp;
     unsigned long hi = (unsigned long)(uintptr_t)pthread_get_stackaddr_np(pthread_self());
     unsigned long sz = (unsigned long)pthread_get_stacksize_np(pthread_self());
-    if (!hi || !sz || rsp > hi || rsp < hi - sz) return;            /* An aligned SSE operand at an address that is not 16-byte aligned. Apple's x86_64 system code on macOS 27 only ever
-   runs under Rosetta, which does not raise the alignment fault a real Intel processor does, so it carries latent ones:
-   VectorKit keeps its camera view at 16n+8 and reads it with `movapd 0x328(%r14), %xmm2`, `mulpd 0x338(%rsi), %xmm0`
-   and the like; every application that shows a map died there with a general-protection fault (Weather, Find My).
-   Complete the instruction the way it completes there and continue:
-   · a store (movaps/movapd/movdqa to memory, movntps/pd, movntdq) is done here as a plain 16-byte copy;
-   · anything else reads its operand: the 16 bytes are copied to an aligned slot on a per-thread page and the thread
-     resumes at a copy of the instruction whose memory operand is that slot, followed by a jump back.
-   Only for trap 13, only legacy-SSE encodings (0F, 0F 38, 0F 3A maps), only when the operand really is misaligned, and
-   never for guest addresses. Anything it does not recognise is left to fault as before. */
+    if (!hi || !sz || rsp > hi || rsp < hi - sz) return;            /* already on some other stack: say nothing */
     unsigned long left = rsp - (hi - sz);
     if (left >= (96u << 10)) return;
     g_lowstack_said = 1;
-#if !A2X_SHIP
-    char b[400];
-    int n = snprintf(b, sizeof b, "[host] LOW-STACK %lu bytes left of %lu at fault depth %d sig %d rip %#llx si_addr %#lx pid %d %s\n",
-                     left, sz, g_fault_depth, sig, (unsigned long long)((ucontext_t *)uc)->uc_mcontext->__ss.__rip, fa,
-                     (int)getpid(), g_nimg ? g_img[0].path : "?");
-    if (n > (int)sizeof b - 1) n = (int)sizeof b - 1;
-    ssize_t ig = write(g_errfd, b, (size_t)n); (void)ig;
-#endif
 }
-/* An aligned SSE operand at an address that is not 16-BYTE ALIGNED. Apple's x86_64 system code on macOS 27 only ever
+/* AN ALIGNED SSE OPERAND AT AN ADDRESS THAT IS NOT 16-BYTE ALIGNED. Apple's x86_64 system code on macOS 27 only ever
    runs under Rosetta, which does not raise the alignment fault a real Intel processor does, so it carries latent ones:
    VectorKit keeps its camera view at 16n+8 and reads it with `movapd 0x328(%r14), %xmm2`, `mulpd 0x338(%rsi), %xmm0`
    and the like; every application that shows a map died there with a general-protection fault (Weather, Find My;
    measured 11-09). Complete the instruction the way it completes there and continue:
-   · a store (movaps/movapd/movdqa to memory, movntps/pd, movntdq) is done here as a plain 16-byte copy;
-   · anything else reads its operand: the 16 bytes are copied to an aligned slot on a per-thread page and the thread
+ a store (movaps/movapd/movdqa to memory, movntps/pd, movntdq) is done here as a plain 16-byte copy;
+ anything else reads its operand: the 16 bytes are copied to an aligned slot on a per-thread page and the thread
      resumes at a copy of the instruction whose memory operand is that slot, followed by a jump back.
    Only for trap 13, only legacy-SSE encodings (0F, 0F 38, 0F 3A maps), only when the operand really is misaligned, and
    never for guest addresses. Anything it does not recognise is left to fault as before. */
@@ -2183,18 +2172,12 @@ static int a2x_sse_align_fixup(void *uc_) {
         unsigned long back = rip + i; memcpy(c + n, &back, 8);
         ss->__rip = (unsigned long)(uintptr_t)c;
     }
-#if !A2X_SHIP
-    if (__atomic_fetch_add(&a2x_sse_fixups, 1, __ATOMIC_RELAXED) < 4) {
-        char tb[176]; int tn = snprintf(tb, sizeof tb, "[host] aligned SSE operand at unaligned 0x%lx (native rip 0x%lx, map %u op %02x) completed unaligned\n", ea, rip, map, op);
-        ssize_t ig = write(2, tb, (size_t)tn); (void)ig;
-    }
-#endif
     return 1;
 }
-/* The stop record. What the interpreter leaves behind when it stops a program: always on, in both flavours, no
+/* THE STOP RECORD. What the interpreter leaves behind when it stops a program: always on, in both flavours, no
    switch, at most 4 KB, written once. It exists so that a report from a user's log can be diagnosed without
    asking them to turn anything on. Every line has a fixed prefix so a script can read it:
-     Fatal: <reason> [<detail>]                 the reason line (the log collector looks for this prefix)
+     FATAL: <reason> [<detail>]                 the reason line (the log collector looks for this prefix)
      a2x-stop: build a2x <id> macos <build> pid <n>
      a2x-stop: program <path of the program being run>
      a2x-stop: signal <name> fault <address>    only when a signal stopped it
@@ -2300,23 +2283,17 @@ void a2x_stop_import(const char *sym, unsigned long site) {
     g_stop_import = sym; g_stop_import_site = site;
     a2x_stop_record("missing import", sym, 0, 0, 0);
 }
-/* low-stack diagnostic */
+/* for the other sources: a named stop that is not a signal, and the Objective-C send it happened in */
 void a2x_stop(const char *reason, const char *detail) { a2x_stop_record(reason, detail, 0, 0, 0); }
 void a2x_stop_objc(const char *sel, const char *cls) { g_stop_sel = sel; g_stop_cls = cls; }
 
 static void fault(int sig, siginfo_t *si, void *uc) {
     /* a native caller entering guest code is not a crash: it is a call that needs the interpreter */
     unsigned long fa = si ? (unsigned long)(uintptr_t)si->si_addr : 0;
+    { extern void a2x_exc_front_tick(void); a2x_exc_front_tick(); }   /* exc_front.c: the host's port ahead of a program's exception handler */
     if (a2x_sse_align_fixup(uc)) return;
-    fault_lowstack_check(sig, fa, uc);   /* A native call into a code page that a data access unsealed: seal it again, then recover the call.
-              Left readable, every call into it is a 3-24 ms fetch fault (MenuBarAgent: 21% of ~1,000 calls/s,
-              13 pages, err 0x15). This one call pays it; the next is 2.7 us. The alias is refreshed first because
-              the page was writable while unsealed; mark 1 before dropping the page so a reader sees the copy. */
-    if (g_trace_tramp > 0 && uc) { /* Two threads re-sealing one page at once. If each opens the alias RW, copies, and makes it R again, the
-              first to finish makes the alias read-only under the second's memcpy: SIGSEGV writing 0x2000e3020 (dest +0x20,
-              rdx 0xfe0 left), an address no arm recovers. Seen on bare metal: WallpaperAgent exit 139 on 3 of 4
-              starts, page 0x1000e3 (a jump-table page). One re-seal at a time; the flag is read again under the
-              lock because the page may already be sealed, and then the retried call simply faults back here as 1. */
+    fault_lowstack_check(sig, fa, uc);   /* 11-02 1102g diag (patch_lowstack.py) */
+    if (g_trace_tramp > 0 && uc) { /* wsigbus diag: every fault, recovered or not */
         _STRUCT_MCONTEXT64 *mc = ((ucontext_t *)uc)->uc_mcontext;
         char tb[256];
         int tn = snprintf(tb, sizeof tb, "[fault] uc %p sig %d si_addr 0x%lx code %d rip 0x%llx rsp 0x%llx trapno %u err 0x%x fvaddr 0x%llx\n",
@@ -2327,21 +2304,25 @@ static void fault(int sig, siginfo_t *si, void *uc) {
     if (a2x_pg_sealed && fa >= A2X_GUEST_BASE && fa < A2X_GUEST_BASE + A2X_GUEST_LEN
         && a2x_pg_sealed[(fa - A2X_GUEST_BASE) >> A2X_PG_SHIFT] == 2 && uc
         && (unsigned long)((ucontext_t *)uc)->uc_mcontext->__ss.__rip == fa) {
-        /* this arm must share the one lock: a separate static lock of the same name could seal a page during the other arm's copy */
-        /* see the reference counting above */
+        /* B23b A NATIVE CALL INTO A CODE PAGE THAT A DATA ACCESS UNSEALED: seal it again, then recover the call.
+              Left readable, every call into it is a 3-24 ms fetch fault (MenuBarAgent 10-30: 21% of ~1,000 calls/s,
+              13 pages, err 0x15). This one call pays it; the next is 2.7 us. The alias is refreshed first because
+              the page was writable while unsealed; mark 1 before dropping the page so a reader sees the copy. */
+        /* B32p TWO THREADS RE-SEALING ONE PAGE AT ONCE. Each opened the alias RW, copied, and made it R again, so the
+              first to finish made the alias read-only under the second's memcpy: SIGSEGV writing 0x2000e3020 (dest +0x20,
+              rdx 0xfe0 left), an address no arm recovers. Bare metal 10-30 15:2x, WallpaperAgent exit 139 on 3 of 4
+              starts, page 0x1000e3 (the B29 jump-table page). One re-seal at a time; the flag is read again under the
+              lock because the page may already be sealed, and then the retried call simply faults back here as 1. */
         /* 11-05 r14h: this arm had its own static lock of the same name, so it could seal a page during the other arm's copy */
         a2x_reseal_lock();
         if (a2x_pg_sealed[(fa - A2X_GUEST_BASE) >> A2X_PG_SHIFT] == 2
-            && !(a2x_pg_ref && a2x_pg_ref[(fa - A2X_GUEST_BASE) >> A2X_PG_SHIFT])) {   /* A data access that lost the race to another thread's unseal. The fault is taken while the page is
-          PROT_NONE; by the time this handler reads the flag another thread has unsealed it (2), so neither the
-          seal-again arm (rip == fa only) nor the unseal arm (== 1 only) matches, and a plain retry would be reported as a
-          crash. Seen on bare metal: WallpaperAgent SIGBUS at guest pc 0x1000e38b4 (ldr w16, [x17, x16, lsl #2], a
-          jump table in __text), faulting address 0x1000e3950, intermittent (alive on some launches, 248 runs).
-          Opening the page again is idempotent, and a page another thread re-seals in between faults back here as 1. */
+            && !(a2x_pg_ref && a2x_pg_ref[(fa - A2X_GUEST_BASE) >> A2X_PG_SHIFT])) {   /* r14q */
             unsigned long pg_ = fa & ~0xfffUL;
             void *al_ = (void *)(pg_ + a2x_alias_delta);
             if (!mprotect(al_, 0x1000, PROT_READ | PROT_WRITE)) {
-                /* under the lock, and holding a reference, so the page cannot be sealed before this read runs */
+                /* 10-31 the one place guest code bytes can change under a decode cache: the page was writable while
+                      unsealed. Only a refresh that CHANGES bytes starts a new epoch — a plain re-seal happens hundreds of
+                      times a second (MenuBarAgent) and would empty every thread's cache each time for nothing. */
                 if (memcmp(al_, (const void *)pg_, 0x1000)) { extern unsigned a64_code_gen; __atomic_add_fetch(&a64_code_gen, 1, __ATOMIC_RELEASE); }
                 memcpy(al_, (const void *)pg_, 0x1000);
                 mprotect(al_, 0x1000, PROT_READ);
@@ -2351,7 +2332,7 @@ static void fault(int sig, siginfo_t *si, void *uc) {
         }
         a2x_reseal_unlock();
     }
-    /* B29 · A data access that lost the race to another thread's unseal. The fault is taken while the page is
+    /* B29 A DATA ACCESS THAT LOST THE RACE TO ANOTHER THREAD'S UNSEAL. The fault is taken while the page is
           PROT_NONE; by the time this handler reads the flag another thread has unsealed it (2), so neither the
           seal-again arm (rip == fa only) nor the unseal arm (== 1 only) matched and a plain retry was reported as a
           crash. Bare metal 10-30: WallpaperAgent SIGBUS at guest pc 0x1000e38b4 (ldr w16, [x17, x16, lsl #2], a
@@ -2383,7 +2364,7 @@ static void fault(int sig, siginfo_t *si, void *uc) {
                 a2x_reseal_unlock();
                 goto a2x_unseal_failed;
             }
-            /* no cap — an open code page costs an exec fault per call */
+            /* 11-02 r13m a RELEASED original reads as zeros: its bytes are in the alias (shared at seal time) */
             if (a2x_pg_disc && a2x_pg_disc[(pg - A2X_GUEST_BASE) >> A2X_PG_SHIFT]) {
                 memcpy((void *)pg, (const void *)(pg + a2x_alias_delta), 0x1000);
                 a2x_pg_disc[(pg - A2X_GUEST_BASE) >> A2X_PG_SHIFT] = 0;
@@ -2391,19 +2372,8 @@ static void fault(int sig, siginfo_t *si, void *uc) {
             /* Even a queued fault for an already-open page must reopen it under
                the same lock: a concurrent trap may have sealed it meanwhile. */
             unsigned char *cnt = a2x_pg_count ? &a2x_pg_count[(pg - A2X_GUEST_BASE) >> A2X_PG_SHIFT] : 0;
-            if (a2x_reseal_on && cnt && (a2x_pg_ref ? a2x_join_open(pg, uc) : a2x_reseal_open(pg))) {   /* A native caller can reach guest text with si_addr == 0: the kernel then reports the signal with a
-       syscall-style exception state (trapno 133, err 0x20000b8) instead of a page fault, so there is no
-       fault address to compare. The native rip is the authority: guest pages are never executable and the
-       interpreter runs from host text, so rip inside guest __TEXT at an exact function start can only be
-       a native call or jump into a guest function. Seen in Weather: SIGBUS at rip 0x10019087c. */
+            if (a2x_reseal_on && cnt && (a2x_pg_ref ? a2x_join_open(pg, uc) : a2x_reseal_open(pg))) {   /* 11-01: no cap — an open code page costs an exec fault per call */
                 if (*cnt < 255) (*cnt)++;
-#if !A2X_SHIP
-                if (*cnt == 64) {
-                    char b[160];
-                    int n = snprintf(b, sizeof b, "[host] code page 0x%lx read as data 64 times (rip 0x%lx): still re-sealing\n", pg, rip_);
-                    ssize_t ig = write(g_errfd, b, (size_t)(n < (int)sizeof b ? n : (int)sizeof b - 1)); (void)ig;
-                }
-#endif
                 __atomic_store_n(st, 2, __ATOMIC_RELEASE);
                 a2x_reseal_unlock();
                 ((ucontext_t *)uc)->uc_mcontext->__ss.__rflags |= 0x100ULL;   /* trap after this one instruction */
@@ -2412,11 +2382,6 @@ static void fault(int sig, siginfo_t *si, void *uc) {
             __atomic_store_n(st, 0, __ATOMIC_RELEASE);
             a2x_reseal_unlock();
             if (cnt && *cnt == 64) {
-#if !A2X_SHIP
-                char b[160];
-                int n = snprintf(b, sizeof b, "[host] code page 0x%lx read as data 64 times (rip 0x%lx): left open\n", pg, rip_);
-                ssize_t ig = write(g_errfd, b, (size_t)(n < (int)sizeof b ? n : (int)sizeof b - 1)); (void)ig;
-#endif
                 *cnt = 65;
             }
             return;
@@ -2425,8 +2390,11 @@ static void fault(int sig, siginfo_t *si, void *uc) {
 a2x_unseal_failed:
     if (fa >= __arm_text_base && fa < __arm_text_base + __arm_text_size
         && is_function_start(fa)) { g_fault_depth++; int ok_ = recover_guest_call(uc, fa); g_fault_depth--; if (ok_) return; }
-    /* The guest caller first. The native diagnostics below can fault themselves; the guest lr and
-          argument registers are the diagnosis of a bad native call, so they print before anything risky. */
+    /* A native caller can reach guest text with si_addr == 0: the kernel then reports the signal with a
+       syscall-style exception state (trapno 133, err 0x20000b8) instead of a page fault, so there is no
+       fault address to compare. The native rip is the authority: guest pages are never executable and the
+       interpreter runs from host text, so rip inside guest __TEXT at an exact function start can only be
+       a native call or jump INTO a guest function. Measured on Weather, SIGBUS at rip 0x10019087c. */
     if (uc && fa == 0) {
         unsigned long rip = (unsigned long)((ucontext_t *)uc)->uc_mcontext->__ss.__rip;
         if (rip >= __arm_text_base && rip < __arm_text_base + __arm_text_size
@@ -2438,8 +2406,8 @@ a2x_unseal_failed:
 #if A2X_SHIP
     _exit(139);
 #endif
-    /* snprintf returns the length it would have written, not what it wrote, and the stage lines below
-          carry a full image path (up to 1024 bytes) — so write(g_errfd, b, n) would read past the buffer on a deep
+    /* snprintf RETURNS THE LENGTH IT WOULD HAVE WRITTEN, NOT WHAT IT WROTE, and the stage lines below
+          carry a full image path (up to 1024 bytes) — so write(g_errfd, b, n) would read PAST THE BUFFER on a deep
           path and print whatever is on the stack after it. Every line this handler adds clamps n; the buffer
           is 1024 so a real path fits in the first place. */
     char b[1024];
@@ -2453,14 +2421,14 @@ a2x_unseal_failed:
                      "\n[host] %s at guest pc 0x%lx (insn 0x%08x), faulting address %p | pid %d %s | pc in %s+0x%lx\n",
                      nm, a2x_rpc, a2x_rinsn, si ? si->si_addr : 0, (int)getpid(), g_nimg ? g_img[0].path : "?", gip_, goff_);
     ssize_t ignored = write(g_errfd, b, (size_t)n);
-    /* rdi_ must be initialized for the dladdr failure case (rip 0): otherwise dli_fname is stack garbage (0x7230) and this
-              snprintf crashes inside the crash report, which hid the real fault behind sharingd's 1,773 pc-0 reports. */
+    /* 11-01 t28 THE GUEST CALLER FIRST. The native diagnostics below can fault themselves; the guest lr and
+          argument registers are the diagnosis of a bad native call, so they print before anything risky. */
     if (a64_cur_state) { const a64 *g0 = a64_cur_state;
         n = snprintf(b, sizeof b, "[host]   guest lr %#lx fp %#lx sp %#lx x0 %#lx x1 %#lx x2 %#lx x8 %#lx x19 %#lx x20 %#lx x21 %#lx\n",
                      g0->x[30], g0->x[29], g0->sp, g0->x[0], g0->x[1], g0->x[2], g0->x[8], g0->x[19], g0->x[20], g0->x[21]);
         if (n > (int)sizeof b - 1) n = (int)sizeof b - 1;
         ignored = write(g_errfd, b, (size_t)n); }
-    /* Which side faulted. si_addr alone cannot tell "the interpreter touched a bad guest
+    /* 10-27 WHICH SIDE FAULTED. si_addr alone cannot tell "the interpreter touched a bad guest
           address" from "we handed control to native code and IT faulted": si_addr equalling a native
           callee's own entry reads as an instruction-fetch fault, and a probe proved those pages are
           real x86 code (push rbp; mov rbp,rsp), so the two readings disagree. The NATIVE rip settles it,
@@ -2490,7 +2458,11 @@ a2x_unseal_failed:
             { /* wsigbus diag: who is on the native stack */
                 unsigned long cand[42]; int nc = 0; cand[nc++] = ra;
                 unsigned long *bp = (unsigned long *)(uintptr_t)fss->__rbp;
-                /* never dereference rip in the handler - at rip 0 the report itself would fault (nested fault) */
+                /* 10-29 the old floor (bp > 0x7ff000000000) held for the MAIN thread only, so every worker-thread
+                      fault (dispatch / pthread stacks at 0x7000.. or 0x1xxxxxxxx..) printed frame0 and nothing more:
+                      Games, TV and App Store crash on workers and their callers were never named. Walk the chain
+                      while it is 8-aligned, climbs, and stays inside THIS thread's stack [rsp, stack top) — the
+                      handler runs on the faulting thread, so pthread_self() is that thread. */
                 unsigned long lo = (unsigned long)fss->__rsp;
                 unsigned long hi = (unsigned long)(uintptr_t)pthread_get_stackaddr_np(pthread_self());
                 for (int k = 0; k < 40 && bp && ((unsigned long)bp & 7) == 0 && (unsigned long)bp >= lo
@@ -2532,12 +2504,12 @@ a2x_unseal_failed:
                      fss->__rdi, fss->__rsi, fss->__rdx, fss->__rcx, fss->__r12, fss->__r13, fss->__r14);
         ignored = write(g_errfd, b, (size_t)n);
     }
-    /* Which stage of the load. Five macOS 27 apps die here with pc 0x0 at faulting address 0x20 —
+    /* WHICH STAGE OF THE LOAD. Five macOS 27 apps die here with pc 0x0 at faulting address 0x20 —
           in the host's own work, with nothing interpreted yet — and the line above cannot tell
           mapping from fixups from registration. The stage, the image and the record index are the
           whole diagnosis, exactly as the dladdr lines below are for a native callee.
-       0x20 is libobjc's objc_class::data() offset (`bits`), so a Nil Class faults at exactly 0x20.
-       write() and snprintf() only — and pthread_self(), which on Darwin is a leaf read of the
+        0x20 is libobjc's objc_class::data() offset (`bits`), so a Nil Class faults at EXACTLY 0x20.
+        write() and snprintf() ONLY — and pthread_self(), which on Darwin is a leaf read of the
           thread's own TSD with no lock, strictly tamer than the dladdr() already called below. */
     unsigned long me = (unsigned long)(uintptr_t)pthread_self();
     int sg_ = g_stage;
@@ -2551,7 +2523,7 @@ a2x_unseal_failed:
         if (n > (int)sizeof b - 1) n = (int)sizeof b - 1;
         ignored = write(g_errfd, b, (size_t)n);
     }
-    /* A zero guest pc does not always mean "before the guest ran". a64_cur_pc is per-thread, so a
+    /* A ZERO GUEST pc DOES NOT ALWAYS MEAN "BEFORE THE GUEST RAN". a64_cur_pc is per-thread, so a
           framework's own worker thread — one the guest has never run on — reports 0 at any point in
           the run. Say which thread faulted and which published the stage, or the two cases read the
           same and the next hour goes to the wrong one. */
@@ -2571,18 +2543,8 @@ a2x_unseal_failed:
         }
         n = snprintf(b, sizeof b, "  sp %016lx  lr %016lx\n", st->sp, st->x[30]);
         ignored = write(g_errfd, b, (size_t)n);
-        /* The macOS 27 kernel refuses some sigreturns with EPERM, and _sigtramp answers with ud2.
-      On bare metal WindowManager crash-looped 1,397 times (exit 139 -> SIGILL at _sigtramp+0x33). With an
-      errno-reporting trampoline: __sigreturn returned -1 errno 1 (EPERM) on the main thread and a worker in the same
-      instant, every launch, after ~405 good returns; the token was intact (r12 at the crash = r12 at handler entry, and
-      uctx ^ token matched the delivery). The published xnu sigreturn has no EPERM path at all (EINVAL only), so this is a
-      27 kernel check that switches on per process. The state handed back was ordinary: cs 0x2b, canonical rip/rsp, mxcsr 0x1fa0.
-   The fix is our own trampoline with _sigtramp's contract (rdi catcher, esi infostyle, edx sig, rcx siginfo, r8 uctx,
-      r9 token). It calls __sigreturn exactly as before; only when the kernel refuses with EPERM does it restore the
-      interrupted context itself: ymm0-15 (low + high halves), mxcsr, the x87 control word, all sixteen GPRs and rflags,
-      then returns to rip. Nothing is written in the interrupted code's red zone (the three scratch words sit 128 bytes
-      below its rsp). The signal mask needs no restore: SA_NODEFER with an empty sa_mask means the handler ran under the
-      interrupted mask. A different failure, or a non-AVX context, still traps as _sigtramp would. */
+        /* NAME THE NATIVE CALLEE. A fault on `br x16` is almost always a native call, and the symbol is
+              the whole diagnosis — without it the report is a hex address and a guess. */
         Dl_info di;
         if (st->x[16] && dladdr((const void *)(uintptr_t)st->x[16], &di) && di.dli_sname) {
             n = snprintf(b, sizeof b, "  x16 -> %s  (%s)\n", di.dli_sname,
@@ -2597,11 +2559,11 @@ a2x_unseal_failed:
     (void)ignored;
     _exit(139);
 }
-/* ARM2X86_STACKDUMP=1: `kill -USR2 <pid>` makes the main thread say where it is — guest pc, the native
+/* 10-29 ARM2X86_STACKDUMP=1: `kill -USR2 <pid>` makes the MAIN thread say where it is — guest pc, the native
       function it is inside (x16 of the last guest call), the guest frame chain (x29) and the native backtrace.
-   `sample` cannot see this: the guest runs inside the exec fault's signal frame, so a WORKING Dock showed 40/56 main
+    `sample` cannot see this: the guest runs inside the exec fault's signal frame, so a WORKING Dock showed 40/56 main
       samples ending in _sigtramp. 21 NOWINDOW apps were one undifferentiated "alive" bucket.
-   Every guest word is read with vm_read_overwrite, never dereferenced: a bad x29 must not become a fault here. */
+    Every guest word is read with vm_read_overwrite, never dereferenced: a bad x29 must not become a fault here. */
 extern unsigned int mach_task_self_;
 extern int vm_read_overwrite(unsigned int, unsigned long, unsigned long, unsigned long, unsigned long *);
 #include <execinfo.h>
@@ -2649,13 +2611,13 @@ static void stackdump(int sig, siginfo_t *si, void *uc) {
     }
     (void)ig;
 }
-/* B32s · THE macOS 27 kernel refuses some sigreturns with EPERM, and _sigtramp answers with ud2.
+/* B32s THE macOS 27 KERNEL REFUSES SOME sigreturns WITH EPERM, AND _sigtramp ANSWERS WITH ud2.
       Bare metal 10-30: WindowManager crash-looped 1,397 times (exit 139 -> SIGILL at _sigtramp+0x33). Measured with an
       errno-reporting trampoline: __sigreturn returned -1 errno 1 (EPERM) on the main thread and a worker in the same
       instant, every launch, after ~405 good returns; the token was intact (r12 at the crash = r12 at handler entry, and
       uctx ^ token matched the delivery). The published xnu sigreturn has no EPERM path at all (EINVAL only), so this is a
       27 kernel check that switches on per process. The state handed back was ordinary: cs 0x2b, canonical rip/rsp, mxcsr 0x1fa0.
-   The fix is our own trampoline with _sigtramp's contract (rdi catcher, esi infostyle, edx sig, rcx siginfo, r8 uctx,
+    The fix is our own trampoline with _sigtramp's contract (rdi catcher, esi infostyle, edx sig, rcx siginfo, r8 uctx,
       r9 token). It calls __sigreturn exactly as before; only when the kernel refuses with EPERM does it restore the
       interrupted context itself: ymm0-15 (low + high halves), mxcsr, the x87 control word, all sixteen GPRs and rflags,
       then returns to rip. Nothing is written in the interrupted code's red zone (the three scratch words sit 128 bytes
@@ -2766,7 +2728,7 @@ static void a2x_sigtramp(void *catcher, int style, int sig, siginfo_t *si, void 
     ucontext_t *u = (ucontext_t *)uc;
     if (r == -1 && e == EPERM && u && u->uc_mcontext && u->uc_mcsize == sizeof(_STRUCT_MCONTEXT_AVX64)) {
         unsigned long k = __atomic_add_fetch(&g_uresume_n, 1, __ATOMIC_RELAXED);
-        if (k <= 3 || g_trace_tramp > 0) {   /* abort() is how WindowServer dies on an unmodified system; without this the host says nothing */
+        if (k <= 3 || g_trace_tramp > 0) {   /* success must not be silent, but a crash loop must not fill the report */
             char b[160];
             int n = snprintf(b, sizeof b, "[sigret] kernel refused sigreturn (EPERM), resumed in user space: sig %d rip 0x%llx (%lu)\n",
                              sig, ((_STRUCT_MCONTEXT_AVX64 *)u->uc_mcontext)->__ss.__rip, k);
@@ -2786,7 +2748,7 @@ static void install_fault_handler(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = fault;
-    /* SA_NODEFER: a recovered call runs guest code inside the handler, and that guest code may itself
+    /* SA_NODEFER: a recovered call runs guest code INSIDE the handler, and that guest code may itself
           call back out into another guest function. Without it the second fault kills the process. */
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     g_trace_tramp = A2X_DBGENV("ARM2X86_TRACE_TRAMP") ? 1 : 0;
@@ -2795,7 +2757,7 @@ static void install_fault_handler(void) {
     sigaction(SIGILL, &sa, 0);
     /* 11-02: abort() is the WindowServer death on the stock-27 bench; without this the host says nothing */
     sigaction(SIGABRT, &sa, 0);
-    /* the re-seal is only trusted if a single-step trap really comes back to us in this process */
+    /* the re-seal is only trusted if a single-step trap really comes back to us in THIS process */
     if (!A2X_DBGENV("ARM2X86_NO_RESEAL")) {
         struct sigaction st_;
         memset(&st_, 0, sizeof st_);
@@ -2818,7 +2780,7 @@ static void install_fault_handler(void) {
     }
 }
 
-/* ── dependency walk, factored out of main so a late load runs the same code the executable's dependents do ── */
+/* ── dependency walk, factored out of main so a late load runs the SAME code the executable's dependents do ── */
 #include "aot_dependency.h"
 static int a2x_aot_dependency(const char *path, uint64_t *preferred) {
     int fd = open(path, O_RDONLY);
@@ -2873,12 +2835,8 @@ static int scan_deps(unsigned from, uint64_t *next_slide, int trace, unsigned lo
         char exe_path[1024];
         snprintf(exe_path, sizeof exe_path, "%s", im->path);
         stage(ST_DEP_SCAN, (int)i, 0, im->path);
-        /* A bundle-relative dependency that is not in the bundle is dropped entirely: it
-                          is not loaded as a guest and, because the name does not start with '/', it is
-                          not dlopen'd either. Every bind to it then resolves to 0 and only the import
-                          count says anything. Expected shape: FindMy's one @rpath dependency,
-                          FindMyAppCore.framework, which is in the bundle — so a stat() miss here means
-                          the path rule is wrong, not that the framework is absent. Say it. */
+        /* BOUND THIS WALK TOO — it is the same unbounded ncmds/cmdsize loop load_guest had, over the
+              same file, and a desynchronised command here builds a dependency path out of garbage. */
         if (!f || (size_t)mh->sizeofcmds > fl - sizeof *mh) {
             fprintf(stderr, "[host] %s: load commands do not fit its slice on the second pass\n",
                     im->path);
@@ -2891,7 +2849,7 @@ static int scan_deps(unsigned from, uint64_t *next_slide, int trace, unsigned lo
                 || (c->cmdsize & 3) || (const uint8_t *)c + c->cmdsize > lc_end) break;
             if (c->cmd == LC_LOAD_DYLIB_ || c->cmd == LC_LOAD_WEAK_ || c->cmd == LC_REEXPORT_) {
                 const struct dylib_cmd *d = (const struct dylib_cmd *)c;
-                /* name_off is an offset inside this command, and the install name must be
+                /* name_off IS AN OFFSET INSIDE THIS COMMAND, and the install name must be
                       NUL-terminated inside it. Past its end the "path" is whatever follows in the
                       file, and bundle_relative() would build a path out of it and stat() that. */
                 if (d->cmdsize < sizeof *d || d->name_off < sizeof *d || d->name_off >= d->cmdsize
@@ -2908,11 +2866,11 @@ static int scan_deps(unsigned from, uint64_t *next_slide, int trace, unsigned lo
                     struct stat ds;
                     int already = 0;
                     for (unsigned j = 0; j < g_nimg; j++) if (!strcmp(g_img[j].path, rp)) already = 1;
-                    /* A bundle-relative dependency that is not in the bundle is dropped entirely: it
+                    /* A BUNDLE-RELATIVE DEPENDENCY THAT IS NOT IN THE BUNDLE IS DROPPED ENTIRELY: it
                           is not loaded as a guest and, because the name does not start with '/', it is
                           not dlopen'd either. Every bind to it then resolves to 0 and only the import
                           count says anything. Measured shape: FindMy's one @rpath dependency,
-                          FindMyAppCore.framework, which is in the bundle — so a stat() miss here means
+                          FindMyAppCore.framework, which IS in the bundle — so a stat() miss here means
                           the path rule is wrong, not that the framework is absent. Say it. */
                     if (!already && stat(rp, &ds)) {
                         fprintf(stderr, "[host] %s: %s resolved to %s, which does not exist — NOT "
@@ -2923,13 +2881,7 @@ static int scan_deps(unsigned from, uint64_t *next_slide, int trace, unsigned lo
                         snprintf(g_stage_path, sizeof g_stage_path, "%s", rp);
                         stage(ST_DEP_LOAD, (int)g_nimg, 0, g_stage_path);
                         if (load_guest(rp, (*next_slide), trace, 0)) return 3;
-                        /* A failed dlopen must not be silent. Every
-                          import from a framework that did not load then resolves to 0, and the only trace of
-                          it was one number in the missing count — which is how 235 NULL superclass pointers
-                          could present as a single anonymous SIGSEGV with no guest pc. A dependency we
-                          cannot load is said out loud, every run.
-                       A weak dependency is allowed to be absent, so it is counted but only printed under
-                          trace; a non-weak one is a fact about the run either way. */
+                        /* one slide per image, rounded well clear of the last one's end */
                         (*next_slide) = (g_img[g_nimg - 1].vmend + 0xffffffUL) & ~0xffffffUL;
                         (*next_slide) -= 0;
                     }
@@ -2951,12 +2903,18 @@ static int scan_deps(unsigned from, uint64_t *next_slide, int trace, unsigned lo
                     }
                     if (!strcmp(nm, "/usr/lib/libc++.1.dylib")) (*want_libcxx) = 1;
                     stage(ST_DLOPEN, (int)i, k, nm);
-                    /* no x86_64 slice anywhere: the file is guest code, exactly like a bundle framework */
+                    /* A FAILED dlopen WAS SILENT UNLESS ARM2X86_HOST_TRACE HAPPENED TO BE SET. Every
+                          import from a framework that did not load then resolves to 0, and the only trace of
+                          it was one number in the missing count — which is how 235 NULL superclass pointers
+                          could present as a single anonymous SIGSEGV with no guest pc. A dependency we
+                          cannot load is said out loud, every run.
+                        A weak dependency is ALLOWED to be absent, so it is counted but only printed under
+                          trace; a non-weak one is a fact about this run either way. */
                     char gp_[1024];
                     void *dh_ = dlopen(nm, RTLD_LAZY | RTLD_GLOBAL);
                     const char *de_ = dh_ ? 0 : dlerror();   /* read before anything else can reset it */
                     if (!dh_ && a2x_sysdylib_guest_path(nm, gp_, sizeof gp_)) {
-                        /* 11-02 1102h · no x86_64 slice anywhere: the file is guest code, exactly like a bundle framework */
+                        /* 11-02 1102h no x86_64 slice anywhere: the file is guest code, exactly like a bundle framework */
                         int already = 0;
                         for (unsigned j = 0; j < g_nimg; j++) if (!strcmp(g_img[j].path, gp_)) already = 1;
                         if (!already) {
@@ -2986,7 +2944,9 @@ static int scan_deps(unsigned from, uint64_t *next_slide, int trace, unsigned lo
 
 /* ── steps 3-4 of startup (fixups, audit, ObjC/Swift/TLV registration) for images [first, g_nimg) ──
    Startup runs it with first = 0. A late guest load runs it with the index of the first image it added. */
-/* no table = originals are kept (the old copy) */
+/* Seal the code sections of images [first, g_nimg): copy to the alias, mark, then drop the original to
+   PROT_NONE. Only pages that lie wholly inside a run of code sections are sealed, so the Mach-O header page
+   and any page shared with cstrings, method names or unwind info stay readable. Call it after fixups. */
 static void a2x_seal_code(unsigned first) {
     if (A2X_DBGENV("ARM2X86_NO_SEAL")) return;
     if (!a2x_alias_delta) {
@@ -3000,11 +2960,11 @@ static void a2x_seal_code(unsigned first) {
         if (t == MAP_FAILED) { munmap(w, A2X_GUEST_LEN); fprintf(stderr, "[host] code seal OFF: no page table\n"); return; }
         a2x_pg_sealed = t;
         void *tc = mmap(0, A2X_GUEST_LEN >> A2X_PG_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        a2x_pg_count = tc == MAP_FAILED ? 0 : tc;      /* no table = the old global pending slots */
+        a2x_pg_count = tc == MAP_FAILED ? 0 : tc;      /* no counter table = permanent unseal, as before */
         void *td = mmap(0, A2X_GUEST_LEN >> A2X_PG_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         a2x_pg_disc = td == MAP_FAILED ? 0 : td;       /* r13m: no table = originals are kept (the old copy) */
         void *tr = mmap(0, (A2X_GUEST_LEN >> A2X_PG_SHIFT) * sizeof(unsigned short), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        a2x_pg_ref = tr == MAP_FAILED ? 0 : tr;        /* high edge inward — __cstring can share it and the kernel's copyin cannot fault-retry */
+        a2x_pg_ref = tr == MAP_FAILED ? 0 : tr;        /* r14q: no table = the old global pending slots */
         a2x_alias_delta = A2X_ALIAS_BASE - A2X_GUEST_BASE;
     }
     unsigned long npg = 0;
@@ -3013,12 +2973,12 @@ static void a2x_seal_code(unsigned first) {
         for (unsigned k = 0; k < im->ncode; k++) {
             uint64_t a = im->code_a[k], e = im->code_e[k];
             while (k + 1 < im->ncode && im->code_a[k + 1] <= e + 64) { if (im->code_e[k + 1] > e) e = im->code_e[k + 1]; k++; }
-            /* OUTWARD: a partial page is code too. Inward rounding left remoted with zero sealed pages. */
-            /* 11-01 t22: high edge inward — __cstring can share it and the kernel's copyin cannot fault-retry */
+            /* 11-01 OUTWARD: a partial page is code too. Inward rounding left remoted with zero sealed pages. */
+            /* 11-01 t22: HIGH edge inward — __cstring can share it and the kernel's copyin cannot fault-retry */
             unsigned long lo = (unsigned long)(a & ~0xfffUL), hi = (unsigned long)(e & ~0xfffUL);
             if (hi <= lo || lo < A2X_GUEST_BASE || hi > A2X_GUEST_BASE + A2X_GUEST_LEN) continue;
             unsigned long al = lo + a2x_alias_delta, len = hi - lo;
-            /* The alias shares the original's pages (it was a memcpy: every sealed page dirty twice), then
+            /* 11-02 r13m THE ALIAS SHARES THE ORIGINAL'S PAGES (it was a memcpy: every sealed page dirty twice), then
                   the original is replaced by untouched PROT_NONE memory, so the code lives once. The alias holds the
                   very pages the original had, so there is no equality question. A data access that unseals a released
                   page copies it back from the alias first (fault(), a2x_pg_disc). ARM2X86_NO_SEALSHARE=1 = the copy. */
@@ -3036,10 +2996,10 @@ static void a2x_seal_code(unsigned first) {
             }
             mprotect((void *)al, len, PROT_READ);
             unsigned char *pg = a2x_pg_sealed + ((lo - A2X_GUEST_BASE) >> A2X_PG_SHIFT);
-            memset(pg, 1, len >> A2X_PG_SHIFT);                 /* pid/ppid/path: a boot with no ssh can then be read from the serial console alone */
+            memset(pg, 1, len >> A2X_PG_SHIFT);                 /* mark first: a reader that sees 1 reads the finished copy */
             if (mprotect((void *)lo, len, PROT_NONE)) { memset(pg, 0, len >> A2X_PG_SHIFT); continue; }
             if (shared) {
-                /* printing this on every exec would cost milliseconds per process at serial speed */
+                /* mark first: an unseal that races the release copies the (identical) alias bytes back */
                 unsigned char *dz = a2x_pg_disc + ((lo - A2X_GUEST_BASE) >> A2X_PG_SHIFT);
                 memset(dz, 1, len >> A2X_PG_SHIFT);
                 void *r = mmap((void *)lo, len, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
@@ -3048,7 +3008,7 @@ static void a2x_seal_code(unsigned first) {
             npg += len >> A2X_PG_SHIFT;
         }
     }
-    /* diagnostic: phys_footprint right after sealing (the jetsam number) */
+    /* pid/ppid/path: a boot with no ssh is read from the serial console alone (11-01 xpcproxy loop) */
     /* 11-05: every exec printed this to the console; at serial speed that is milliseconds per process */
     if (A2X_DBGENV("ARM2X86_HOST_TRACE")) fprintf(stderr, "[host] sealed %lu code page(s) PROT_NONE (images %u..%u) pid %d ppid %d %s\n", npg, first,
             g_nimg ? g_nimg - 1 : 0, (int)getpid(), (int)getppid(), g_nimg ? g_img[0].path : "?");
@@ -3061,7 +3021,7 @@ static void a2x_seal_code(unsigned first) {
 }
 
 static int finish_images(unsigned first, uint64_t text, int trace) {
-    /* new guest code: every decode cache starts a new epoch (fixups below rewrite bytes of these images) */
+    /* 10-31 new guest code: every decode cache starts a new epoch (fixups below rewrite bytes of these images) */
     { extern unsigned a64_code_gen; __atomic_add_fetch(&a64_code_gen, 1, __ATOMIC_RELEASE); }
     /* ── 3. fixups for every image, now that all exports are known ── */
     struct ctx cx;
@@ -3080,7 +3040,7 @@ static int finish_images(unsigned first, uint64_t text, int trace) {
         fprintf(stderr, "[host] %u image(s): %lu rebases, %lu imports bound, %lu missing%s%s\n",
                 g_nimg, cx.nrebase, cx.nbind, cx.nmissing,
                 cx.first_missing ? ", first: " : "", cx.first_missing ? cx.first_missing : "");
-    /* An unresolved class import is the 0x20 candidate and it used to be one number in A TOTAL.
+    /* AN UNRESOLVED CLASS IMPORT IS THE 0x20 CANDIDATE AND IT USED TO BE ONE NUMBER IN A TOTAL.
           The slot stays 0, the registration below hands libobjc a Nil Class, and libobjc reads
           class->bits at +0x20. Named here, every one of them, before the stage that dereferences it. */
     if (cx.nmissing_cls)
@@ -3110,26 +3070,21 @@ static int finish_images(unsigned first, uint64_t text, int trace) {
     }
 
     /* ── 4. ObjC: publish every guest class, category, protocol and selector to the native runtime ──
-       After FIXUPS, never before. A class structure is full of bound pointers — its metaclass, its method
+        AFTER FIXUPS, NEVER BEFORE. A class structure is full of bound pointers — its metaclass, its method
           lists, its superclass — so registering it unfixed hands the runtime addresses of nothing.
-       Protocols first: a conforming class needs its protocols already registered. */
+        Protocols first: a conforming class needs its protocols already registered. */
     extern void __arm2x86_objc_protocols(unsigned long, unsigned long, unsigned long, unsigned long);
     extern void __arm2x86_objc_register(unsigned long, unsigned long, unsigned long, unsigned long,
                                         unsigned long, unsigned long, unsigned long, unsigned long);
     extern void __arm2x86_objc_ro_sweep(unsigned long, unsigned long, unsigned long, unsigned long,
                                         unsigned long, unsigned long);
-    /* Frameworks first, the executable last — registration order is a dependency order.
-          In Books, 17 classes name superclasses that are guest records inside its own
-          embedded frameworks (0x1473d69e8, 0x14535a9f8, 0x14a0415a0 — all in the 0x140000000 framework
-          range); running image 0, the executable, first means every one of those superclasses does
-          not exist yet, registration reports "its superclass is the guest record ..., which no image has
-          registered" and gives up, and libobjc then reads class->bits at +0x20 on a half-built class:
-          SIGSEGV at exactly 0x20 with guest pc 0, because no guest instruction has run yet.
-       g_img is in load order (0 = the executable, 1.. = the frameworks it pulled in), and a framework
-          cannot depend on the executable that loads it — so descending index is the dependency order.
-       This does not fix a mutual dependency between two frameworks, and that is not claimed: it would
-          need a fixpoint across all images. Named here so the next failure of this shape is not read as
-          this one already being handled. */
+    /* SELECTOR REFERENCES MUST BECOME REAL SELECTORS. Each __objc_selrefs slot holds a pointer to the
+          guest's own method-name STRING, and the native runtime needs a registered SEL — the two are not
+          interchangeable even though both are pointers. Left raw, class_getInstanceMethod finds nothing and
+          the bridge reports "no method / type encoding for selector length" on a plain native NSString whose
+          isa was perfectly correct. The per-app runtime resolves these at translate time; the host does it
+          here, which is the same work without the build.
+        Registered from the STRING the slot points at, after fixups have made that pointer valid. */
     unsigned long nsel = 0, nbadsel = 0;
     for (unsigned i = first; i < g_nimg; i++) {
         const struct objc_secs *o = &g_img[i].objc;
@@ -3140,11 +3095,10 @@ static int finish_images(unsigned first, uint64_t text, int trace) {
             stage_idx((unsigned long)k);
             const char *nm = (const char *)(uintptr_t)sl[k];
             if (!nm) continue;
-            /* On macOS 27, __objc_classrefs is absent from all five of the apps that fault here
-              (FindMy, Maps, Reminders, Shortcuts, Notes) and from every working one checked beside
-              them — so this guard rests on classlist/catlist alone, and an image carrying only
-              __objc_superrefs would be skipped with its super sends left pointing at guest records.
-              Said out loud rather than silently skipped. */
+            /* A SELREF SLOT HOLDS A POINTER TO THE GUEST'S OWN METHOD-NAME STRING, so it must point
+                  INSIDE a mapped guest image. Anything else is a slot whose fixup did not land, and
+                  sel_registerName() would read a C string from an address that is not ours — for as
+                  long as it takes to find a zero byte. Named and skipped. */
             if (!guest_mapped((uint64_t)(uintptr_t)nm, 1)) {
                 if (nbadsel < 8)
                     fprintf(stderr, "[host] %s __objc_selrefs[%llu] = 0x%llx is not inside any mapped "
@@ -3169,24 +3123,24 @@ static int finish_images(unsigned first, uint64_t text, int trace) {
             __arm2x86_objc_protocols(o->protolist, o->nproto, o->protorefs, o->nprotoref);
         }
     }
-    /* Frameworks first, the executable last — registration order is A dependency order.
-          MEASURED 10-26 on Books: 17 of its classes name superclasses that are guest records inside its own
+    /* FRAMEWORKS FIRST, THE EXECUTABLE LAST — REGISTRATION ORDER IS A DEPENDENCY ORDER.
+          MEASURED 10-26 on Books: 17 of its classes name superclasses that are GUEST RECORDS inside its own
           embedded frameworks (0x1473d69e8, 0x14535a9f8, 0x14a0415a0 — all in the 0x140000000 framework
           range), and this loop ran image 0, the executable, FIRST. So every one of those superclasses did
           not exist yet, registration reported "its superclass is the guest record ..., which no image has
           registered" and gave up, and libobjc then read class->bits at +0x20 on a half-built class:
           SIGSEGV at exactly 0x20 with guest pc 0, because no guest instruction had run yet.
-       g_img is in load order (0 = the executable, 1.. = the frameworks it pulled in), and a framework
-          cannot depend on the executable that loads it — so descending index is the dependency order.
-       This does not fix a mutual dependency between two frameworks, and that is not claimed: it would
+        g_img is in LOAD order (0 = the executable, 1.. = the frameworks it pulled in), and a framework
+          cannot depend on the executable that loads it — so DESCENDING index is the dependency order.
+        This does NOT fix a mutual dependency between two frameworks, and that is not claimed: it would
           need a fixpoint across all images. Named here so the next failure of this shape is not read as
           this one already being handled. */
     for (unsigned k = g_nimg; k-- > first;) {
         const unsigned i = k;
         const struct objc_secs *o = &g_img[i].objc;
-        /* MEASURED on macOS 27: __objc_classrefs is absent from all five of the apps that fault here
+        /* MEASURED on macOS 27: __objc_classrefs is ABSENT from all five of the apps that fault here
               (FindMy, Maps, Reminders, Shortcuts, Notes) and from every working one checked beside
-              them — so this guard rests on classlist/catlist alone, and an image carrying only
+              them — so this guard rests on classlist/catlist alone, and an image carrying ONLY
               __objc_superrefs would be skipped with its super sends left pointing at guest records.
               Said out loud rather than silently skipped. */
         /* an image whose only ObjC content is stub-class categories still has those to hand over */
@@ -3208,7 +3162,7 @@ static int finish_images(unsigned first, uint64_t text, int trace) {
             extern void __arm2x86_objc_register_stubcats(unsigned long, unsigned long);
             __arm2x86_objc_register_stubcats(o->catlist2, o->ncat2);
         }
-        /* fill the memory-return IMP table from every class_ro_t the image owns (see objc_bridge.c) */
+        /* 10-30 fill the memory-return IMP table from EVERY class_ro_t the image owns (see objc_bridge.c) */
         __arm2x86_objc_ro_sweep(o->cname_a, o->cname_n, o->rconst_a, o->rconst_n, o->rdata_a, o->rdata_n);
         nobjc += o->nclass; nref += o->nclassref;
     }
@@ -3234,7 +3188,7 @@ static int finish_images(unsigned first, uint64_t text, int trace) {
                   __thread_bss has no file content so only the data part is copied from. */
             uint64_t lo = o->tdata ? o->tdata : o->tbss;
             uint64_t hi = o->tbss ? o->tbss + o->tbss_size : o->tdata + o->tdata_size;
-            /* __thread_vars with no template: tlv.c then calloc()s a one-byte block and
+            /* __thread_vars WITH NO TEMPLATE: tlv.c then calloc()s a ONE-byte block and
                   __arm2x86_tlv_get() returns block + 16 + offset out of it — a heap write past the end
                   on the first access to any thread_local, far from here and with nothing to connect
                   the two. A descriptor section without its data is not registerable; say so. */
@@ -3253,7 +3207,9 @@ static int finish_images(unsigned first, uint64_t text, int trace) {
     return 0;
 }
 
-/* restored below: see cb_host.c */
+/* ── __init_offsets / __mod_init_func of images [first, g_nimg). Startup: first = 0 on the main thread, whose guest
+   stack step 5 made. A late load reaches it on ANY thread, so the thread gets an arm64 stack the way the native->guest
+   callback door gives one (cb_host.c): __arm2x86_ensure_stack(), then xs[31] = __arm_sp. On the main thread it is a no-op. */
 extern void __arm2x86_ensure_stack(void);
 static void run_static_inits(unsigned first, int gargc, char **gargv, char **envp, int trace) {
     __arm2x86_ensure_stack();
@@ -3269,12 +3225,7 @@ static void run_static_inits(unsigned first, int gargc, char **gargv, char **env
             }
             for (uint64_t k = 0; k < im->objc.nmodinit && nl < 1024; k++) {
                 unsigned long f; memcpy(&f, (const void *)(uintptr_t)(im->objc.modinit + k * 8), 8);
-                f &= 0x0000ffffffffffffUL;                      /* ═══ late guest load ═══════════════════════════════════════════════════════════════════════════════════════
-   Startup maps the executable and its dependents. A bundle or dylib the app opens later (FaceTime's
-   FaceTimeMacHelper.bundle, ColorSync's .csutil plug-ins) is arm64e-only, so the native loader refuses it: NSBundle
-   fails with Cocoa 3585 before it calls dlopen (CFBundle checks the executable's architectures itself), and a plain
-   dlopen says "incompatible architecture". Both are routed here, to the same load_guest / finish_images /
-   run_static_inits that startup uses. ARM2X86_NO_LATE=1 turns every hook off. */
+                f &= 0x0000ffffffffffffUL;                      /* an arm64e pointer may still carry its signature */
                 if (f) list[nl++] = f;
             }
             if (im->objc.ninitoff + im->objc.nmodinit > 1024)
@@ -3297,7 +3248,7 @@ static void run_static_inits(unsigned first, int gargc, char **gargv, char **env
     }
 }
 
-/* ═══ late guest load (10-28) ═══════════════════════════════════════════════════════════════════════════════════
+/* ═══ LATE GUEST LOAD (10-28) ═══════════════════════════════════════════════════════════════════════════════════
    Startup maps the executable and its dependents. A bundle or dylib the app opens LATER (FaceTime's
    FaceTimeMacHelper.bundle, ColorSync's .csutil plug-ins) is arm64e-only, so the native loader refuses it: NSBundle
    fails with Cocoa 3585 BEFORE it calls dlopen (CFBundle checks the executable's architectures itself), and a plain
@@ -3398,8 +3349,7 @@ int a2x_late_guest_load(const char *path) {
         unsigned a = 0, b = 0, o = 0;
         while (a < on || b < g_nfnew) ns2->a[o++] = (b >= g_nfnew || (a < on && ov[a] <= g_fnew[b])) ? ov[a++] : g_fnew[b++];
         ns2->n = o;
-        __atomic_store_n(&g_fsnap, ns2, __ATOMIC_RELEASE);        /* where an arm64-only system dylib really lives: the install name itself, or the same path inside the OS
-      cryptex (dyld searches the Preboot OS cryptex first for /usr/lib and /System/Library names). */
+        __atomic_store_n(&g_fsnap, ns2, __ATOMIC_RELEASE);        /* the old one is leaked: a reader may still hold it */
     }
     free(g_fnew); g_fnew = 0;
     install_fault_handler();
@@ -3420,12 +3370,8 @@ static const char *nsb_exe(id b) {
     id p = ((id (*)(id, SEL))objc_msgSend)(b, sel_registerName("executablePath"));
     return p ? ((const char *(*)(id, SEL))objc_msgSend)(p, sel_registerName("UTF8String")) : 0;
 }
-/* +[NSBundle bundleForClass:] for a guest class. Foundation answers it from class_getImageName, i.e. from the
-   dyld image that contains the class. A guest class lives in this host's a2x_rsv reservation, so the "image" is
-   the host binary, which is in no bundle: the lookup falls back to mainBundle (right for the app's own classes,
-   wrong for every guest framework, Swift package resource bundle and Bundle(for:) in a guest dylib). Answer from
-   the guest image table instead: the bundle that owns the image's file. ARM2X86_TRACE_BUNDLE=1 logs every
-   answer so a wrong bundle can be told apart from a right bundle that lacks the resource. */
+/* 11-02 1102h where an arm64-only SYSTEM dylib really lives: the install name itself, or the same path inside the OS
+      cryptex (dyld searches /System/Volumes/Preboot/Cryptexes/OS first for /usr/lib and /System/Library names). */
 static int a2x_sysdylib_guest_path(const char *nm, char *out, size_t n) {
     if (!nm || nm[0] != '/') return 0;
     static const char *const pre[] = { "", "/System/Volumes/Preboot/Cryptexes/OS", "/System/Cryptexes/OS", 0 };
@@ -3475,7 +3421,7 @@ static id h_principal(id self, SEL c) {
     }
     return 0;
 }
-/* +[NSBundle bundleForClass:] FOR A guest class. Foundation answers it from class_getImageName, i.e. from the
+/* +[NSBundle bundleForClass:] FOR A GUEST CLASS. Foundation answers it from class_getImageName, i.e. from the
    dyld image that contains the class. A guest class lives in this host's a2x_rsv reservation, so the "image" is
    the host binary, which is in no bundle: the lookup falls back to mainBundle (right for the app's own classes,
    wrong for every guest framework, Swift package resource bundle and Bundle(for:) in a guest dylib). Answer from
@@ -3493,7 +3439,7 @@ static int bundle_dir_of(const char *exe, char *out, size_t n) {
     if (m) { size_t l = (size_t)(m - exe); if (l >= n) return 0; memcpy(out, exe, l); out[l] = 0; return 1; }
     return 0;
 }
-/* +[NSBundle bundleWithIdentifier:] FOR A guest framework. CoreFoundation answers from the bundles it already knows
+/* +[NSBundle bundleWithIdentifier:] FOR A GUEST FRAMEWORK. CoreFoundation answers from the bundles it already knows
    plus the ones it discovers from dyld's image list. A guest framework is not a dyld image, so until something has
    made an NSBundle for its directory the identifier is unknown and the answer is nil. Books: EngagementCollector
    asks Bundle(identifier: "com.apple.EngagementCollector") for BooksMessages.momd and stops with "LocalStorage
@@ -3568,7 +3514,7 @@ static id h_colorNamed(id self, SEL c, id name, id bundle, id traits) {
     fprintf(stderr, "[color] name=%s bundle=%s -> %s\n", n ? n : "(nil)", b ? b : "(nil bundle)", r ? "found" : "NIL");
     return r;
 }
-/* -[NSBundle classNamed:] FOR A guest bundle. Foundation loads the bundle, looks the name up, and keeps the class only
+/* -[NSBundle classNamed:] FOR A GUEST BUNDLE. Foundation loads the bundle, looks the name up, and keeps the class only
    when class_getImageName says it came from the bundle's own file. A guest class lives in this host's reservation, so
    that test never passes and the answer is nil. A Catalyst application asks its AppKit plug-in for its window and
    application providers this way and asserts on the answer (Weather: AppKitWindowProvider, trap 28 ms after its
@@ -3579,10 +3525,8 @@ static id h_classNamed(id self, SEL c, id name) {
     if (!e || !a2x_late_guest_load(e)) return ((id (*)(id, SEL, id))o_classNamed)(self, c, name);
     const char *u = u8of(name);
     int j = late_find(e);
-    /* The first CFBundleCopyExecutableURL on a fresh bundle is relative to the bundle, and its file system path is the bare
-       name; later calls are absolute ("IOHIDEventServicePlugin", then the full path). The bare name opens nothing, so
-       every plug-in's first arm64-only check said no. WindowServer's first HID service failed with 0xe00002c7 and only the second
-       worked: one boot lost the mouse, another the keyboard, by enumeration order alone. */
+    /* the bundle image's own class list is the authority (principalClass above reads the same list): a class is this
+       bundle's when it is listed there under that name, plain or module-qualified ("AppKitPlugin.Name") */
     if (u && j >= 0 && g_img[j].objc.nclass && g_img[j].objc.classlist) {
         size_t ul = strlen(u);
         for (unsigned long n = 0; n < g_img[j].objc.nclass; n++) {
@@ -3627,7 +3571,7 @@ static void late_install_hooks(void) {
     }
 }
 
-/* ── CFBundle / dlopen / dlsym, bound in place of the native entry points for guest imports ── */
+/* ── CFBundle / dlopen / dlsym, bound in place of the native entry points for GUEST imports ── */
 extern const void *CFBundleCopyExecutableURL(const void *);
 extern const void *CFURLCopyFileSystemPath(const void *, long);
 extern const void *CFURLCopyAbsoluteURL(const void *);
@@ -3635,15 +3579,10 @@ extern int CFStringGetCString(const void *, char *, long, uint32_t);
 extern void CFRelease(const void *);
 static int cfb_guest_exe(const void *b, char *out, size_t n) {
     if (!b) return 0;
-    /* The other half of the HID plug-in route. n_CFBundleGetDataPointerForName serves plug-ins with an NSPrincipalClass.
-      The nine at the top of /System/Library/HIDPlugins use CFPlugInFactories instead (IOHIDNXEventTranslatorSessionFilter,
-      IOHIDKeyboardFilter, IOHIDPointerScrollFilter and more) and 27 ships them arm64e-only, so native CFPlugInInstanceCreate
-      returns NULL and they never run. The symptoms: wrangler ActivityTickles 0, HIDIdleTime = uptime, IOPMUserIsActive No, System
-      Capabilities 9. loginwindow then refuses to unlock (IOPMUserIsActive 0 -> _wakeForIncomingMessage), SecurityAgent sees 0
-      displays, and the panel squeezes into the corner. One IOPMAssertionDeclareUserActivity by hand cures all of it, and that call
-      is in the session filter. Native load is tried first; only a failed load of an arm64-only bundle comes here. The factory is
-      named by the bundle's own plist and returns Apple's COM object; its function table holds raw guest addresses, which native
-      callers reach through recover_guest_call like any raw guest IMP. */
+    /* 11-05 r14p: the first CFBundleCopyExecutableURL on a fresh bundle is relative to the bundle, and its file system path is the bare
+       name; later calls are absolute (measured: "IOHIDEventServicePlugin", then the full path). The bare name opened nothing, so
+       every plug-in's first arm64-only check said no. WindowServer's first HID service failed with 0xe00002c7 and only the second
+       worked: one boot lost the mouse, another the keyboard, by enumeration order alone. */
     const void *rel_ = CFBundleCopyExecutableURL(b);
     if (!rel_) return 0;
     const void *u = CFURLCopyAbsoluteURL(rel_);
@@ -3692,10 +3631,10 @@ static void *w_CFBundleGetFunctionPointerForName(const void *b, const void *name
     }
     return ((void *(*)(const void *, const void *))real_fn("CFBundleGetFunctionPointerForName"))(b, name);
 }
-/* NATIVE IOKit opens every HID service and session through ObjC plug-ins that 27 ships arm64e-only
+/* 11-04 NATIVE IOKit opens every HID service and session through ObjC plug-ins that 27 ships arm64e-only
       (/System/Library/HIDPlugins). IOHIDService asks CFBundleGetDataPointerForName(bundle, "OBJC_CLASS_$_Name"); the native
       dlopen answers "missing compatible architecture", so WindowServer held 0 services: USB reports reached the kernel
-      and stopped (real 27: 176 IOHIDEventServiceUserClient, all WindowServer). a2x_late_wrapper only rebinds guest imports, so
+      and stopped (real 27: 176 IOHIDEventServiceUserClient, all WindowServer). a2x_late_wrapper only rebinds GUEST imports, so
       IOKit's own slot is redirected to the existing late loader. The class handed back is the runtime's registered copy. */
 static void *(*g_real_getdata)(const void *, const void *);
 static void *n_CFBundleGetDataPointerForName(const void *b, const void *name) {
@@ -3712,8 +3651,15 @@ static void *n_CFBundleGetDataPointerForName(const void *b, const void *name) {
     }
     return g_real_getdata(b, name);
 }
-/* as seen in the guest: IOKit's stub is `jmp *[rip+d]` and the slot lies outside IOKit (the shared
-                      cache coalesces pointers cache-wide; IOKit's __got is section type 0). The slot therefore comes from the stub. */
+/* 11-05 r14j: THE OTHER HALF OF THE HID PLUG-IN ROUTE. n_CFBundleGetDataPointerForName serves plug-ins with an NSPrincipalClass.
+      The nine at the top of /System/Library/HIDPlugins use CFPlugInFactories instead (IOHIDNXEventTranslatorSessionFilter,
+      IOHIDKeyboardFilter, IOHIDPointerScrollFilter and more) and 27 ships them arm64e-only, so native CFPlugInInstanceCreate
+      returned NULL and they never ran. Measured: wrangler ActivityTickles 0, HIDIdleTime = uptime, IOPMUserIsActive No, System
+      Capabilities 9. loginwindow then refused to unlock (IOPMUserIsActive 0 -> _wakeForIncomingMessage), SecurityAgent saw 0
+      displays, and the panel squeezed into the corner. One IOPMAssertionDeclareUserActivity by hand cured all of it, and that call
+      is in the session filter. Native load is tried first; only a failed load of an arm64-only bundle comes here. The factory is
+      named by the bundle's own plist and returns Apple's COM object; its function table holds raw guest addresses, which native
+      callers reach through recover_guest_call like any raw guest IMP. */
 #define A2X_PF_MAX 96
 static struct { const void *uuid, *bundle; } g_pf[A2X_PF_MAX];
 static unsigned g_npf;
@@ -3790,8 +3736,8 @@ static void a2x_route_native_cfbundle(void) {
             if (strcmp(sg->segname, "__TEXT")) continue;
             const struct section_64 *sc = (const struct section_64 *)(sg + 1);
             for (uint32_t k = 0; k < sg->nsects; k++, sc++) {
-                /* the slot is shared by every image in the x86 cache; only SkyLight's own calls are ours. IOKit and CFBundle keep
-       dyld's answer, so their arm64-only plug-ins still reach the CFBundle/COM route above instead of a raw guest handle. */
+                /* 11-04 measured in the guest: IOKit's stub is `jmp *[rip+d]` and the slot lies OUTSIDE IOKit (the shared
+                      cache coalesces pointers cache-wide; IOKit's __got is section type 0). The slot therefore comes from the stub. */
                 if ((sc->flags & SECTION_TYPE) != S_SYMBOL_STUBS) continue;
                 const unsigned char *t = (const unsigned char *)(uintptr_t)(sc->addr + (uint64_t)slide);
                 for (uint64_t o = 0; o + 6 <= sc->size; o++) {
@@ -3816,7 +3762,14 @@ static void a2x_route_native_cfbundle(void) {
     }
     if (!hits) fprintf(stderr, "[host] native bundle route: 0 slots in IOKit (image found %u); HID plug-ins stay unloadable\n", found);
 }
-/* the caller's return address */
+/* 11-05 r14y NATIVE dlopen OF AN arm64e-ONLY IMAGE. 27.2 ships SkyLight's Resources/CursorAsset as arm64e + arm64e.x1
+      (no x86_64): a code-less dylib whose one export `_cursors` (__DATA_CONST, 816 B) points into 8 MB of cursor art. Native
+      SkyLight in WindowServer dlopens it, dyld answers "incompatible architecture", the builtin-cursor registry comes up
+      empty: "Unknown builtin cursor com.apple.coregraphics.Arrow" every ~10 s and a black box where the pointer is.
+      a2x_ndlopen / a2x_ndlsym sit in SkyLight's dlopen/dlsym slots. Only an absolute path to an arm64-only file is
+      taken (the same late guest loader every other route uses) and answered with a tagged handle; only a tagged handle
+      is taken by dlsym. Everything else TAIL-JUMPS to dyld with the caller's return address intact - a C wrapper calling
+      dlopen would make dyld resolve @rpath/@loader_path/RTLD_NEXT against the host instead of the caller. */
 __attribute__((used)) void *a2x_real_dlopen_p, *a2x_real_dlsym_p;
 __attribute__((used)) void *a2x_ndlopen_want(const char *p, int fl, const void *ret) {
     if (!p || p[0] != '/' || (fl & RTLD_NOLOAD)) return 0;
@@ -3841,7 +3794,7 @@ __asm__(".text\n"
         ".p2align 4\n"
         "_a2x_ndlopen:\n"
         "    movq (%rsp), %rdx\n"                                   /* r14z: the caller's return address */
-        "    pushq %rdi\n    pushq %rsi\n    subq $8, %rsp\n"      /* a presence query never loads */
+        "    pushq %rdi\n    pushq %rsi\n    subq $8, %rsp\n"      /* entry rsp = 8 mod 16 -> 0 mod 16 at the call */
         "    call _a2x_ndlopen_want\n"
         "    addq $8, %rsp\n    popq %rsi\n    popq %rdi\n"
         "    testq %rax, %rax\n    jz 1f\n    ret\n"
@@ -3872,7 +3825,7 @@ static void a2x_route_native_dl(void) {
             if (strcmp(sg->segname, "__TEXT")) continue;
             const struct section_64 *sc = (const struct section_64 *)(sg + 1);
             for (uint32_t k = 0; k < sg->nsects; k++, sc++) {
-                if ((sc->flags & SECTION_TYPE) != S_SYMBOL_STUBS) continue;   /* an arm64-only system dylib in the OS cryptex is a guest too */
+                if ((sc->flags & SECTION_TYPE) != S_SYMBOL_STUBS) continue;   /* same stub walk as the IOKit route */
                 const unsigned char *t = (const unsigned char *)(uintptr_t)(sc->addr + (uint64_t)slide);
                 for (uint64_t o = 0; o + 6 <= sc->size; o++) {
                     if (t[o] != 0xff || t[o + 1] != 0x25) continue;
@@ -3903,7 +3856,7 @@ static void *w_dlopen(const char *p, int fl) {
     }
     if (p && p[0] == '/' && exe_arm64_only(p) && a2x_late_guest_load(p)) return (void *)(A2X_HTAG | (unsigned long)late_find(p));
     void *h_ = dlopen(p, fl);
-    char gp_[1024];   /* 11-02 1102h · an arm64-only system dylib in the OS cryptex is a guest too */
+    char gp_[1024];   /* 11-02 1102h an arm64-only system dylib in the OS cryptex is a guest too */
     if (!h_ && p && a2x_sysdylib_guest_path(p, gp_, sizeof gp_) && a2x_late_guest_load(gp_)) return (void *)(A2X_HTAG | (unsigned long)late_find(gp_));
     return h_;
 }
@@ -3996,7 +3949,7 @@ static int w_dlclose(void *h) {
     if (((unsigned long)h & 0xfffffff000000000UL) == A2X_HTAG) return 0;
     return dlclose(h);
 }
-/* The main executable is the guest, not this host. Stock 27 launchd (arm64e, run with the host as its x86 slice)
+/* 11-01 THE MAIN EXECUTABLE IS THE GUEST, NOT THIS HOST. Stock 27 launchd (arm64e, run with the host as its x86 slice)
       panicked PID 1: "launchd built improperly: no __TEXT,__config" - it reads its own section through
       getsectiondata(_NSGetMachExecuteHeader(), ...), and the native answer was the host's x86 header. Every program
       that inspects itself this way (sections, UUID) needs the guest's header: g_img[0] mapped at text_vmaddr+slide. */
@@ -4048,7 +4001,7 @@ static bool w_dyld_get_image_uuid(const struct mach_header *mh, uuid_t out) {
     }
     return _dyld_get_image_uuid(mh, out);
 }
-/* dladdr ON A guest address. Stock 27 launchd takes _NSGetMachExecuteHeader(), passes it to dladdr(), and
+/* 11-01 dladdr ON A GUEST ADDRESS. Stock 27 launchd takes _NSGetMachExecuteHeader(), passes it to dladdr(), and
       only then calls getsectiondata(__TEXT,__config). Native dyld has never heard of a guest image, so dladdr said 0
       and launchd aborted "built improperly: no __TEXT,__config" (exit 134 off the VM, PID-1 panic in it). A guest
       address answers with the guest image's path and header; everything else stays native. Symbol name is left
@@ -4065,50 +4018,13 @@ static int w_dladdr(const void *a, Dl_info *info) {
     }
     return dladdr(a, info);
 }
-/* who called exit */
+/* 11-01 HOW A LAUNCHD CHILD ENDS, ON THE CONSOLE. Stock 27 xpcproxy ran ~5/s with no exec and no crash report,
+      and launchd stops console logging after early boot - so the end of a process was invisible with no ssh.
+      Children of PID 1 (and PID 1) print their exit/abort reason to stderr (the console for them); nothing else
+      changes - every wrapper then calls the real function. */
 static int exit_diag_on(void) { return getpid() == 1 || getppid() == 1; }
 static const char *exit_diag_path(void) { return g_nimg ? g_img[0].path : "?"; }
 static void w_exit_diag(int c) {
-#if !A2X_SHIP        /* who called exit, for the lab: it reads guest frames and, for one program, calls a native function */
-    if (exit_diag_on()) fprintf(stderr, "[host] exit(%d) pid %d %s host-argc %d argv1 '%s'\n", c, (int)getpid(),
-                                exit_diag_path(), g_hargc + 1, g_hargc > 0 && g_hargv[0] ? g_hargv[0] : "-");
-    if (exit_diag_on() && c != 0 && a64_cur_state) {   /* 11-02 1102d · who called exit (patch_exitbt.py) */
-        const a64 *g0 = a64_cur_state; uint64_t fp = g0->x[29], sp = g0->sp, lr = g0->x[30];
-        { const char *ep = exit_diag_path(); size_t el = strlen(ep);
-          if (el >= 5 && !strcmp(ep + el - 5, "/Dock")) {
-            int (*mc)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "CGSMainConnectionID");
-            fprintf(stderr, "[host]   exit-dock global@0x10041e170=%#x once@0x10041e178=%#llx native CGSMainConnectionID=%#x\n",
-                    *(volatile uint32_t *)(uintptr_t)0x10041e170ULL, (unsigned long long)*(volatile uint64_t *)(uintptr_t)0x10041e178ULL,
-                    mc ? mc() : -1);
-          } }
-        fprintf(stderr, "[host]   exit-regs x19 %#llx x20 %#llx x21 %#llx x22 %#llx x23 %#llx x24 %#llx x25 %#llx x26 %#llx x27 %#llx x28 %#llx\n",
-                (unsigned long long)g0->x[19], (unsigned long long)g0->x[20], (unsigned long long)g0->x[21], (unsigned long long)g0->x[22],
-                (unsigned long long)g0->x[23], (unsigned long long)g0->x[24], (unsigned long long)g0->x[25], (unsigned long long)g0->x[26],
-                (unsigned long long)g0->x[27], (unsigned long long)g0->x[28]);
-        for (int k = 0; k < 11; k++) {
-            Dl_info di; const char *ip = "?"; uint64_t off = lr;
-            for (unsigned i = 0; i < g_nimg; i++)
-                if (g_img[i].vmlo <= g_img[i].vmend && lr >= g_img[i].vmlo && lr < g_img[i].vmend) {
-                    ip = g_img[i].path; off = lr - (uint64_t)(uintptr_t)guest_mh(i); break; }
-            if (ip[0] == '?' && dladdr((void *)(uintptr_t)lr, &di) && di.dli_fname) {
-                ip = di.dli_fname; off = lr - (uint64_t)(uintptr_t)di.dli_fbase; }
-            fprintf(stderr, "[host]   exit-bt[%d] %#llx %s+%#llx\n", k, (unsigned long long)lr, ip, (unsigned long long)off);
-            if (!fp || (fp & 15) || fp < sp || fp > sp + (8u << 20)) break;
-            lr = ((uint64_t *)(uintptr_t)fp)[1] & 0x0000007fffffffffULL; fp = ((uint64_t *)(uintptr_t)fp)[0];
-        }
-    }
-    if (exit_diag_on()) {   /* xpcproxy's inlined libxpc check reads slot 1 bytes 0 and 4 (bit 0 -> 141) */
-        extern struct { long once; unsigned char *ptr; } _os_alloc_once_table[];
-        unsigned char *g = _os_alloc_once_table[1].once == -1 ? _os_alloc_once_table[1].ptr : 0;
-        const char *xf = A2X_DBGENV("XPC_FLAGS");
-        fprintf(stderr, "[host] xpc-diag XPC_FLAGS=%s slot1 once=%lx", xf ? xf : "(unset)", _os_alloc_once_table[1].once);
-        if (g) for (int i = 0; i < 16; i++) fprintf(stderr, "%s%02x", i ? "" : " g=", g[i]);
-        fprintf(stderr, "\n");
-        extern char **environ; int ne = 0;
-        for (char **e = environ; e && *e; e++, ne++) if (ne < 8) fprintf(stderr, "[host] xpc-diag env[%d] %.120s\n", ne, *e);
-        fprintf(stderr, "[host] xpc-diag env count %d\n", ne);
-    }
-#endif
     exit(c);
 }
 static void w__exit_diag(int c) {
@@ -4133,6 +4049,42 @@ static void w_abort_diag(void) {
     if (exit_diag_on()) fprintf(stderr, "[host] abort() pid %d %s\n", (int)getpid(), exit_diag_path());
     abort();
 }
+#include <bsm/audit.h>
+/* Set when this program asked for a sandbox of its own and the call succeeded. abi_sbx.c reads it: only such a
+ * program is told it is sandboxed when it asks about itself. */
+int a2x_sbx_entered;
+static int w_sandbox_init(const char *profile, uint64_t flags, char **err) {
+    static int (*f)(const char *, uint64_t, char **); if (!f) f = (int (*)(const char *, uint64_t, char **))dlsym(RTLD_DEFAULT, "sandbox_init");
+    int r = f ? f(profile, flags, err) : -1; if (r == 0) a2x_sbx_entered = 1; return r;
+}
+static int w_sandbox_init_with_parameters(const char *profile, uint64_t flags, const char *const params[], char **err) {
+    static int (*f)(const char *, uint64_t, const char *const[], char **); if (!f) f = (int (*)(const char *, uint64_t, const char *const[], char **))dlsym(RTLD_DEFAULT, "sandbox_init_with_parameters");
+    int r = f ? f(profile, flags, params, err) : -1; if (r == 0) a2x_sbx_entered = 1; return r;
+}
+static int w_sandbox_init_with_extensions(const char *profile, uint64_t flags, const char *const exts[], char **err) {
+    static int (*f)(const char *, uint64_t, const char *const[], char **); if (!f) f = (int (*)(const char *, uint64_t, const char *const[], char **))dlsym(RTLD_DEFAULT, "sandbox_init_with_extensions");
+    int r = f ? f(profile, flags, exts, err) : -1; if (r == 0) a2x_sbx_entered = 1; return r;
+}
+static int w_sandbox_apply(void *profile) {
+    static int (*f)(void *); if (!f) f = (int (*)(void *))dlsym(RTLD_DEFAULT, "sandbox_apply");
+    int r = f ? f(profile) : -1; if (r == 0) a2x_sbx_entered = 1; return r;
+}
+static int w_setaudit_addr_keepbs(const struct auditinfo_addr *ai, int len) {
+    mach_port_t before = MACH_PORT_NULL, after = MACH_PORT_NULL;
+    task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &before);
+    mach_port_t gbefore = bootstrap_port;
+    int r = setaudit_addr(ai, len);
+    int e = errno;
+    task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &after);
+    int restored = 0;
+    if (r == 0 && MACH_PORT_VALID(before) && !MACH_PORT_VALID(after)) {
+        task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, before);
+        restored = 1;
+    }
+    if (MACH_PORT_VALID(gbefore) && !MACH_PORT_VALID(bootstrap_port)) { bootstrap_port = gbefore; restored |= 2; }
+    errno = e;
+    return r;
+}
 static void *a2x_late_wrapper(const char *nm) {
     if (!nm || A2X_DBGENV("ARM2X86_NO_LATE")) return 0;
     static const struct { const char *n; void *f; } t[] = {
@@ -4144,6 +4096,11 @@ static void *a2x_late_wrapper(const char *nm) {
         { "_NSGetExecutablePath", (void *)w_NSGetExecutablePath },
         { "_dyld_get_image_uuid", (void *)w_dyld_get_image_uuid },
         { "dladdr", (void *)w_dladdr },
+        { "setaudit_addr", (void *)w_setaudit_addr_keepbs },
+        { "sandbox_init", (void *)w_sandbox_init },
+        { "sandbox_init_with_parameters", (void *)w_sandbox_init_with_parameters },
+        { "sandbox_init_with_extensions", (void *)w_sandbox_init_with_extensions },
+        { "sandbox_apply", (void *)w_sandbox_apply },
         { "exit", (void *)w_exit_diag }, { "_exit", (void *)w__exit_diag }, { "abort", (void *)w_abort_diag },
         { "abort_with_reason", (void *)w_abort_with_reason_diag },
         { "abort_with_payload", (void *)w_abort_with_payload_diag },
@@ -4154,49 +4111,31 @@ static void *a2x_late_wrapper(const char *nm) {
         { "CFBundleGetFunctionPointerForName", (void *)w_CFBundleGetFunctionPointerForName },
         { "dlopen", (void *)w_dlopen }, { "dlsym", (void *)w_dlsym }, { "dlclose", (void *)w_dlclose } };
     for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) if (!strcmp(nm, t[i].n)) return t[i].f;
-    /* GSS-API: the x86_64 GSS headers are #pragma pack(2) (gss_OID_desc 12 bytes, elements @+4; arm64 16,
+    /* 11-01 GSS-API: the x86_64 GSS headers are #pragma pack(2) (gss_OID_desc 12 bytes, elements @+4; arm64 16,
           @+8). The stock-27 sshd-auth died in native gss_test_oid_set_member reading a guest OID 4 bytes early.
           gss_abi.c keeps every OID/set the guest sees in arm64 layout. ARM2X86_NO_GSSABI=1 turns it off. */
-    /* a guest signal handler is a guest function: sigaction/signal install a native entry for it
+    /* 11-01 a guest signal handler is a guest FUNCTION: sigaction/signal install a native entry for it
           (sig_guest.c). The raw arm64 address left sshd's listener spinning on its own sigchld_handler. */
-    /* ═══ adopt the guest's code signature ═══════════════════════════════════════════════════════════════════════════
-   The problem. The process image is this host, so its code signature is the host's - ad-hoc, no entitlements.
-      `codesign -d --entitlements - +<pid>` on a running app prints only Executable=a2xhost-mac, while the
-      app's own binary carries 10-30 keys. Both halves of every entitlement check read that same signature, so the
-      app is answered "no" about itself (SecTask) and daemons are answered "no" about it (csops_audittoken).
-      Consequences: Journal, Stocks and Freeform trap inside CloudKit; Screenshot loses its connection.
-   The fix, in two halves that must both happen.
-      1. Register the guest's signature blob against the guest's vnode, with fcntl(F_ADDFILESIGS_RETURN). This is
-         dyld's own call for exactly this purpose: fs_file_start is the slice's start in the file and fs_blob_start
-         is LC_CODE_SIGNATURE's dataoff, an offset relative to that slice.
-      2. Ask the kernel hook to point this process's p_textvp/p_textoff at the guest, which is where
-         csproc_get_blob and cs_entitlements_blob_get both read from (in the 26A5425a kernel at
-         0xffffff80007b42d0 and 0xffffff80007b4f60). The kext refuses unless the caller is really running an
-         a2x host, so this cannot be used by anything else.
-   It runs in main, which is after libsystem_secinit. That is deliberate, not an oversight: secinit's
-      registration already sees the host's signature and the app works, so leaving that untouched is the
-      additive change. A host signed with a full entitlement set instead made secinit fail with "registration
-      request failed (0x10)" and SIGILL, which is the reason this route was chosen over signing.
-   Every failure is reported and none is fatal. Without the kext's sysctl (an older kext, or the hook not
-      installed) the app runs exactly as it did before. ARM2X86_NO_ADOPT=1 turns it off.                       */
+    /* 11-01 a guest spawn arch preference gains x86_64/any (spawn_arch.c): launchd's arm64-only list made
+          xpcproxy's posix_spawn of every host-fat daemon fail with EBADARCH on the x86 kernel. */
     { extern void *a2x_spawnarch_wrapper(const char *); void *w = a2x_spawnarch_wrapper(nm); if (w) return w; }
     { extern void *a2x_sig_wrapper(const char *); void *w = a2x_sig_wrapper(nm); if (w) return w; }
     extern void *a2x_gss_wrapper(const char *);
     { void *g = a2x_gss_wrapper(nm); if (g) return g; }
-    /* audit_token_t BY VALUE: 32 bytes = a pointer in an x register on arm64, 32 bytes on the x86 stack.
+    /* 11-01 audit_token_t BY VALUE: 32 bytes = a pointer in an x register on arm64, 32 bytes on the x86 stack.
           launchd's sandbox_check_by_audit_token denied every privileged lookup (error 159) -> configd died -> no
           en0, no ssh. audit_abi.c dereferences the guest pointer and calls native by value. ARM2X86_NO_AUDITABI=1 off. */
     extern void *a2x_audit_wrapper(const char *);
     return a2x_audit_wrapper(nm);
 }
 
-/* ═══ adopt the guest's code signature (10-28) ══════════════════════════════════════════════════════════════════
-   The problem. The process image is this host, so its code signature is the host's - ad-hoc, no entitlements.
+/* ═══ ADOPT THE GUEST'S CODE SIGNATURE (10-28) ══════════════════════════════════════════════════════════════════
+    THE PROBLEM. The process image is this host, so its code signature is the host's - ad-hoc, no entitlements.
       Measured: `codesign -d --entitlements - +<pid>` on a running app prints only Executable=a2xhost-mac, while the
       app's own binary carries 10-30 keys. Both halves of every entitlement check read that same signature, so the
       app is answered "no" about itself (SecTask) and daemons are answered "no" about it (csops_audittoken).
       Measured consequences: Journal, Stocks and Freeform trap inside CloudKit; Screenshot loses its connection.
-   The fix, in two halves that must both happen.
+    THE FIX, IN TWO HALVES THAT MUST BOTH HAPPEN.
       1. Register the guest's signature blob against the guest's vnode, with fcntl(F_ADDFILESIGS_RETURN). This is
          dyld's own call for exactly this purpose: fs_file_start is the slice's start in the file and fs_blob_start
          is LC_CODE_SIGNATURE's dataoff, an offset relative to that slice.
@@ -4204,30 +4143,24 @@ static void *a2x_late_wrapper(const char *nm) {
          csproc_get_blob and cs_entitlements_blob_get both read from (measured in the 26A5425a kernel at
          0xffffff80007b42d0 and 0xffffff80007b4f60). The kext refuses unless the caller is really running an
          a2x host, so this cannot be used by anything else.
-   IT RUNS IN main, which is after libsystem_secinit. That is deliberate, not an oversight: secinit's
+    IT RUNS IN main, WHICH IS AFTER libsystem_secinit. That is deliberate, not an oversight: secinit's
       registration already sees the host's signature today and the app works, so leaving that untouched is the
       additive change. A host signed with a full entitlement set instead made secinit fail with "registration
       request failed (0x10)" and SIGILL - measured 10-28, and the reason this route was chosen over signing.
-   Every failure is reported and none is fatal. Without the kext's sysctl (an older kext, or the hook not
+    EVERY FAILURE IS REPORTED AND NONE IS FATAL. Without the kext's sysctl (an older kext, or the hook not
       installed) the app runs exactly as it did before. ARM2X86_NO_ADOPT=1 turns it off.                       */
 #include <sys/sysctl.h>
-#include <errno.h>              /* CodeDirectory field offsets. pageSize is at +39, not +36. Writing +36
-      silently overwrites hashSize (32 for SHA-256) with 12, and the kernel keeps objecting
-      to "page shift: 14" because the shift byte was never touched. A trace that prints `shift=32` is the
-      tell — 32 is not a shift, it is a hash length. Layout, from the top of the struct:
-        +0 magic  +4 length  +8 version  +12 flags  +16 hashOffset  +20 identOffset
-        +24 nSpecialSlots  +28 nCodeSlots  +32 codeLimit  +36 hashSize  +37 hashType  +38 platform
-        +39 pageSize  +40 spare2                                                                      */
+#include <errno.h>              /* strerror(errno): every adopt failure names itself */
 #ifndef F_ADDFILESIGS_RETURN
 #define F_ADDFILESIGS_RETURN 97
 typedef struct fsignatures { off_t fs_file_start; void *fs_blob_start; size_t fs_blob_size; } fsignatures_t;
 #endif
 #ifndef F_ADDSIGS
-#define F_ADDSIGS 59           /* the original cdhash (libcommonCrypto is inside libSystem) */
+#define F_ADDSIGS 59           /* takes the blob from OUR memory; F_ADDFILESIGS* read it from the file */
 #endif
 #define A2X_CSMAGIC_EMBEDDED  0xfade0cc0u
 #define A2X_CSMAGIC_CODEDIR   0xfade0c02u
-/* CodeDirectory field offsets — PAID FOR 10-28. pageSize is at +39, NOT +36. The first attempt used
+/* CodeDirectory FIELD OFFSETS — PAID FOR 10-28. pageSize is at +39, NOT +36. The first attempt used
       +36 and silently overwrote hashSize (32 for SHA-256) with 12, which is why the kernel kept objecting
       to "page shift: 14": the shift byte was never touched. The trace that printed `shift=32` is what
       exposed it — 32 is not a shift, it is a hash length. Layout, from the top of the struct:
@@ -4241,22 +4174,13 @@ typedef struct fsignatures { off_t fs_file_start; void *fs_blob_start; size_t fs
 #define A2X_CD_PAGESIZE_OFF   39
 #define A2X_LC_CODE_SIGNATURE 0x1d
 
-#include <CommonCrypto/CommonDigest.h>   /* Read the guest file, never mmap(fd). The adopt half (a2x_adopt_signature) registers the app's signature
-      with codeLimit cut to 4K-page slots, and the kernel keeps it on the vnode until it is recycled. A file mapping of
-      that app is then validated against the cut blob: every page past ~100 KB is "Invalid" and the union-entitled host
-      is SIGKILLed (CS_KILL). With mmap, TextEdit exited with rc=137 on every launch after its first adopt. */
+#include <CommonCrypto/CommonDigest.h>   /* B24: the original cdhash (libcommonCrypto is inside libSystem) */
 static unsigned a2x_be32(const uint8_t *p) {
     return (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3];
 }
 static uint64_t a2x_be64(const uint8_t *p) { return (uint64_t)a2x_be32(p) << 32 | a2x_be32(p + 4); }
 
-/* A daemon's jetsam limit is sized for its native footprint, not for the interpreter under it.
-      modelmanagerd: limit 15 MB (active and inactive), 3,143 runs, every one ended JETSAM_REASON_MEMORY_PERPROCESSLIMIT.
-      Interpreted footprints: rapportd 16 MB phys (44 MB RSS), WiFiAgent 82 MB RSS, identityservicesd 180 MB RSS.
-      So the host adds its own overhead to whatever limit launchd gave the job, once, before the guest runs. The host
-      carries com.apple.private.memorystatus (union entitlements), which is what lets a process set its own limit.
-   128 MB is a chosen value: it covers the overhead of every daemon above with room to spare.
-   A job with no limit (-1 / 0) is left alone. A failure is reported and the guest runs as before. */
+/* The arm64 slice's offset in the file, or -1 if there is no arm64 slice. 0 for a thin arm64 file. */
 static long long a2x_arm64_slice_off(const uint8_t *m, size_t sz) {
     uint32_t mg;
     if (sz < 8) return -1;
@@ -4276,10 +4200,26 @@ static long long a2x_arm64_slice_off(const uint8_t *m, size_t sz) {
     }
     return -1;
 }
-/* Read only what adopt looks at: the fat header and the bytes from the arm64 slice to the end of the file,
+
+
+/* 10-29 READ the guest file, never mmap(fd). The adopt half (a2x_adopt_signature) registers the app's signature
+      with codeLimit cut to 4K-page slots, and the kernel keeps it on the vnode until it is recycled. A file mapping of
+      that app is then validated against the cut blob: every page past ~100 KB is "Invalid" and the union-entitled host
+      is SIGKILLed (CS_KILL). Measured b14: TextEdit rc=137 on every launch after its first adopt, adopt on OR off. */
+static void *a2x_readall(int fd, size_t len) {
+    uint8_t *b = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (b == MAP_FAILED) return MAP_FAILED;
+    for (size_t o = 0; o < len; ) {
+        ssize_t r = pread(fd, b + o, len - o, (off_t)o);
+        if (r <= 0) { munmap(b, len); return MAP_FAILED; }
+        o += (size_t)r;
+    }
+    return b;
+}
+/* 11-19 READ ONLY WHAT ADOPT LOOKS AT: the fat header and the bytes from the arm64 slice to the end of the file,
       at their own offsets in a file-sized anonymous buffer (pages never read stay untouched and cost nothing).
       Every route is fat and its x86_64 slice is this host (3.4 MB): a2x_readall copied all of it on every launch,
-      3.5 MB and 1.2 ms of a 12 ms true-route launch (100 launches on macOS 27.2). Adopt reads only the fat
+      3.5 MB and 1.2 ms of a 12 ms true-route launch (dtrace, 100 launches, 27.2 PC). Adopt reads only the fat
       header (a2x_arm64_slice_off) and m + soff .. end (a2x_split_blob), so those bytes are identical. */
 static void *a2x_read_armpart(int fd, size_t len) {
     uint8_t *b = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -4300,23 +4240,7 @@ static void *a2x_read_armpart(int fd, size_t len) {
     return b;
 }
 
-
-/* READ the guest file, never mmap(fd). The adopt half (a2x_adopt_signature) registers the app's signature
-      with codeLimit cut to 4K-page slots, and the kernel keeps it on the vnode until it is recycled. A file mapping of
-      that app is then validated against the cut blob: every page past ~100 KB is "Invalid" and the union-entitled host
-      is SIGKILLed (CS_KILL). Measured b14: TextEdit rc=137 on every launch after its first adopt, adopt on or off. */
-static void *a2x_readall(int fd, size_t len) {
-    uint8_t *b = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (b == MAP_FAILED) return MAP_FAILED;
-    for (size_t o = 0; o < len; ) {
-        ssize_t r = pread(fd, b + o, len - o, (off_t)o);
-        if (r <= 0) { munmap(b, len); return MAP_FAILED; }
-        o += (size_t)r;
-    }
-    return b;
-}
-
-/* 10-30 B36 · A daemon's jetsam limit is sized for its native footprint, not for the interpreter under it.
+/* 10-30 B36 A DAEMON'S JETSAM LIMIT IS SIZED FOR ITS NATIVE FOOTPRINT, NOT FOR THE INTERPRETER UNDER IT.
       modelmanagerd: limit 15 MB (active and inactive), 3,143 runs, every one ended JETSAM_REASON_MEMORY_PERPROCESSLIMIT.
       Measured interpreted footprints: rapportd 16 MB phys (44 MB RSS), WiFiAgent 82 MB RSS, identityservicesd 180 MB RSS.
       So the host adds its own overhead to whatever limit launchd gave the job, once, before the guest runs. The host
@@ -4327,60 +4251,42 @@ struct a2x_memlimit { int32_t act; uint32_t act_attr; int32_t inact; uint32_t in
 extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, void *buffer, size_t buffersize);
 static void a2x_jetsam_raise(void) {
     struct a2x_memlimit m = {0, 0, 0, 0};
-    if (memorystatus_control(8 /* The app sandbox, applied the way Apple applies it. On real 27 (reference: an Apple silicon Mac, 27.2 26B123) the kernel gives
-      an app its own signature at exec; dyld maps its images; libSystem's initializer calls libsystem_secinit's
-      _libsecinit_initializer, which reads the process's entitlements (com.apple.security.app-sandbox), registers with
-      secinitd over xpc_pipe, receives the compiled profile + container, sets it with __sandbox_ms("Sandbox",
-      SET_USERLAND_PROFILE), consumes the container extension and sets HOME / CFFIXED_USER_HOME / TMPDIR.
-   Under us that initializer runs while the process still carries the host's signature (adopt comes later, in main), so it
-      finds no app-sandbox entitlement and no guest is ever sandboxed. Every sandboxed extension then dies
-      in libxpc _xpc_objc_main+0xf2, "XPC service requested sandbox, but is not sandboxed!" (a WeatherWidget-class extension
-      on Apple silicon runs sandboxed with a Library/Containers/<id> home.)
-   The order is Apple's: images mapped first (dyld does that before libSystem initializes), then secinit, then the first guest
-      instruction. The code is Apple's: we call the same exported initializer again, now that the kernel reports the guest's
-      signature (its state block is re-read on every call: _libsecinit_appsandbox_check copies the entitlements afresh).
-      Skipped when the process is already sandboxed (a route: its own signature was in place at exec, secinit already ran)
-      or does not ask for the sandbox. A secinitd refusal aborts the process inside Apple's code, exactly as on real 27. */, getpid(), 0, &m, sizeof m) != 0) {
+    if (memorystatus_control(8 /* GET_MEMLIMIT_PROPERTIES */, getpid(), 0, &m, sizeof m) != 0) {
         fprintf(stderr, "[host] jetsam: read limit: %s\n", strerror(errno)); return; }
     int32_t a0 = m.act, i0 = m.inact;
     if (m.act > 0) m.act += 128;
     if (m.inact > 0) m.inact += 128;
     if (m.act == a0 && m.inact == i0) return;
-    if (memorystatus_control(7 /* The identity secinitd checks. secinitd (27.2) takes the caller's cdhash from the kernel and the file's
-      from disk and refuses on any difference: "cdhash mismatch: file:///System/Library/CoreServices/WallpaperAgent.app/,
-      {52441e63...}, {039ba56d...}", MacOS error -67034, "registration request failed: (0x10, 0x3)", then libsecinit's
-      _libsecinit_appsandbox.cold.6 formats that reason and executes ud2 (bytes read from the live guest).
-      A fat whose x86_64 slice is this host runs under its own signature, so the two agree and Apple's flow completes.
-      An adopted guest (an untouched arm64e app routed by the exec hook) runs under its signature with each
-      CodeDirectory lowered to 4K pages, so the kernel's cdhash is the rewritten one and can never agree.
-   Substituting the original hash in the kernel (a2xa.adopt_cdfix) is not the fix: issues "no hash substitution".
-      Until the kernel carries the guest's real identity, an adopted guest is left unsandboxed
-      and alive and says so once, instead of being killed by a refusal it cannot pass.                           */, getpid(), 0, &m, sizeof m) != 0) {
+    if (memorystatus_control(7 /* SET_MEMLIMIT_PROPERTIES */, getpid(), 0, &m, sizeof m) != 0) {
         fprintf(stderr, "[host] jetsam: raise %d/%d MB: %s\n", a0, i0, strerror(errno)); return; }
     if (A2X_DBGENV("ARM2X86_HOST_TRACE")) fprintf(stderr, "[host] jetsam: limit %d/%d -> %d/%d MB\n", a0, i0, m.act, m.inact);
 }
 
-/* The app sandbox, applied the way apple APPLIES it. On real 27 (ruler: the M6, 27.2 26B123) the kernel gives
+/* 11-05 r14u THE APP SANDBOX, APPLIED THE WAY APPLE APPLIES IT. On real 27 (ruler: the M6, 27.2 26B123) the kernel gives
       an app its own signature at exec; dyld maps its images; libSystem's initializer calls libsystem_secinit's
       _libsecinit_initializer, which reads the process's entitlements (com.apple.security.app-sandbox), registers with
       secinitd over xpc_pipe, receives the compiled profile + container, sets it with __sandbox_ms("Sandbox",
       SET_USERLAND_PROFILE), consumes the container extension and sets HOME / CFFIXED_USER_HOME / TMPDIR.
-   Under us that initializer ran while the process still carried the HOST's signature (adopt comes later, in main), so it
+    Under us that initializer ran while the process still carried the HOST's signature (adopt comes later, in main), so it
       found no app-sandbox entitlement and no guest was ever sandboxed. Measured 11-05: every sandboxed extension then died
       in libxpc _xpc_objc_main+0xf2, "XPC service requested sandbox, but is not sandboxed!" (WeatherWidget-class on the M6
       runs sandboxed with ~/Library/Containers/<id>.)
-   The order is Apple's: images mapped first (dyld does that before libSystem initializes), then secinit, then the first guest
+    The order is Apple's: images mapped first (dyld does that before libSystem initializes), then secinit, then the first guest
       instruction. The code is Apple's: we call the same exported initializer again, now that the kernel reports the guest's
       signature (its state block is re-read on every call: _libsecinit_appsandbox_check copies the entitlements afresh).
       Skipped when the process is already sandboxed (a route: its own signature was in place at exec, secinit already ran)
       or does not ask for the sandbox. A secinitd refusal aborts the process inside Apple's code, exactly as on real 27. */
-/* adopted guest - secinitd compares this with the file's cdhash */
-static unsigned char a2x_guest_cd[20];  /* Apple's signature as signed. On Apple silicon (27.2), a running app's kernel cdhash is its file's cdhash.
-      The kernel here validates pages at 4K and Apple signs arm64e at 16K, so the superblob goes in untouched and a
-      4K CodeDirectory derived from Apple's primary one is appended after it (outside its index). The kext
-      (a2x_split.c) checks every 16K page of the file against Apple's hashes and every 4K hash against the same
-      bytes before it uses that directory for page validation; cdhash, CMS, team id and entitlements stay Apple's.
-      Only when a2xa.split_gate says the kernel's policy is live; a refusal falls back to the 4K rewrite below. */
+/* 11-05 r14v THE IDENTITY secinitd CHECKS. secinitd (27.2) takes the caller's cdhash from the kernel and the file's
+      from disk and refuses on any difference: "cdhash mismatch: file:///System/Library/CoreServices/WallpaperAgent.app/,
+      {52441e63...}, {039ba56d...}", MacOS error -67034, "registration request failed: (0x10, 0x3)", then libsecinit's
+      _libsecinit_appsandbox.cold.6 formats that reason and executes ud2 (bytes read from the live guest, 11-05).
+      A fat whose x86_64 slice is this host runs under its OWN signature, so the two agree and Apple's flow completes.
+      An adopted guest (an untouched arm64e app routed by the exec hook) runs under its signature with each
+      CodeDirectory lowered to 4K pages, so the kernel's cdhash is the rewritten one and can never agree.
+    Substituting the original hash in the kernel (a2xa.adopt_cdfix) is NOT the fix: ISSUES "no hash substitution".
+      Until the kernel carries the guest's real identity, an adopted guest is left exactly as before r14u
+      (unsandboxed, alive) and says so once, instead of being killed by a refusal it cannot pass.               */
+static unsigned char a2x_guest_cd[20];  /* the app file's own cdhash, kept by a2x_adopt_signature on success */
 static int a2x_guest_cd_have;
 extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 #define A2X_CS_OPS_CDHASH 5
@@ -4419,7 +4325,7 @@ static void a2x_secinit_as_guest(int trace) {
                 now, A2X_DBGENV("HOME") ? A2X_DBGENV("HOME") : "(unset)");
 }
 
-/* Apple's signature as signed. Ruler (M6, 27.2): a running app's kernel cdhash is its file's cdhash.
+/* 11-05 r14w APPLE'S SIGNATURE AS SIGNED. Ruler (M6, 27.2): a running app's kernel cdhash IS its file's cdhash.
       The kernel here validates pages at 4K and Apple signs arm64e at 16K, so the superblob goes in untouched and a
       4K CodeDirectory derived from Apple's primary one is appended after it (outside its index). The kext
       (a2x_split.c) checks every 16K page of the file against Apple's hashes and every 4K hash against the same
@@ -4475,24 +4381,25 @@ static uint8_t *a2x_split_blob(const uint8_t *sl, size_t slen, const uint8_t *sb
     return out;
 }
 
+#define ADOPT_LOG(t) do { } while (0)
 static void a2x_adopt_signature(const char *guest) {
-    if (!guest || !guest[0] || A2X_DBGENV("ARM2X86_NO_ADOPT")) return;
-    /* gated on the KERNEL's switch, not ours: with a2xa.adopt_enable 0 (the boot default) or the node
+    if (!guest || !guest[0] || A2X_DBGENV("ARM2X86_NO_ADOPT")) { ADOPT_LOG("R1"); return; }
+    /* 10-29 gated on the KERNEL's switch, not ours: with a2xa.adopt_enable 0 (the boot default) or the node
           absent, nothing is registered on the app's vnode at all, so landing this host changes nothing until the
           switch is flipped in the VM — an A/B with no rebuild and no reboot. */
     { int en = 0; size_t el = sizeof en;
-      if (sysctlbyname("a2xa.adopt_enable", &en, &el, 0, 0) != 0 || !en) return; }
+      if (sysctlbyname("a2xa.adopt_enable", &en, &el, 0, 0) != 0 || !en) { ADOPT_LOG("R2"); return; } }
     int trace = A2X_DBGENV("ARM2X86_HOST_TRACE") != 0;
 
     int fd = open(guest, O_RDONLY);
-    if (fd < 0) { fprintf(stderr, "[host] adopt: open %s: %s\n", guest, strerror(errno)); return; }
+    if (fd < 0) { fprintf(stderr, "[host] adopt: open %s: %s\n", guest, strerror(errno)); { ADOPT_LOG("R3"); return; } }
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < 32) {
         fprintf(stderr, "[host] adopt: %s is not readable as a Mach-O\n", guest);
-        close(fd); return;
+        close(fd); { ADOPT_LOG("R4"); return; }
     }
     uint8_t *m = a2x_read_armpart(fd, (size_t)st.st_size);
-    if (m == MAP_FAILED) { fprintf(stderr, "[host] adopt: read %s: %s\n", guest, strerror(errno)); close(fd); return; }
+    if (m == MAP_FAILED) { fprintf(stderr, "[host] adopt: read %s: %s\n", guest, strerror(errno)); close(fd); { ADOPT_LOG("R5"); return; } }
 
     long long soff = a2x_arm64_slice_off(m, (size_t)st.st_size);
     uint32_t cs_off = 0, cs_size = 0;
@@ -4530,28 +4437,11 @@ static void a2x_adopt_signature(const char *guest) {
           split = a2x_split_blob(m + soff, (size_t)st.st_size - (size_t)soff, blob, cs_size, &splitlen, splitcd); }
     munmap(m, (size_t)st.st_size);
 
-    if (soff < 0) { fprintf(stderr, "[host] adopt: %s has no arm64 slice\n", guest); close(fd); return; }
-    /* The 16K page shift is the wall, and the kernel says so itself (log stream):
-             "disallowing unsupported code signature page shift: 14"
-             "unable to create a validated cs_blob object: 85"      (85 = EBADEXEC)
-          Apple signs arm64e binaries with 16K code-signature pages (shift 14); this x86_64 kernel accepts
-          only 4K (shift 12). So F_ADDFILESIGS_RETURN - dyld's own call, and the first thing to try -
-          can never register an arm64e app's signature as it stands. The refusal is structural and happens
-          before a single byte is hashed, so it is not something a different offset or size would fix.
-       Why lowering the shift is sound here, and exactly where it stops being sound. pageSize describes
-          the code-page hashes only. Entitlements live in a special slot whose hash is taken over the
-          entitlement blob itself, so the shift cannot change the entitlement answer - which is the only
-          thing being asked for. The code-page hashes do become wrong, and they are never consulted
-          when the system boots with cs_enforcement_disable=1 (set in the nvram boot-args), which validates
-          no page. On a kernel that enforces page validation this would be wrong and would kill the
-          process. That boot-arg is the whole guard, which is why this mechanism must not be used on a
-          system that enforces page validation without re-deciding it.
-       Both CodeDirectories are patched: Apple ships two (SHA-1 and SHA-256) and which one this kernel
-          picks is not ours to choose, so leaving either at 14 risks the same refusal. */
-    if (!cs_size) { fprintf(stderr, "[host] adopt: %s has no LC_CODE_SIGNATURE - entitlements stay empty\n", guest); close(fd); return; }
-    if (split) {   /* The original cdhash, taken before any byte is lowered. The kernel's choice among the CodeDirectories
-          is by hash type (SHA-384 > SHA-256 > SHA-256-truncated > SHA-1), and securityd makes the same choice on
-          the file; the cdhash is that directory's digest in its own hash type, cut to 20 bytes. */
+    if (soff < 0) { fprintf(stderr, "[host] adopt: %s has no arm64 slice\n", guest); close(fd); { ADOPT_LOG("R6"); return; } }
+    /* No signature is a fact worth printing: it means this app will keep answering "no entitlements"
+          about itself, and that is the thing being fixed, so a silence here would hide the miss. */
+    if (!cs_size) { fprintf(stderr, "[host] adopt: %s has no LC_CODE_SIGNATURE - entitlements stay empty\n", guest); close(fd); { ADOPT_LOG("R7"); return; } }
+    if (split) {   /* r14w: Apple's signature as signed + the kernel-verified 4K directory */
         fsignatures_t sfs;
         sfs.fs_file_start = (off_t)soff;
         sfs.fs_blob_start = split;
@@ -4561,39 +4451,41 @@ static void a2x_adopt_signature(const char *guest) {
         if (sr == 0 || se == EEXIST) {
             char sarg[4200];
             int sn = snprintf(sarg, sizeof sarg, "%s:%lld", guest, soff);
-            if (sn > 0 && (size_t)sn < sizeof sarg && sysctlbyname("a2xa.adopt", 0, 0, sarg, (size_t)sn + 1) == 0) {
+            int arc_ = (sn > 0 && (size_t)sn < sizeof sarg) ? sysctlbyname("a2xa.adopt", 0, 0, sarg, (size_t)sn + 1) : -2; int aer_ = errno;
+            errno = aer_;
+            if (arc_ == 0) {
                 memcpy(a2x_guest_cd, splitcd, sizeof a2x_guest_cd); a2x_guest_cd_have = 1;
                 if (trace) fprintf(stderr, "[host] adopt: Apple's signature as signed, cdhash %02x%02x%02x%02x, 4K pages kernel-verified\n",
                                    splitcd[0], splitcd[1], splitcd[2], splitcd[3]);
             } else if (trace || errno != EINVAL) {
                 fprintf(stderr, "[host] adopt: a2xa.adopt=%s: %s\n", sarg, strerror(errno));
             }
-            free(blob); close(fd); return;
+            free(blob); close(fd); { ADOPT_LOG("R8"); return; }
         }
         fprintf(stderr, "[host] adopt: the kernel refused Apple's signature for %s (%s) - 4K-rewritten registration instead\n",
                 guest, strerror(se));
     }
 
-    /* THE 16K page shift is the wall, and the kernel said so itself (measured 10-28, log stream):
+    /* THE 16K PAGE SHIFT IS THE WALL, AND THE KERNEL SAID SO ITSELF (measured 10-28, log stream):
              "disallowing unsupported code signature page shift: 14"
              "unable to create a validated cs_blob object: 85"      (85 = EBADEXEC)
           Apple signs arm64e binaries with 16K code-signature pages (shift 14); this x86_64 kernel accepts
           only 4K (shift 12). So F_ADDFILESIGS_RETURN - dyld's own call, and the first thing tried here -
-          can never register an arm64e app's signature as it stands. The refusal is structural and happens
+          can NEVER register an arm64e app's signature as it stands. The refusal is structural and happens
           before a single byte is hashed, so it is not something a different offset or size would fix.
-       Why lowering the shift is sound here, and exactly where it stops being sound. pageSize describes
-          the code-page hashes only. Entitlements live in a special slot whose hash is taken over the
+        WHY LOWERING THE SHIFT IS SOUND HERE, AND EXACTLY WHERE IT STOPS BEING SOUND. pageSize describes
+          the CODE-PAGE hashes only. Entitlements live in a special slot whose hash is taken over the
           entitlement blob itself, so the shift cannot change the entitlement answer - which is the only
           thing being asked for. The code-page hashes do become wrong, and they are never consulted,
           because this VM boots with cs_enforcement_disable=1 (verified in nvram boot-args) and so validates
-          no page. ON A kernel that enforces page validation this would be wrong and would kill the
-          Process. That boot-arg is the whole guard, which is why this is a VM-only mechanism and must not
+          no page.  ON A KERNEL THAT ENFORCES PAGE VALIDATION THIS WOULD BE WRONG AND WOULD KILL THE
+          PROCESS. That boot-arg is the whole guard, which is why this is a VM-only mechanism and must not
           be carried to the bare-metal box without re-deciding it.
-       Both CodeDirectories are patched: Apple ships two (SHA-1 and SHA-256) and which one this kernel
+        Both CodeDirectories are patched: Apple ships two (SHA-1 and SHA-256) and which one this kernel
           picks is not ours to choose, so leaving either at 14 risks the same refusal. */
-    if (!blob) { fprintf(stderr, "[host] adopt: could not read %s's signature\n", guest); close(fd); return; }
+    if (!blob) { fprintf(stderr, "[host] adopt: could not read %s's signature\n", guest); close(fd); { ADOPT_LOG("R9"); return; } }
     unsigned npatched = 0, ncd = 0;
-    /* B24 · the original CDHASH, taken before any byte is lowered. The kernel's choice among the CodeDirectories
+    /* B24 THE ORIGINAL CDHASH, taken before any byte is lowered. The kernel's choice among the CodeDirectories
           is by hash type (SHA-384 > SHA-256 > SHA-256-truncated > SHA-1), and securityd makes the same choice on
           the file; the cdhash is that directory's digest in its own hash type, cut to 20 bytes. */
     unsigned char cdorig[CC_SHA384_DIGEST_LENGTH];
@@ -4626,15 +4518,15 @@ static void a2x_adopt_signature(const char *guest) {
             }
             if (b[A2X_CD_PAGESIZE_OFF] > 12) {
                 b[A2X_CD_PAGESIZE_OFF] = 12;
-                /* nCodeSlots describes the same BYTES at A new page size, so it can no longer cover the
+                /* nCodeSlots DESCRIBES THE SAME BYTES AT A NEW PAGE SIZE, so it can no longer cover the
                       whole image: 24 slots reached 24x16K, and at 4K they reach 24x4K. Growing the slot
                       array would mean growing the blob and moving every index offset after it; shortening
                       codeLimit instead keeps the blob byte-for-byte the same size and internally consistent
-                      for any bounds check the kernel makes. It is sound only because this VM boots
+                      for any bounds check the kernel makes. It is sound ONLY because this VM boots
                       cs_enforcement_disable=1 and validates no code page - the shortened range is never
                       hashed. The entitlement answer is untouched either way: entitlements live in special
                       slots BEFORE hashOffset, hashed over the entitlement blob, not over code pages.
-                   On a kernel that enforces page validation this is wrong and must be re-decided. */
+                    On a kernel that enforces page validation this is wrong and must be re-decided. */
                 unsigned reach = nslots << 12;
                 if (climit > reach) {
                     b[A2X_CD_CODELIMIT_OFF + 0] = (uint8_t)(reach >> 24);
@@ -4648,42 +4540,44 @@ static void a2x_adopt_signature(const char *guest) {
             }
         }
     }
-    /* kept for the secinit identity check, before the cdfix switch clears it */
+    /* No CodeDirectory found means the SuperBlob was not the shape expected - report it rather than
+          registering something unexamined. An empty result is a fact about the parse. */
     if (!ncd) { fprintf(stderr, "[host] adopt: no CodeDirectory in %s's signature (%u bytes) - not registering\n",
-                        guest, cs_size); free(blob); close(fd); return; }
+                        guest, cs_size); free(blob); close(fd); { ADOPT_LOG("R10"); return; } }
 
     fsignatures_t fs;
     fs.fs_file_start = (off_t)soff;
-    fs.fs_blob_start = blob;                             /* Only when the kernel says it takes the prefix: an older kext reads "cd=..." as a path that does
-          not start with '/' and refuses the whole adopt. The switch reads 0 at boot, so both halves start off. */
+    fs.fs_blob_start = blob;                             /* F_ADDSIGS reads our memory, not the file */
     fs.fs_blob_size = (size_t)cs_size;
     if (fcntl(fd, F_ADDSIGS, &fs) == -1 && errno != EEXIST && !(cdrank && errno == EALREADY)) {
         fprintf(stderr, "[host] adopt: F_ADDSIGS on %s (%u/%u CodeDirectories lowered to 4K pages): %s\n",
                 guest, npatched, ncd, strerror(errno));
-        free(blob); close(fd); return;
+        free(blob); close(fd); { ADOPT_LOG("R11"); return; }
     }
     free(blob);
     close(fd);
 
     int cdorig_rank = cdrank;   /* r14v: kept for the secinit identity check, before the cdfix switch clears it */
     char arg[4200];
-    /* EINVAL is the kernel declining a route, whose signature is already its own (a2xa.adopt_refused_off): normal, not news */
+    /* Only when the kernel says it takes the prefix: a kext without B24 reads "cd=..." as a path that does
+          not start with '/' and refuses the whole adopt. The switch reads 0 at boot, so both halves start off. */
     { int cf = 0; size_t cl = sizeof cf;
       if (sysctlbyname("a2xa.adopt_cdfix", &cf, &cl, 0, 0) != 0 || !cf) cdrank = 0; }
     char cdhex[41] = "";
     for (int i = 0; cdrank && i < 20; i++) snprintf(cdhex + 2 * i, 3, "%02x", cdorig[i]);
     int n = cdrank ? snprintf(arg, sizeof arg, "cd=%s;%s:%lld", cdhex, guest, soff)
                    : snprintf(arg, sizeof arg, "%s:%lld", guest, soff);
-    if (n <= 0 || (size_t)n >= sizeof arg) { fprintf(stderr, "[host] adopt: path too long\n"); return; }
+    if (n <= 0 || (size_t)n >= sizeof arg) { fprintf(stderr, "[host] adopt: path too long\n"); { ADOPT_LOG("R12"); return; } }
     if (sysctlbyname("a2xa.adopt", 0, 0, arg, (size_t)n + 1) != 0) {
-        /* see the identity check above */
+        /* ENOENT = this kernel has no adopt-capable hook loaded. Expected before the kext lands, so it is a
+           trace line, not a warning on every launch. Anything else is a real refusal and is printed. */
         if (errno == ENOENT) {
             if (trace) fprintf(stderr, "[host] adopt: a2xa.adopt absent (adopt kext not loaded) - entitlements stay the host's\n");
         } else {
             /* 11-05: EINVAL is the kernel declining a route, whose signature is already its own (a2xa.adopt_refused_off): normal, not news */
             if (trace || errno != EINVAL) fprintf(stderr, "[host] adopt: a2xa.adopt=%s: %s\n", arg, strerror(errno));
         }
-        return;
+        { ADOPT_LOG("R14"); return; }
     }
     if (trace) fprintf(stderr, "[host] adopt: entitlements now %s (slice +0x%llx, blob %u bytes)\n",
                        guest, (unsigned long long)soff, cs_size);
@@ -4693,10 +4587,10 @@ static void a2x_adopt_signature(const char *guest) {
 #include <mach/mach.h>
 #include <servers/bootstrap.h>
 extern void *xpc_pipe_create_from_port(mach_port_t port, uint64_t flags);
-/* LIBXPC takes its role from the main executable's sections, and the main executable is this host.
+/* 11-01 LIBXPC TAKES ITS ROLE FROM THE MAIN EXECUTABLE'S SECTIONS, and the main executable is this host.
       _libxpc_initializer runs getsectbyname("__TEXT", "__launchd" / "__xpcproxy" / "__launchctl") before a line
       of ours runs; the identical code is in 27's arm64e libxpc (0x18054B76C..) and the x86 one, same offsets.
-   So a guest xpcproxy was initialised as a plain process: task_get_special_port(bootstrap) = NULL (launchd
+    So a guest xpcproxy was initialised as a PLAIN process: task_get_special_port(bootstrap) = NULL (launchd
       hands xpcproxy its port through mach_ports_register, not as the bootstrap port) -> flags |= 2, globals
       byte 4 = 1 -> xpcproxy's inlined libxpc check returns 141 -> exit(66) for every job; no daemon ever ran.
    This replays libxpc's own xpcproxy branch on the already-initialised globals (slot 1, 0xd8 bytes):
@@ -4729,30 +4623,20 @@ static void xpc_role_from_guest(int trace) {
     g[1] = 1;
     *(mach_port_t *)(void *)(g + 0x10) = p;
     if (n > 1) *(mach_port_t *)(void *)(g + 0x14) = p2;
+    { mach_port_t tb = MACH_PORT_NULL;               /* no task bootstrap port: the registered port is the bootstrap */
+      if (task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &tb) != KERN_SUCCESS || !MACH_PORT_VALID(tb)) g[9] |= 1;
+      else mach_port_deallocate(mach_task_self(), tb); }
     if (g[9] & 1) {                                 /* flags 0x100: the port is also the bootstrap port */
         bootstrap_port = p;
         mach_port_mod_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, 1);
     }
-    mach_port_mod_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, 1);   /* The arm64 user commpage. arm64 code reads _COMM_PAGE_* with a plain load from 0xFFFFF4000+off
-      (xnu cpu_capabilities.h, _COMM_PAGE64_BASE_ADDRESS); x86's commpage is elsewhere, so that address is
-      unmapped and the first read is a SIGSEGV: 27 xpcproxy reads _COMM_PAGE_DEV_FIRM (+0x84) right after setsid,
-      and without this page no daemon runs.
-   Reference: the real page on Apple silicon, dumped from a user process — the whole 16 KB is zero except
-      +0x24/+0x25 (user page shift 32/64) and +0x37 (kernel page shift), all 0x0e. Same bytes here, except the
-      shifts are 12: this host has 4 KB pages, and every native answer the guest gets (vm_page_size) says so. */
+    mach_port_mod_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, 1);   /* _xpc_create_bootstrap_pipe's retain */
     void *pipe = xpc_pipe_create_from_port(p, 4);
     if (!pipe) {
         fprintf(stderr, "[host] xpc-role: xpc_pipe_create_from_port(0x%x) = NULL; globals now xpcproxy without a pipe\n", p);
         return;
     }
-    *(void **)(void *)(g + 0x18) = pipe;            /* The arm64 main commpage, 0xFFFFFC000 (xnu-12377 arm/cpu_capabilities.h _COMM_PAGE64_BASE_ADDRESS; the page
-      above is _COMM_PAGE64_RO_ADDRESS). Without it, stock 27 logd reads +0x104 (ATM_DIAGNOSTIC_CONFIG) and mds
-      +0x30 (MEMORY_PRESSURE) and both die. Reference: the live page on Apple silicon ("commpage 64-bit", version 3).
-   Every field that describes this machine is copied from its own x86 commpage (0x7fffffe00000, i386/cpu_capabilities.h
-      offsets), once, at start: a snapshot, so MEMORY_PRESSURE and KDEBUG_ENABLE do not follow later changes.
-   Left 0 on purpose: CPU_CAPABILITIES (no arm feature is promised to guest code that picks paths from it), CPUFAMILY,
-      USER_TIMEBASE and APPROX_TIME_SUPPORTED (0 = guest code takes the syscall fallbacks; the timebase is not arm's),
-      the timeofday blocks, DEV_FIRM. Page shifts are 12, as on the RO page. */
+    *(void **)(void *)(g + 0x18) = pipe;            /* the plain-path pipe (from a NULL port) is left, not released */
     char b[24];
     snprintf(b, sizeof b, "0x%llx", (unsigned long long)(*flags & 0x82));
     setenv("XPC_FLAGS", b, 1);
@@ -4760,8 +4644,21 @@ static void xpc_role_from_guest(int trace) {
         fprintf(stderr, "[host] xpc-role: xpcproxy, port 0x%x (+0x%x), flags 0x%llx\n", p, p2, (unsigned long long)*flags);
 }
 
-/* the host's live x86 commpage */
-/* _COMM_PAGE_VERSION, as on Apple silicon */
+/* 11-01 THE ARM64 USER COMMPAGE. arm64 code reads _COMM_PAGE_* with a plain load from 0xFFFFF4000+off
+      (xnu cpu_capabilities.h, _COMM_PAGE64_BASE_ADDRESS); x86's commpage is elsewhere, so that address was
+      unmapped and the first read was a SIGSEGV: 27 xpcproxy reads _COMM_PAGE_DEV_FIRM (+0x84) right after setsid,
+      119 crashes in boot 14, no daemon ran.
+    Ruler: the M4 mini's real page, dumped from a user process 11-01 — the whole 16 KB is zero except
+      +0x24/+0x25 (user page shift 32/64) and +0x37 (kernel page shift), all 0x0e. Same bytes here, except the
+      shifts are 12: this box has 4 KB pages, and every native answer the guest gets (vm_page_size) says so. */
+/* 11-01 THE ARM64 MAIN COMMPAGE, 0xFFFFFC000 (xnu-12377 arm/cpu_capabilities.h _COMM_PAGE64_BASE_ADDRESS; the page
+      above is _COMM_PAGE64_RO_ADDRESS).  It was unmapped: stock 27 logd read +0x104 (ATM_DIAGNOSTIC_CONFIG) and mds
+      +0x30 (MEMORY_PRESSURE) and both died in t18. Ruler: the M4's live page ("commpage 64-bit", version 3).
+   Every field that describes THIS machine is copied from its own x86 commpage (0x7fffffe00000, i386/cpu_capabilities.h
+      offsets), once, at start: a snapshot, so MEMORY_PRESSURE and KDEBUG_ENABLE do not follow later changes.
+   Left 0 on purpose: CPU_CAPABILITIES (no arm feature is promised to guest code that picks paths from it), CPUFAMILY,
+      USER_TIMEBASE and APPROX_TIME_SUPPORTED (0 = guest code takes the syscall fallbacks; the timebase is not arm's),
+      the timeofday blocks, DEV_FIRM. Page shifts are 12, as on the RO page. */
 static void map_arm64_commpage_main(int trace) {
     const uintptr_t base = 0xFFFFFC000ULL;
     const size_t len = 0x4000;
@@ -4778,14 +4675,14 @@ static void map_arm64_commpage_main(int trace) {
     *(uint16_t *)(void *)(c + 0x1e) = 3;                                  /* _COMM_PAGE_VERSION, the M4's */
     c[0x22] = x[0x22];                                                    /* NCPUS */
     c[0x24] = 12; c[0x25] = 12; c[0x37] = 12;                             /* user 32/64 and kernel page shift */
-    memcpy(c + 0x26, x + 0x26, 2);                                        /* CPG_TABLE: 0 on 26A5425a (mds compares it against 50) */
+    memcpy(c + 0x26, x + 0x26, 2);                                        /* CACHE_LINESIZE */
     c[0x2f] = 1;                                                          /* CPU_CLUSTERS: one */
     *(uint32_t *)(void *)(c + 0x30) = 0;      /* CPG_TABLE: 0 measured on 26A5425a (mds compares it against 50) */
     memcpy(c + 0x34, x + 0x34, 3);                                        /* ACTIVE/PHYSICAL/LOGICAL CPUS */
     memcpy(c + 0x38, x + 0x38, 8);                                        /* MEMORY_SIZE */
-    memcpy(c + 0xa0, x + 0xc8, 8);                                        /* CPG_TABLE: 0x00000001 on Apple silicon and on 26A5425a; not x86's ATM word */
+    memcpy(c + 0xa0, x + 0xc8, 8);                                        /* BOOTTIME_USEC     x86 +0xc8 */
     memcpy(c + 0x100, x + 0x44, 4);                                       /* KDEBUG_ENABLE     x86 +0x44 */
-    *(uint32_t *)(void *)(c + 0x104) = 1;     /* CPG_TABLE: 0x00000001 on an M1, an M4 and 26A5425a; not x86's ATM word */
+    *(uint32_t *)(void *)(c + 0x104) = 1;     /* CPG_TABLE: 0x00000001 on an M1, an M4 and 26A5425a; NOT x86's ATM word */
     memcpy(c + 0x160, x + 0x100, 8);                                      /* DYLD_FLAGS        x86 +0x100 */
     if (mprotect(p, len, PROT_READ))
         fprintf(stderr, "[host] commpage: main page mprotect read-only failed (%s); left writable\n", strerror(errno));
@@ -4805,65 +4702,102 @@ static void map_arm64_commpage(int trace) {
     }
     unsigned char *c = p;
     c[0x24] = 12;   /* _COMM_PAGE_USER_PAGE_SHIFT_32 */
-    c[0x25] = 12;   /* A launchd child with stderr = /dev/null reports on the console. logd/configd ran 444x with no
-          host line: their fd 2 is /dev/null, so 'never ran' and 'ran and died' looked the same. */
-    c[0x37] = 12;   /* Two ways in, and the mode is a fact on disk — never a guess about argv[1].
-          CLI mode is `a2xhost <binary> [args]`, which is how every test runs.
-          Bundle mode is this host installed as an app's CFBundleExecutable: the kernel then execs us with
-          the app's own arguments, so argv[1] is whatever the app was given — and for
-          `open -a Foo.app report.pdf` that is a document. Treating it as the guest would interpret the PDF.
-       So the test is the existence of <own path>.a2x64, which the installer creates and nothing else
-          does. A heuristic like "argv[1] exists and is arm64" would be right nearly always, and the rare
-          case is exactly the bug that survives a whole test run.
-       One exec, not two. A stub that re-exec'd this host would make a second pass through secinit, and
-          that is what kills a sandboxed app: of five bundles swapped this way,
-          the two that died were exactly the two with app-sandbox = 1 (SIGILL, rc=132, a 0-byte errfile). */
+    c[0x25] = 12;   /* _COMM_PAGE_USER_PAGE_SHIFT_64 */
+    c[0x37] = 12;   /* _COMM_PAGE_KERNEL_PAGE_SHIFT */
     if (mprotect(p, len, PROT_READ))
         fprintf(stderr, "[host] commpage: mprotect read-only failed (%s); left writable\n", strerror(errno));
     if (trace) fprintf(stderr, "[host] commpage: arm64 page at 0x%lx\n", (unsigned long)base);
     map_arm64_commpage_main(trace);
 }
 
+static void a2x_early_bootstrap(void) {
+    if (getppid() != 1) return;
+    mach_port_t tb = MACH_PORT_NULL;
+    if (task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &tb) == KERN_SUCCESS && MACH_PORT_VALID(tb)) {
+        mach_port_deallocate(mach_task_self(), tb);
+        return;
+    }
+    mach_port_t *rp = 0; mach_msg_type_number_t rn = 0;
+    if (mach_ports_lookup(mach_task_self(), &rp, &rn) != KERN_SUCCESS || !rn) return;
+    mach_port_t r0 = rp[0];
+    for (mach_msg_type_number_t i = 1; i < rn; i++) if (MACH_PORT_VALID(rp[i])) mach_port_deallocate(mach_task_self(), rp[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)rp, rn * sizeof *rp);
+    if (!MACH_PORT_VALID(r0)) return;
+    /* A launchd child normally inherits the system bootstrap port of launchd; registered port 0 is the job domain
+       port, which answers plain lookups but refuses privileged ones (0x44e), and the opendirectoryd module of libinfo
+       looks up privileged. Its parent is the bootstrap the child would have inherited. */
+    mach_port_t bs = r0, par = MACH_PORT_NULL;
+    if (bootstrap_parent(r0, &par) == KERN_SUCCESS && MACH_PORT_VALID(par)) bs = par;
+    if (task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, bs) == KERN_SUCCESS) bootstrap_port = bs;
+}
+/* The exec hook's interpreter is /usr/libexec/a2x/a2xhost. When this host is installed there, it receives
+ * [a2xhost, guest, args...]. It shifts argv to the guest's own [guest, args...], sets CFProcessPath and A2X_GUEST
+ * as the launcher did, and runs the guest in this process. A Catalyst guest needs the Catalyst host, which is
+ * the only case that still execs. Any other install name leaves argv untouched. */
+static int a2x_one_exec(int *argcp, char ***argvp) {
+    char **argv = *argvp;
+    char self[4096]; uint32_t sz = sizeof self;
+    if (*argcp < 2 || getenv("A2X_GUEST") || _NSGetExecutablePath(self, &sz) != 0) return 0;
+    const char *base = strrchr(self, '/'); base = base ? base + 1 : self;
+    if (strcmp(base, "a2xhost") != 0) return 0;
+    const char *guest = argv[1];
+    int fd = open(guest, O_RDONLY); struct stat st; int cat = 0;
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+        if (fd >= 0) close(fd);
+        fprintf(stderr, "a2xhost: cannot read the guest %s: %s\n", guest, strerror(errno)); _exit(3);
+    }
+    void *m = mmap(0, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
+    if (m == MAP_FAILED) { fprintf(stderr, "a2xhost: cannot map the guest %s\n", guest); _exit(3); }
+    cat = memmem(m, (size_t)st.st_size, "/System/iOSSupport", 18) != 0; munmap(m, (size_t)st.st_size);
+    if (setenv("CFProcessPath", guest, 1) != 0 || setenv("A2X_GUEST", guest, 1) != 0) {
+        fprintf(stderr, "a2xhost: setenv failed: %s\n", strerror(errno)); _exit(4);
+    }
+    /* Only xpcproxy runs in this process: launchd answers its privileged lookups by the identity it spawned,
+     * and an exec changes that identity. Every other guest goes to its host by exec, as the launcher did. */
+    if (cat || strcmp(guest, "/usr/libexec/xpcproxy") != 0) {
+        const char *h = cat ? "/usr/libexec/a2x/a2xhost-cat" : "/usr/libexec/a2x/a2xhost-mac";
+        execv(h, argv + 1);
+        fprintf(stderr, "a2xhost: execv %s failed: %s\n", h, strerror(errno)); _exit(5); }
+    /* The vector is advanced, never moved: the environment must stay right after argv's terminator. */
+    int n = *argcp;
+    *argcp = n - 1; *argvp = argv + 1;
+    *_NSGetArgc() = n - 1; *_NSGetArgv() = argv + 1;
+    return 1;
+}
+
 int main(int argc, char **argv, char **envp) {
+    a2x_early_bootstrap();
+    a2x_one_exec(&argc, &argv);
     a2x_block_probe_view = a2x_code_view;
     if (getpid() == 1) { int c = open("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
         if (c >= 0) { int h = fcntl(c, F_DUPFD_CLOEXEC, 200); if (h >= 0) { close(c); c = h; } g_errfd = c; } }
-    /* see swift_xi.c */
+    /* 11-01 t27 A LAUNCHD CHILD WITH stderr = /dev/null REPORTS ON THE CONSOLE. logd/configd ran 444x with no
+          host line: their fd 2 is /dev/null, so 'never ran' and 'ran and died' looked the same. */
     if (getppid() == 1) { struct stat e2, dn;
         if (!fstat(2, &e2) && !stat("/dev/null", &dn) && e2.st_rdev == dn.st_rdev && S_ISCHR(e2.st_mode)) {
             int c = open("/dev/console", O_WRONLY | O_NOCTTY); if (c >= 0) { dup2(c, 2); if (c != 2) close(c); } } }
-    /* Two ways in, and the mode is A fact on disk — NEVER A guess about argv[1].
+    /* TWO WAYS IN, AND THE MODE IS A FACT ON DISK — NEVER A GUESS ABOUT argv[1].
           CLI mode is `a2xhost <binary> [args]`, which is how every gate and sweep runs.
-          Bundle mode is this host installed AS an app's CFBundleExecutable: the kernel then execs us with
-          the app's own arguments, so argv[1] is whatever the app was given — and for
+          BUNDLE mode is this host installed AS an app's CFBundleExecutable: the kernel then execs us with
+          THE APP'S OWN arguments, so argv[1] is whatever the app was given — and for
           `open -a Foo.app report.pdf` that is a DOCUMENT. Treating it as the guest would interpret the PDF.
-       So the test is the existence of <own path>.a2x64, which the installer creates and nothing else
+        SO THE TEST IS THE EXISTENCE OF <own path>.a2x64, which the installer creates and nothing else
           does. A heuristic like "argv[1] exists and is arm64" would be right nearly always, and the rare
           case is exactly the bug that survives a whole sweep.
-       One exec, not two. A stub that re-exec'd this host would make a second pass through secinit, and
+        One exec, not two. A stub that re-exec'd this host would make a SECOND pass through secinit, and
           the 10-21 measurement says that is what kills a sandboxed app: of five bundles swapped this way,
           the two that died were exactly the two with app-sandbox = 1 (SIGILL, rc=132, a 0-byte errfile). */
     g_hargc = argc - 1; g_hargv = argv + 1; g_henvp = envp;
     a2x_route_native_cfbundle();
-    a2x_route_native_dl();   /* Dispatched mode: a2xdispatch passes the app's own argv verbatim and the guest path in
-       A2X_GUEST, so Foundation's argv snapshot (taken before main) is the app's, not [host, app]. Unset
-       at once so a process this app spawns cannot inherit it; the dispatcher sets it fresh each exec. */
+    a2x_route_native_dl();   /* r14y */
     static char selfpath[4096], bguest[4160];
     uint32_t selfsz = (uint32_t)sizeof selfpath;
     const char *gpath = 0;
     int gargc = argc - 1;                       /* CLI: the guest's argv starts after the binary path */
     char **gargv = argv + 1;
-    /* Self-hosted mode: we are the x86_64 slice of a fat app binary. The kernel picked us out
-              of the app's own executable, so argv[0] is the app's path and there is no argument. The
-              guest is the arm64 slice of that very file, which slice_arm64() already finds.
-           The test is the file, never argv: only a fat file carries an arm64 slice (is_arm below), and
-              argv[1] is passed to the guest untouched, so a document is never interpreted. Testing
-              "argc < 2" instead makes every component launchd starts with an argument open that argument as its
-              guest: UIKitSystem (system_app_start) exited 3 and respawned 861 times, and the 12 Catalyst apps
-              waited forever for its application-initialization reply.
-           This is the whole reason the app keeps its own identity: the process image is the app's
-              executable, so CoreFoundation builds the right main bundle with no CFProcessPath needed,
-              and a crash report is filed against the app rather than against the interpreter. */
+    /* DISPATCHED MODE (10-28): a2xdispatch passes the app's own argv verbatim and the guest path in
+       A2X_GUEST, so Foundation's argv snapshot (taken before main) is the app's, not [host, app]. Unset
+       at once so a process this app spawns cannot inherit it; the dispatcher sets it fresh each exec. */
     static char eguest[4096];
     const char *envg = getenv("A2X_GUEST");
     if (envg && envg[0]) {
@@ -4878,18 +4812,22 @@ int main(int argc, char **argv, char **envp) {
         snprintf(bguest, sizeof bguest, "%s%s", selfpath, A2X_GUEST_EXT);
         if (!gpath && stat(bguest, &gst) == 0 && S_ISREG(gst.st_mode)) {
             gpath = bguest;
-            gargc = argc;                       /* bundle: the app's argv verbatim, argv[0] included */
+            gargc = argc;                       /* bundle: the app's argv VERBATIM, argv[0] included */
             gargv = argv;
         }
     }
     if (!gpath) {
-        /* a guest under the standalone host must not have getprogname() = "a2xhost-mac": +[AOSUtilities isDaemon] then reads 0 in
-          com.apple.iCloudHelper, which forwards every request to itself and deadlocks (a hang at iCloud
-          sign-in on 27.2).
-       The name is the guest's argv[0], not its file name - that is what crt0 gives a program on a real Mac, and
-          launchd starts some programs under another name (talagentd as "talagent").
-          (talagentd dying 75 ms after every start is not caused by this: that crash was a routed binary's missing
-          embedded Info.plist, see a2xroute --plist.) */
+        /* SELF-HOSTED MODE: we ARE the x86_64 slice of a fat app binary. The kernel picked us out
+              of the app's own executable, so argv[0] is the app's path and there is no argument. The
+              guest is the arm64 slice of that very file, which slice_arm64() already finds.
+            The test is the FILE, never argv: only a fat file carries an arm64 slice (is_arm below), and
+              argv[1] is passed to the guest untouched, so a DOCUMENT is never interpreted. WAS "argc < 2",
+              which made every component launchd starts with an argument open that argument as its guest:
+              UIKitSystem (system_app_start) exited 3 and respawned 861 times, and the 12 Catalyst apps
+              waited forever for its application-initialization reply (10-28).
+            This is the whole reason the app keeps its own identity: the process image is the app's
+              executable, so CoreFoundation builds the right main bundle with no CFProcessPath needed,
+              and a crash report is filed against the app rather than against the interpreter. */
         if (selfpath[0]) {
             size_t sl = 0;
             long sfd = open(selfpath, O_RDONLY);
@@ -4899,8 +4837,8 @@ int main(int argc, char **argv, char **envp) {
                     void *sm = mmap(0, (size_t)sst.st_size, PROT_READ, MAP_PRIVATE, (int)sfd, 0);
                     if (sm != MAP_FAILED) {
                         const uint8_t *as = slice_arm64((const uint8_t *)sm, (size_t)sst.st_size, &sl);
-                        /* WindowServer: QuartzCore prepare_one_filter calls 0 through SkyLight's 14-entry table.
-          ws_quartz.c turns that one call into `false`; armed only for a WindowServer guest. */
+                        /* slice_arm64 returns the file itself when there is no fat header, so a thin
+                           x86_64 host must NOT be mistaken for its own guest. */
                         int is_arm = as && sl >= 4 && as != (const uint8_t *)sm;
                         munmap(sm, (size_t)sst.st_size);
                         if (is_arm) {
@@ -4919,29 +4857,31 @@ int main(int argc, char **argv, char **envp) {
         }
     }
     a2x_report_to_file(gpath, argc, argv);
-    /* SkyLight display-state decode fix lives in the host rather than in the dyld cache (sl_display.c) */
+    /* 11-09 a guest under the standalone host had getprogname() = "a2xhost-mac": +[AOSUtilities isDaemon] read 0 in
+          com.apple.iCloudHelper, which then forwarded every request to itself and deadlocked (the 27.2 sign-in
+          hang).
+       The name is the guest's argv[0], not its file name - that is what crt0 gives a program on a real Mac, and
+          launchd starts some programs under another name (talagentd as "talagent").
+          (An earlier note here blamed basename(gpath) for talagentd dying 75 ms after every start. Measured later:
+          that crash was the route's missing embedded Info.plist, see a2xroute --plist; this line was not the cause.) */
     { const char *a0_ = (gargc > 0 && gargv[0] && gargv[0][0]) ? gargv[0] : gpath;
       const char *pn_ = strrchr(a0_, '/'); setprogname(pn_ ? pn_ + 1 : a0_); }
-    /* native Optional witnesses read arm64 nested-none words correctly (swift_xi.c) */
+    /* 11-01 WindowServer: QuartzCore prepare_one_filter calls 0 through SkyLight's 14-entry table (10-28).
+          ws_quartz.c turns that one call into `false`; armed only for a WindowServer guest. */
     { extern void a2x_wsquartz_arm(const char *); a2x_wsquartz_arm(gpath); }
-    /* ls_gate.c */
+    /* 11-02 r13s SkyLight display-state decode fix moved OUT of the dyld cache into the host (sl_display.c, NO26 #3) */
     { extern void a2x_sldisplay_arm(const char *); a2x_sldisplay_arm(gpath); }
     /* 11-05 r14m: native Optional witnesses read arm64 nested-none words correctly (swift_xi.c) */
     { extern void a2x_swiftxi_arm(void); a2x_swiftxi_arm(); }
-    { extern void a2x_lsgate_arm(const char *); a2x_lsgate_arm(gpath); }   /* a2x_adopt_signature() is not called from here. It registers a copy of the app's signature with
-          codeLimit cut to nCodeSlots << 12 (this kernel takes only 4K pages; Apple signs 16K), so every guest
-          page past ~100 KB becomes an "Invalid Page". An unentitled host shrugs that off; the union-entitled
-          host gets CS_KILL from the kernel and is SIGKILLed (Code Signature Invalid) at main+2950, as seen on
-          revisiond: adopt on -> rc=137 in 1 s, adopt off -> alive. Its reader (the a2x.adopt kext) cannot load
-          on 26A5425a, so it bought nothing. Entitlements come from the host's own union signature. */
-    /* Called again, behind a2xa.adopt_enable: the kernel reports the host as every app's executable
+    { extern void a2x_lsgate_arm(const char *); a2x_lsgate_arm(gpath); }   /* 11-02 1102i ls_gate.c */
+    /* 10-29 CALLED AGAIN, behind a2xa.adopt_enable: the kernel reports the HOST as every app's executable
           (proc_pidpath, the audit-token path, csops identity), so FuseBoard finds no bundle for a Catalyst app
           (no scene, 14 apps) and bird crashes on an unlinked host. The adopt half of the exec-hook kext swaps
           p_textvp to the app once its signature is registered. Wall 1 below is answered by load_guest reading
           into anonymous memory (no guest file mapping for a cut signature to invalidate). */
     a2x_jetsam_raise();
     a2x_adopt_signature(gpath);
-    /* a2x_adopt_signature() was not called from here until 10-29. It registered a copy of the app's signature with
+    /* 10-28 a2x_adopt_signature() was NOT CALLED from here until 10-29. It registered a copy of the app's signature with
           codeLimit cut to nCodeSlots << 12 (this kernel takes only 4K pages; Apple signs 16K), so every guest
           page past ~100 KB became an "Invalid Page". An unentitled host shrugs that off; the union-entitled
           host gets CS_KILL from the kernel and was SIGKILLed (Code Signature Invalid) at main+2950, measured on
@@ -4950,7 +4890,7 @@ int main(int argc, char **argv, char **envp) {
     install_fault_handler();
     int trace = A2X_DBGENV("ARM2X86_HOST_TRACE") != 0;
     stage(ST_START, -1, 0, "");
-    map_arm64_commpage(trace);   /* extensions' Swift @main */
+    map_arm64_commpage(trace);   /* before any guest code */
 
     /* ── 1. the executable, at the base it asks for ── */
     uint64_t entryoff = 0;
@@ -4965,12 +4905,8 @@ int main(int argc, char **argv, char **envp) {
       extern void a2x_guest_text_entry(const uint8_t *, size_t, uint64_t);   /* 11-05 r14t: extensions' Swift @main */
       if (gf) a2x_guest_text_entry(gf, gfl, g_img[0].slide); }
     uint64_t text = g_img[0].text_vmaddr;
-    /* A Mac Catalyst guest's frameworks live under /System/iOSSupport and dyld refuses to load them into
-          a process whose own platform is macOS. a2xhost is a plain macOS binary. The install names already
-          carry the full /System/iOSSupport/... path, so this is not a path problem — it is a platform one, and
-          the dlopen below is where it shows. FindMy and Maps are PLATFORM_MACCATALYST with 15 and 32
-          iOSSupport dependencies; Reminders, Shortcuts and Notes are plain macOS, so this accounts for at most
-          two of the five apps that fault before the guest runs. Reported, never worked around here. */
+    /* entryoff IS TRUSTED ALL THE WAY TO THE FIRST INTERPRETED INSTRUCTION. Outside the mapping it
+          is an interpreted read of unmapped memory whose reported guest pc is the entry itself. */
     if (text + entryoff < g_img[0].vmlo || text + entryoff >= g_img[0].vmend) {
         fprintf(stderr, "[host] LC_MAIN entry 0x%llx is outside the mapped image (0x%llx..0x%llx)\n",
                 (unsigned long long)(text + entryoff), (unsigned long long)g_img[0].vmlo,
@@ -4979,11 +4915,11 @@ int main(int argc, char **argv, char **envp) {
     }
 
     /* ── 2. its dependencies: a system path is the real x86 framework, a bundle path is another guest ──
-       Guests are loaded before anything is bound. A bind in the executable may name a symbol its own
+        GUESTS ARE LOADED BEFORE ANYTHING IS BOUND. A bind in the executable may name a symbol its own
           framework exports, so every guest has to be mapped and its symbol table known before resolution
           starts; binding as we go would miss exports that are not loaded yet. */
-    /* A mac catalyst guest's frameworks live under /System/iOSSupport AND dyld refuses to load them into
-          A process whose own platform is macOS. a2xhost is a plain macOS binary. The install names already
+    /* A MAC CATALYST GUEST'S FRAMEWORKS LIVE UNDER /System/iOSSupport AND dyld REFUSES TO LOAD THEM INTO
+          A PROCESS WHOSE OWN PLATFORM IS macOS. a2xhost is a plain macOS binary. The install names already
           carry the full /System/iOSSupport/... path, so this is not a path problem — it is a platform one, and
           the dlopen below is where it shows. MEASURED: FindMy and Maps are PLATFORM_MACCATALYST with 15 and 32
           iOSSupport dependencies; Reminders, Shortcuts and Notes are plain macOS, so this accounts for at most
@@ -5005,9 +4941,7 @@ int main(int argc, char **argv, char **envp) {
        (the exception runtime, and layout-identical), which is why its re-exports are not guest definitions. */
     if (want_libcxx && map_guest_libcxx(&next_slide, trace)) return 3;
 
-    /* Maps' executable has 80,734 function starts. A cap of 65,536 would lose
-          15,198 of them with no message, and every native->guest call into one of those would be an
-          unrecoverable fault reported against the callee rather than against the cap. */
+    /* the function-start list is searched by every callback argument, so sort it once */
     if (ndlfail)
         fprintf(stderr, "[host] %lu dependency framework(s) did not load, %lu of them NOT weak — every import "
                         "from one of those resolves to 0, including the _OBJC_CLASS_$_ superclass of any class "
@@ -5020,9 +4954,9 @@ int main(int argc, char **argv, char **envp) {
           Install ours again once the dlopens are done and again as the guest starts. */
     install_fault_handler();
     qsort(g_fstart, g_nfstart, sizeof g_fstart[0], fstart_cmp);
-    /* Not `__arm_tsd_off = 0`: %gs:0 is pthread_self, the TSD array (tsd[0] == self, tsd[3] == the mach
-          thread port) lies inside the pthread struct. With 0 the guest reads struct fields as TSD slots: logd's lock owner
-          (TSD[3]) is garbage -> __ulock_wait EOWNERDEAD -> libtrace brk -> panic. */
+    /* MEASURED: Maps' executable has 80,734 function starts. At the old cap of 65,536 it lost
+          15,198 of them with no message, and every native->guest call into one of those was an
+          unrecoverable fault reported against the callee rather than against the cap. */
     if (g_fstart_dropped)
         fprintf(stderr, "[host] %lu function start(s) DROPPED — FSTARTS_MAX is %d and this program has "
                         "%lu; no native->guest call into a dropped function can be recovered\n",
@@ -5038,7 +4972,7 @@ int main(int argc, char **argv, char **envp) {
     void *stk = mmap(0, stksz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (stk == MAP_FAILED) { perror("mmap stack"); return 6; }
     __arm_sp = ((unsigned long)(uintptr_t)stk + stksz - 4096) & ~15UL;
-    /* WAS `__arm_tsd_off = 0`: %gs:0 is pthread_self, the TSD array (tsd[0] == self, tsd[3] == the mach
+    /* 11-01 WAS `__arm_tsd_off = 0`: %gs:0 is pthread_self, the TSD array (tsd[0] == self, tsd[3] == the mach
           thread port) lies inside the pthread struct. The guest read struct fields as TSD slots: logd's lock owner
           (TSD[3]) was garbage -> __ulock_wait EOWNERDEAD -> libtrace brk -> panic. Measured, not assumed. */
     {
@@ -5054,7 +4988,7 @@ int main(int argc, char **argv, char **envp) {
         if (trace) fprintf(stderr, "[host] TSD array at pthread_self + %#lx\n", __arm_tsd_off);
     }
 
-    /* Apple's secinit as the guest, after the images, before any guest code */
+    /* ── 6. run main(argc, argv, envp) ── */
     unsigned long xs[32];
     memset(xs, 0, sizeof xs);
     _Alignas(16) unsigned char vs[32 * 16];

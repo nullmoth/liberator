@@ -3,7 +3,7 @@
 
     python3 xlat.py <arm64-exe> <outdir> [cpu]          (cpu: llc -mcpu, default x86-64-v3)
 
-Nothing here names a program. R34 (compression_tool) proved the pipeline with a HAND table of imports, a hand stub range
+ Nothing here names a program. R34 (compression_tool) proved the pipeline with a HAND table of imports, a hand stub range
    and a hand-written main; this derives all three from the binary and the SDK:
    - code      : llvm-objdump __text + dyld_info -function_starts -> split_fns (the one splitter) -> arm2x86.build()
    - imports   : __stubs decoded (adrp x16 / ldr x16,[x16,#o] / br x16) -> GOT slot -> dyld_info bind symbol ->
@@ -13,31 +13,31 @@ Nothing here names a program. R34 (compression_tool) proved the pipeline with a 
                  open/openat/fcntl/ioctl read their one optional int tail the same way.
    - data      : every GOT slot gets the NATIVE address of its symbol at boot (dlsym) — ___stdoutp, ___stack_chk_guard ...
    - entry     : LC_MAIN entryoff -> x_fn_<addr>(argc, argv, envp, apple)
-An import with no declaration, or one sigdb refused ('x': struct by value, long double, block, _Float16), is left UNBOUND:
+ An import with no declaration, or one sigdb refused ('x': struct by value, long double, block, _Float16), is left UNBOUND:
    reaching it aborts BY NAME. Guessing its registers would run with garbage arguments and look like it works.
-The arm64 image keeps its own addresses: a zerofill __ARMRSV segment pinned at the image's vm base reserves the range at
+ The arm64 image keeps its own addresses: a zerofill __ARMRSV segment pinned at the image's vm base reserves the range at
    exec, before dyld allocates (R34). Its size is the image's vm size — computed, not a constant."""
 import json, os, re, struct, subprocess, sys
 import split_fns
 from arm2x86 import build
 
 S = os.path.dirname(os.path.abspath(__file__))
-LLVM = os.environ.get('ARM2X86_LLVM', '/opt/homebrew/Cellar/llvm@22/22.1.8/bin')   # Homebrew's LLVM 22.1.8 may also live at Cellar/llvm/
+LLVM = os.environ.get('ARM2X86_LLVM', '/opt/homebrew/Cellar/llvm@22/22.1.8/bin')   #  10-03: the mini's 22.1.8 lives at Cellar/llvm/
 OBJDUMP = 'xcrun'
 VTAB = {'printf': 'vprintf', 'fprintf': 'vfprintf', 'sprintf': 'vsprintf', 'snprintf': 'vsnprintf', 'asprintf': 'vasprintf',
         'dprintf': 'vdprintf', 'scanf': 'vscanf', 'fscanf': 'vfscanf', 'sscanf': 'vsscanf', 'syslog': 'vsyslog',
         'err': 'verr', 'errx': 'verrx', 'warn': 'vwarn', 'warnx': 'vwarnx', 'fwprintf': 'vfwprintf', 'swprintf': 'vswprintf',
         'wprintf': 'vwprintf', 'NSLog': 'NSLogv', 'CFStringCreateWithFormat': 'CFStringCreateWithFormatAndArguments',
-        # the FORTIFIED forms (clang emits them for sprintf/snprintf under _FORTIFY_SOURCE) were missing: Cyberpunk's
-        #    4 __sprintf_chk sites went to the x0-x7 adapter, and native code read the arm64 stack varargs from x86 registers
+        #  10-05 the FORTIFIED forms (clang emits them for sprintf/snprintf under _FORTIFY_SOURCE) were missing: Cyberpunk's
+        #    4 __sprintf_chk sites went to the x0-x7 adapter, and native code read the arm64 STACK varargs from x86 registers
         '__sprintf_chk': '__vsprintf_chk', '__snprintf_chk': '__vsnprintf_chk',
-        # The same bug again, and it cost A BOOT. A variadic native with no v-form here is called through the
-        #    plain adapter, so the callee reads varargs from x86 registers while the arm64 caller left them on its stack.
+        #  10-10 THE SAME BUG AGAIN, AND IT COST A BOOT. A variadic native with no v-form here is called through the
+        #    plain adapter, so the callee reads varargs from x86 registers while the arm64 caller left them on ITS stack.
         #    macOS 27's opendirectoryd died in _platform_strlen on 0xffffffff00000000, called from __vfprintf — asl_log,
-        #    which sigdb marks va=1 but VTAB could not map. Every pair below was probed with dlsym in a real x86_64
+        #    which sigdb marks va=1 but VTAB could not map. Every pair below was PROBED with dlsym in a real x86_64
         #    process before being added; the ones whose v-form does not exist (asl_log_message, malloc_printf) are
         #    deliberately absent rather than guessed.
-        # CFStringAppendFormat cost a second round: the first probe for its v-form linked only libSystem, so the
+        #  CFStringAppendFormat cost a second round: the first probe for its v-form linked only libSystem, so the
         #    CoreFoundation symbols "did not exist" — a fact about the probe, not about the system. Re-probed with
         #    CoreFoundation linked, both are present. opendirectoryd died SIGTRAP inside
         #    __CFSTRING_IS_CALLING_OUT_TO_AN_OBJECT_FORMAT_ARGUMENT_WITH_LOCALE__ reading varargs from x86 registers.
@@ -55,14 +55,14 @@ VTAB = {'printf': 'vprintf', 'fprintf': 'vfprintf', 'sprintf': 'vsprintf', 'snpr
 VPROTO = {'__vsprintf_chk': 'extern int __vsprintf_chk(char *, int, size_t, const char *, va_list);',     # declared only
           '__vsnprintf_chk': 'extern int __vsnprintf_chk(char *, size_t, int, size_t, const char *, va_list);'}   # when fortified
 INTTAIL = {'openat', 'fcntl', 'ioctl'}   # 'open' is handled by XARGCB (traced); one owner only          # one optional int-sized variadic argument
-# a data export of a translated bundle is not a function and cannot be wrapped: it must resolve to its
-#    address inside the mapped guest image (proxy.bundle exports _proxy_module, an 8-byte __common pointer the
+#  10-10 a DATA export of a translated bundle is not a function and cannot be wrapped: it must resolve to its
+#    address INSIDE the mapped guest image (proxy.bundle exports _proxy_module, an 8-byte __common pointer the
 #    module fills in at init, plus two __TEXT,__const version symbols). An absolute assembler symbol does that.
-#    Anything the host later calls through such a pointer is still a raw arm64 address — that is a separate rung.
-# A CALLBACK BEHIND A by-value struct. sigdb types such a struct as 'x' and the whole import is then left
+#     Anything the host later CALLS through such a pointer is still a raw arm64 address — that is a separate rung.
+#  10-10 A CALLBACK BEHIND A BY-VALUE STRUCT. sigdb types such a struct as 'x' and the whole import is then left
 #    unbound, so its callback argument never reaches __arm2x86_cb and native code jumps into raw arm64 bytes
 #    (opendirectoryd -> CFArrayApplyFunction -> SIGBUS at a guest address, 10-10). A struct of integer fields that is
-#    16 bytes or less occupies ceil(size/8) consecutive INTEGER registers on arm64 and on x86-64, so the thunk can take
+#    16 bytes or less occupies ceil(size/8) consecutive INTEGER registers on arm64 AND on x86-64, so the thunk can take
 #    those registers as plain words and rebuild the struct. sizeof is asserted at compile time, never assumed here:
 #    CFRange measured at 16 bytes = 2 registers, so the applier lands in x3 (not x2, which is half the range — that
 #    off-by-one is exactly why reading sigdb's C-argument index as a register index would also have been wrong).
@@ -89,10 +89,10 @@ unsigned long @T@(unsigned long a0, unsigned long r1, unsigned long r2, unsigned
     unsigned long w[2] = { r1, r2 }; CFRange rg; memcpy(&rg, w, sizeof rg);
     return (unsigned long)CFArrayBSearchValues((CFArrayRef)a0, rg, (const void *)a3, (CFComparatorFunction)__arm2x86_cb(a4), (void *)a5);
 }'''),
-    # the dispatch_block_* family: every argument is a scalar, but dispatch_block_flags_t is an enum sigdb types as
-    #    'x', which left the whole import unbound and its block (not a function pointer — __arm2x86_blk, not
+    #  the dispatch_block_* family: every argument is a scalar, but dispatch_block_flags_t is an enum sigdb types as
+    #    'x', which left the whole import unbound and its BLOCK (not a function pointer — __arm2x86_blk, not
     #    __arm2x86_cb) unwrapped. Signatures read from the SDK's dispatch/block.h, not recalled.
-    # Diagnostic: the whole os_log stream of a translated daemon, without logd. Every Apple daemon says
+    #  10-10 DIAGNOSTIC: the whole os_log stream of a translated daemon, without logd. Every Apple daemon says
     #    what went wrong through os_log, and on a bench with no logd that output goes nowhere — opendirectoryd dies
     #    with "Failed to open /Search" and not one line of why. _os_log_impl's 4th argument is the format string;
     #    printing it (unsubstituted) names the failing step. sigdb types arg 2 as 'x' (os_log_type_t), so without a
@@ -130,13 +130,13 @@ void @T@(unsigned long a0, unsigned long a1, unsigned long a2, unsigned long a3,
     }
     _os_log_impl((void *)a0, (os_log_t)a1, (os_log_type_t)a2, (const char *)a3, (uint8_t *)a4, (uint32_t)a5);
 }'''),
-    # DIAGNOSTIC: why a plug-in bundle would not load. opendirectoryd loads its OpenDirectory modules
+    #  10-10 DIAGNOSTIC: why a plug-in bundle would not load. opendirectoryd loads its OpenDirectory modules
     #    with CFBundleLoadExecutableAndReturnError and only logs "no session modules available" — the CFError, which
     #    names the bundle and the missing symbol, is thrown away. This prints both and then behaves exactly as before
     #    (the caller still owns the error when it asked for one). Gated on ARM2X86_TRACE_BUNDLE.
-    # DIAGNOSTIC: which open() fails and why. opendirectoryd reported only
+    #  10-10 DIAGNOSTIC: which open() fails and why. opendirectoryd reported only
     #    "Failed to write configuration ... errno 5" (EIO) with no path for the actual syscall; this prints the
-    #    path and errno of every failing open. Successes are silent, so the cost is nil. ARM2X86_TRACE_OPEN.
+    #    path and errno of every FAILING open. Successes are silent, so the cost is nil. ARM2X86_TRACE_OPEN.
     # Apple ARM64 passes the optional mode on the guest stack; only O_CREAT consumes it.
     'open': (3, 'i64', r'''
 unsigned long @T@(unsigned long a0, unsigned long a1, unsigned long a2) {
@@ -147,7 +147,7 @@ unsigned long @T@(unsigned long a0, unsigned long a1, unsigned long a2) {
         fprintf(stderr, "[open] FAILED errno=%d flags=0x%lx %s\n", errno, a1, a0 ? (const char *)a0 : "(null)");
     return (unsigned long)(long)fd;
 }'''),
-    # preflight runs before the load, and a failure there means no load is ever attempted — so the
+    #  10-10 preflight runs BEFORE the load, and a failure there means no load is ever attempted — so the
     #    CFBundleLoadExecutableAndReturnError thunk below never sees it and the module silently does not exist.
     #    opendirectoryd then says only "no session modules available". Same gate, same call-through.
     'CFBundlePreflightExecutable': (2, 'i64', r'''
@@ -188,7 +188,7 @@ unsigned long @T@(unsigned long a0, unsigned long a1) {
     if (a1) *(CFErrorRef *)a1 = err; else if (err) CFRelease(err);
     return (unsigned long)ok;
 }'''),
-    # DIAGNOSTIC, and the only way to read a panic string from inside a translated daemon. od_panic()
+    #  10-10 DIAGNOSTIC, and the only way to read a panic string from inside a translated daemon. od_panic()
     #    formats its message, hands it to reboot_np, then executes `brk #0x1`; nothing else ever prints it. Gated on
     #    ARM2X86_TRACE_PANIC so a normal run is silent, and it always calls through.
     'reboot_np': (2, 'i64', r'''
@@ -206,30 +206,30 @@ unsigned long @T@(unsigned long a0, unsigned long a1) {
 void @T@(unsigned long a0, unsigned long a1) {
     dispatch_block_perform((dispatch_block_flags_t)a0, (dispatch_block_t)__arm2x86_blk((void *)a1));
 }'''),
-    # A STRUCT **OF** CALLBACKS, passed by pointer. Nothing in the signature says "callback": the argument is
+    #  10-10 A STRUCT **OF** CALLBACKS, PASSED BY POINTER. Nothing in the signature says "callback": the argument is
     #    a plain const pointer, so sigdb types it cleanly, the import binds, and the bridge never sees the two arm64
-    #    function pointers sitting inside the struct. rb_tree_init stores that pointer and the first insertion calls
+    #    function pointers sitting INSIDE the struct. rb_tree_init stores that pointer and the first insertion calls
     #    through it — measured on macOS 27's opendirectoryd: SIGBUS executing __rbt_compare_type_key at 0x10002afac,
     #    a guest address, with the ops table at 0x1000933d0 reached only as a rebased data pointer.
-    #    rb_tree_init keeps the pointer rather than copying the struct, so the wrapped copy must outlive the call
+    #     rb_tree_init KEEPS the pointer rather than copying the struct, so the wrapped copy must outlive the call
     #    and is deliberately never freed: one 32-byte allocation per tree, said out loud instead of hidden.
-    # _os_object_alloc TAKES A CLASS, and nothing was mapping it. It is absent from sigdb (a private
+    #  10-10 _os_object_alloc TAKES A CLASS, and nothing was mapping it. It is absent from sigdb (a private
     #    runtime entry point with no public header) so it went through the generic adapter, which handed the
-    #    native runtime the raw guest class pointer. Every os_object was then created with isa = the guest class,
+    #    native runtime the RAW GUEST class pointer. Every os_object was then created with isa = the guest class,
     #    whose method IMPs are raw arm64 addresses — and the first release on a dispatch queue jumped straight
     #    into them. Measured on macOS 27's opendirectoryd: SIGBUS executing 0x100003724,
     #    -[OS_od_object dealloc], from _dispatch_block_async_invoke2.
-    #    The `objc_`/`class_`/`object_` prefix rule above cannot catch this one: the name starts with _os_.
+    #     The `objc_`/`class_`/`object_` prefix rule above cannot catch this one: the name starts with _os_.
     '_os_object_alloc': (2, 'i64', r'''
 extern void *_os_object_alloc(const void *, unsigned long);
 unsigned long @T@(unsigned long a0, unsigned long a1) {
     return (unsigned long)_os_object_alloc((const void *)__arm2x86_mapcls(a0), (unsigned long)a1);
 }'''),
-    # A 32-BYTE struct by value, and the two ABIs disagree about where it lives. arm64 copies an
-    #    audit_token_t to the caller's stack and passes a pointer to it in x0 (read off a real call site in
+    #  10-11 A 32-BYTE STRUCT BY VALUE, AND THE TWO ABIs DISAGREE ABOUT WHERE IT LIVES. arm64 copies an
+    #    audit_token_t to the caller's stack and passes a POINTER to it in x0 (read off a real call site in
     #    opendirectoryd: `stp q0,q1,[sp,#0x20]` then `add x0, sp, #0x20`), with the 7 output pointers in x1-x7
-    #    and the 9th argument on the stack. x86-64 SysV classifies those 32 bytes MEMORY and passes them on the
-    #    Stack, moving every pointer argument along. The generic x0-x7 adapter cannot express that, so the
+    #    and the 9th argument on the stack. x86-64 SysV classifies those 32 bytes MEMORY and passes them ON THE
+    #    STACK, moving every pointer argument along. The generic x0-x7 adapter cannot express that, so the
     #    callee read garbage: SIGSEGV in audit_token_to_au32+0x58 on 0x2000000116. It is also absent from sigdb,
     #    which is why it reached the adapter at all. The 9th argument comes off the arm64 stack (rung 6 sizes).
     'audit_token_to_au32': (9, 'void', r'''
@@ -240,9 +240,9 @@ void @T@(unsigned long a0, unsigned long a1, unsigned long a2, unsigned long a3,
     audit_token_to_au32(tok, (uid_t *)a1, (uid_t *)a2, (gid_t *)a3, (uid_t *)a4,
                         (gid_t *)a5, (pid_t *)a6, (au_asid_t *)a7, (au_tid_t *)a8);
 }'''),
-    # The same 32-BYTE audit_token_t, IN LaunchServices. MenuBarAgent identifies every app that connects to its menu
-    #    server with `_LSCopyLSASNForAuditToken(-2, token)` — arm64 `mov w0, #-2 / sub x1, x29, #0xa0`, a pointer — and the
-    #    generic adapter passed that pointer where x86-64 expects the token's 32 bytes on the stack. LaunchServices read
+    #  10-22 THE SAME 32-BYTE audit_token_t, IN LaunchServices. MenuBarAgent identifies every app that connects to its menu
+    #    server with `_LSCopyLSASNForAuditToken(-2, token)` — arm64 `mov w0, #-2 / sub x1, x29, #0xa0`, a POINTER — and the
+    #    generic adapter passed that pointer where x86-64 expects the token's 32 bytes ON THE STACK. LaunchServices read
     #    garbage, returned nil, and the menu bar logged 'Cannot identify app for connection from pid' for every app, so no
     #    app ever owned the menu bar. Also absent from sigdb (SPI), which is why it reached the adapter.
     '_LSCopyLSASNForAuditToken': (2, 'i64', r'''
@@ -252,19 +252,19 @@ unsigned long @T@(unsigned long a0, unsigned long a1) {
     audit_token_t tok; memcpy(&tok, (const void *)a1, sizeof tok);
     return (unsigned long)_LSCopyLSASNForAuditToken((int)a0, tok);
 }'''),
-    # The whole DESKTOP hung on this one SPI. `SLSManagedDisplayGetCurrentSpace(cid, displayUUID)` does not
+    #  10-22 THE WHOLE DESKTOP HUNG ON THIS ONE SPI. `SLSManagedDisplayGetCurrentSpace(cid, displayUUID)` does not
     #    ask WindowServer: it asks the WindowManagement *client bridge* (`SLSWMBridgeDelegate()`), a per-process cache.
     #    In a translated agent that delegate is registered but never populated, so the call returns 0 -> the display's
     #    Optional<SpaceID> is nil -> MenuBarAgent builds ZERO MenuBar entries and hands WindowServer an empty array
     #    (_swiftEmptyArrayStorage), WindowManager takes its wallpaper assertion with `space: ` empty, and no app window
     #    is ever placed: measured as a black screen with only the Dock.
-    #    MEASURED, same process, same arguments: the WindowServer-client variant returns the right space (1) while
-    #    this one returns 0, and a native x86 probe (which finds no delegate and falls back) also returns 1.
+    #     MEASURED, same process, same arguments: the WindowServer-client variant returns the RIGHT space (1) while
+    #    this one returns 0, and a NATIVE x86 probe (which finds no delegate and falls back) also returns 1.
     #    So route it to the server, which is the authority for the answer.
-    #    This entry is inert and kept only as the record of A dead end: `nm -u` shows NEITHER MenuBarAgent
+    #     10-22 THIS ENTRY IS INERT AND KEPT ONLY AS THE RECORD OF A DEAD END: `nm -u` shows NEITHER MenuBarAgent
     #    NOR WindowManager imports this symbol (0 of 21 _SLS imports in MenuBarAgent), so the call is native->native
     #    INSIDE SkyLight and no bind of ours can ever intercept it. The rebuild proved it: byte-identical binary,
-    #    md5 6bcd8bf0 before and after. A bridge can only ever catch a symbol the guest image imports.
+    #    md5 6bcd8bf0 before and after. A bridge can only ever catch a symbol the GUEST image imports.
     'SLSManagedDisplayGetCurrentSpace': (2, 'i64', r'''
 extern unsigned long long SLSWindowServerClientManagedDisplayGetCurrentSpace(int, const void *);
 unsigned long @T@(unsigned long a0, unsigned long a1) {
@@ -289,44 +289,44 @@ unsigned long @T@(unsigned long a0, unsigned long a1, unsigned long a2, unsigned
 }
 
 
-# rung 2 · the CALLBACK bridge. Native code (qsort, pthread, GCD, atexit ...) calls a pointer it was given as x86 code.
-#    Each distinct arm64 function handed to an import gets one slot of a static trampoline pool:
+#  rung 2 THE CALLBACK BRIDGE. Native code (qsort, pthread, GCD, atexit ...) calls a pointer it was given as x86 code.
+#    Each distinct arm64 function handed to an import gets ONE slot of a static trampoline pool:
 #      slot i:  movl $i, %r11d ; jmp ___arm2x86_cb_common
-#    The common entry keeps the native caller's argument registers (rdi..r9, xmm0..7), gives the thread an arm64 stack if
+#    The common entry keeps the native caller's argument registers (rdi..r9, xmm0..7), gives the THREAD an arm64 stack if
 #    it has none (a pthread or GCD worker is a thread translated code has never run on), and calls the IR door
 #    __arm2x86_cb_door(a0..a5, q0..q7, t). The door returns { i64, <2 x i64> } = rax + xmm0 — exactly where the native
 #    caller reads an int or a double result — so the common entry returns without touching either.
-# Limits said out loud: integer arguments 7+ of a callback are not forwarded (x6/x7 = 0); a struct-by-value callback
+#  Limits said out loud: integer arguments 7+ of a callback are not forwarded (x6/x7 = 0); a struct-by-value callback
 #    argument is not supported. The pool has CB_SLOTS distinct functions; exhausting it aborts BY NAME.
-# WAS 2048. Cyberpunk on an Arrow Lake PC aborted 3 s in with "callback trampoline pool exhausted": since the 10-11
-#    native adapter swaps every exact guest function start passed to a native function pointer, a big program hands
+#  10-18 WAS 2048. Cyberpunk on studio aborted 3 s in with "callback trampoline pool exhausted": since the 10-11
+#    native adapter swaps every exact guest function start passed to a native function POINTER, a big program hands
 #    over thousands of distinct functions. 131072 slots = 2 MB of stubs, generated by the assembler (.rept), not as text.
 CB_SLOTS = 1 << 17
 CB_ASM = ('.text\n.p2align 4\n.globl ___arm2x86_cb_slots\n___arm2x86_cb_slots:\n'
           + f'.set ___arm2x86_cbi, 0\n.rept {CB_SLOTS}\n  movl $___arm2x86_cbi, %r11d\n  jmp ___arm2x86_cb_common\n  .p2align 4\n'
             '  .set ___arm2x86_cbi, ___arm2x86_cbi+1\n.endr\n'   # slot i = movl $i (verified with llvm-mc 22, 10-18)
           + '.p2align 4\n.globl ___arm2x86_cb_common\n___arm2x86_cb_common:\n'
-          # CFI: a C++ exception thrown by an arm64 callback (a qsort comparator) unwinds through this frame;
+          #  10-03 CFI: a C++ exception thrown by an arm64 callback (a qsort comparator) unwinds THROUGH this frame;
           #    without unwind info libunwind stops here and std::terminate runs.
           '  .cfi_startproc\n  pushq %rbp\n  .cfi_def_cfa_offset 16\n  .cfi_offset %rbp, -16\n  movq %rsp, %rbp\n'
           '  .cfi_def_cfa_register %rbp\n  subq $208, %rsp\n'
-          # rax is a swift caller's indirect-result pointer (arm64 x8); cb_prepare clobbers it, so it is kept at
+          #  10-20 rax is a SWIFT caller's indirect-result pointer (arm64 x8); cb_prepare clobbers it, so it is kept at
           #    176(%rsp) and handed to the door as its 8th integer argument. r12 (swifterror) and r13 (self) are
           #    callee-saved in C, so they reach the door untouched.
           '  movq %rax, 176(%rsp)\n'
-          # r14 is the swift ASYNC context of a native async caller (arm64 x22): kept at 184(%rsp) and handed to
+          #  10-21 r14 is the SWIFT ASYNC CONTEXT of a native async caller (arm64 x22): kept at 184(%rsp) and handed to
           #    the door as its 9th integer argument, for the same reason as rax above.
           '  movq %r14, 184(%rsp)\n'
           '  movq %rdi, 0(%rsp)\n  movq %rsi, 8(%rsp)\n  movq %rdx, 16(%rsp)\n  movq %rcx, 24(%rsp)\n  movq %r8, 32(%rsp)\n  movq %r9, 40(%rsp)\n'
           + ''.join(f'  movdqu %xmm{i}, {48 + 16 * i}(%rsp)\n' for i in range(8)) +
-          # a0 is already saved at 0(%rsp) above; hand it to cb_prepare so a trace can name the
+          #  10-11 a0 is already saved at 0(%rsp) above; hand it to cb_prepare so a trace can name the
           #    object the callback was entered with (the block pointer, for a block invoke).
           '  movl %r11d, %edi\n  movq 0(%rsp), %rsi\n  movq 184(%rsp), %rdx\n  movq %rbp, %rcx\n  callq ___arm2x86_cb_prepare\n  movq %rax, %r10\n  movq %rdx, 192(%rsp)\n'
           '  movq 0(%rsp), %rdi\n  movq 8(%rsp), %rsi\n  movq 16(%rsp), %rdx\n  movq 24(%rsp), %rcx\n  movq 32(%rsp), %r8\n  movq 40(%rsp), %r9\n'
           + ''.join(f'  movdqu {48 + 16 * i}(%rsp), %xmm{i}\n' for i in range(8)) +
           '  movq 176(%rsp), %rax\n  movq 184(%rsp), %r11\n  subq $32, %rsp\n  movq %r10, 0(%rsp)\n  movq %rax, 8(%rsp)\n'
           '  movq %r11, 16(%rsp)\n  callq ___arm2x86_cb_door\n'
-          # A swift ASYNC entry is swifttailcc: callee-pop. LLVM's swifttailcc passes its stack arguments (none, here) in
+          #  10-21 A SWIFT ASYNC ENTRY IS swifttailcc: CALLEE-POP. LLVM's swifttailcc passes its stack arguments (none, here) in
           #    an area rounded to 8 mod 16, so the callee returns with `retq $8` and its caller re-reserves the 8 bytes after the
           #    call (the native adapter's `subq $8, %rsp` after `call swifttailcc`, llc 22.1.8, checked). A native async function
           #    that tail-jumps here ends the whole chain in OUR `ret`: a plain retq left the runtime's frame 8 bytes off and it
@@ -362,11 +362,11 @@ extern unsigned long __arm_text_base, __arm_text_size;
 extern char __arm2x86_cb_slots[];
 __asm__(""" + '"' + (CB_ASM + CB_ASYNC_ASM).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n"\n"') + '"' + r""");
 static unsigned long cb_fn[""" + str(CB_SLOTS) + r"""]; static unsigned cb_n;
-/* 10-21 · 1 = the guest function behind this slot is entered with the swifttailcc convention (see cb_is_async) */
+/* 10-21 1 = the guest function behind this slot is entered with the swifttailcc convention (see cb_is_async) */
 static unsigned char cb_async[""" + str(CB_SLOTS) + r"""];
-/* 10-21 · IS THIS GUEST FUNCTION A SWIFT ASYNC ENTRY (swifttailcc: context in r14 = x22, callee-pop)? xlat2 lists them
+/* 10-21 IS THIS GUEST FUNCTION A SWIFT ASYNC ENTRY (swifttailcc: context in r14 = x22, callee-pop)? xlat2 lists them
    (abi_scan.async_entries: the functions that READ x22 on entry, plus pure forwarders to one) as a sorted table. A single-image
-   build has no table (weak): nothing is async there, as before. NOT "the function opens with `orr x29, x29, #0x1000...`":
+   build has no table (weak): nothing is async there, as before.  NOT "the function opens with `orr x29, x29, #0x1000...`":
    a frameless async function or resume point has no frame marker. */
 extern const unsigned long __arm2x86_async_entries[] __attribute__((weak_import));
 extern const unsigned long __arm2x86_async_entries_n __attribute__((weak_import));
@@ -376,7 +376,7 @@ static int cb_is_async(unsigned long fn) {
     while (lo < hi) { unsigned long mid = lo + (hi - lo) / 2; if (__arm2x86_async_entries[mid] < fn) lo = mid + 1; else hi = mid; }
     return lo < __arm2x86_async_entries_n && __arm2x86_async_entries[lo] == fn;
 }
-/* 10-18 · fn -> slot by open addressing (2x the pool, linear probe); WAS a linear scan under the lock, O(n) per call. */
+/* 10-18 fn -> slot by open addressing (2x the pool, linear probe); WAS a linear scan under the lock, O(n) per call. */
 static unsigned cb_tab[2 * """ + str(CB_SLOTS) + r"""];   /* slot index + 1; 0 = empty */
 static pthread_mutex_t cb_mu = PTHREAD_MUTEX_INITIALIZER;
 unsigned long __arm2x86_mapcls(unsigned long a);
@@ -441,7 +441,7 @@ void __arm2x86_cb_finish(void) {
 struct cb_prep { unsigned long fn, async; };
 struct cb_prep __arm2x86_cb_prepare(unsigned idx, unsigned long a0, unsigned long r14, unsigned long rbp_) {
     __arm2x86_ensure_stack();
-    /* 10-11 · DIAGNOSTIC: which trampoline native code entered, and with what first argument. For a block
+    /* 10-11 DIAGNOSTIC: which trampoline native code entered, and with what first argument. For a block
        invoke a0 is the block pointer, so a garbage a0 here says the caller handed us the wrong object rather
        than the translated body being wrong. getenv is cached: this runs on every callback. */
     static int tr = -1;
@@ -451,35 +451,35 @@ struct cb_prep __arm2x86_cb_prepare(unsigned idx, unsigned long a0, unsigned lon
     return (struct cb_prep){ cb_fn[idx], cb_async[idx] };   /* rax = the guest function, rdx = 1 for a swifttailcc entry */
 }
 """
-# The door is swiftcc, because native swift calls translated swift through it. macOS 27's ArgumentParser calls a
+#  10-20 THE DOOR IS swiftcc, BECAUSE NATIVE SWIFT CALLS TRANSLATED SWIFT THROUGH IT. macOS 27's ArgumentParser calls a
 #    command's witnesses (`configuration`, `run()`) through the trampoline with self in r13, the error in r12 and an
 #    indirect result in rax; a C door dropped all three, the translated witness forwarded garbage self back into native
 #    Swift and eslogger died at fault 0x10, xprotect at a null initializeWithCopy destination. Mapping both ways:
 #    rax (8th int, from cb_common) -> x8, r13 -> x20, r12 -> x21 into @__arm_xr (every lifted prologue loads them),
 #    and back x1-x3 -> rdx/rcx/r8, v1-v3 -> xmm1-3, x21 -> r12 (llc 22.1.8, checked: swiftself = r13, swifterror = r12
-#    in and out, 7th/8th ints on the stack, returns rax/rdx/rcx/r8 + xmm0-3).
-# A C caller is unchanged: rax/xmm0 are where it reads its result, rdx/rcx/r8/xmm1-3 are caller-saved, r13 is never
+#    in AND out, 7th/8th ints on the stack, returns rax/rdx/rcx/r8 + xmm0-3).
+#  A C CALLER IS UNCHANGED: rax/xmm0 are where it reads its result, rdx/rcx/r8/xmm1-3 are caller-saved, r13 is never
 #    written, and r12 comes back as the x21 the lifted callee was handed — which an on-contract callee preserves.
-# Both doors save and restore @__arm_xr, BECAUSE A CALLBACK IS REENTRANCY. @__arm_xr is one thread-local
-#    register file, and an off-contract guest function publishes XR_FULL_OUT (x1-x29 + v1-v31 + nzcv) into it on every
-#    return. So a native->guest callback that happens inside a guest->native call overwrites the file the outer guest
+#  10-21 BOTH DOORS SAVE AND RESTORE @__arm_xr, BECAUSE A CALLBACK IS REENTRANCY. @__arm_xr is ONE thread-local
+#    register file, and an OFF-CONTRACT guest function publishes XR_FULL_OUT (x1-x29 + v1-v31 + nzcv) into it on every
+#    return. So a native->guest callback that happens INSIDE a guest->native call overwrites the file the outer guest
 #    frame is still waiting to read back, and the outer frame continues with the callback's registers.
-#    Measured in macOS 27's WindowManager: `-[AppDelegate init]` reaches fn_1001a3d34, which does `mov x19, x20`
+#     MEASURED in macOS 27's WindowManager: `-[AppDelegate init]` reaches fn_1001a3d34, which does `mov x19, x20`
 #       (x20 = the object swift_allocObject just returned, traced as 0x6000023740c0 — correct) and then stores through
 #       x19 at `stp x26, x25, [x19, #0x10]`. Between the two there are five calls; x19 came back as 0x7ffc474d8868,
-#       which dladdr names `block_descriptor+0x108` in Gestures.framework's read-only __DATA_CONST, so the store was
+#       which dladdr names `block_descriptor+0x108` in Gestures.framework's READ-ONLY __DATA_CONST, so the store was
 #       SIGBUS (signal 10) at 0x7ffc474d8878 — and WindowManager is what Finder's first NSWindow waits on, so this is
 #       what kept the desktop off the screen.
-# The door carries the swift ASYNC context too: native async code calls (or tail-jumps to) a translated async
+#  10-21 THE DOOR CARRIES THE SWIFT ASYNC CONTEXT TOO: native async code calls (or tail-jumps to) a translated async
 #    function with the context in r14, which is arm64 x22. cb_common keeps r14 at 184(%rsp) and passes it as the door's 9th
-#    integer argument; the door stores it to the x22 slot. Was dropped: the Dock's `for await` crashed in a resume
-#    function that read [x22] off whatever the slot last held (asyncmx baseline on a Mac Pro running 27: SIGSEGV at fault address 0x10 inside the
+#    integer argument; the door stores it to the x22 slot.  WAS dropped: the Dock's `for await` crashed in a resume
+#    function that read [x22] off whatever the slot last held (asyncmx baseline on macpro27: SIGSEGV at fault address 0x10 inside the
 #    translated async-main code, fn_100001364, reading through an x22 it never received).
-#    imp_handler already applies this exact rule to __arm2x86_rf ("reentrancy"); @__arm_xr was simply never included.
-#       The save is 768 bytes of stack and one memcpy pair per callback, and it cannot lose anything: a callback is a
+#     imp_handler already applies this exact rule to __arm2x86_rf ("reentrancy"); @__arm_xr was simply never included.
+#       The save is 768 bytes of stack and one memcpy pair per callback, and it CANNOT lose anything: a callback is a
 #       fresh ABI boundary whose inputs the door sets explicitly (x8/x20/x21), and its outputs are read out of the file
-#       before the restore.
-# And they save and restore @__arm_sp. Inside a callback every internal call publishes the callee's lowered sp, and an
+#       BEFORE the restore.
+#  10-22 AND THEY SAVE AND RESTORE @__arm_sp. Inside a callback every internal call publishes the callee's LOWERED sp, and an
 #    on-contract function never republishes it on return, so the callback left @__arm_sp pointing into its own dead frame. An
 #    OFF-contract guest caller reloads sp from @__arm_sp after a full-file call (abi_ret's 10-21 rule), took that stale sp, and
 #    its epilogue `ldp x20, x19, [sp]` read x19 out of the dead callback frame. MenuBarAgent: fn_1002378d0's saved-x19 slot
@@ -496,7 +496,7 @@ CB_IR = ('\ndefine swiftcc ' + _CB_RET + ' @__arm2x86_cb_door('
          '  %gx8 = getelementptr inbounds i8, ptr @__arm_xr, i64 64\n  store i64 %x8, ptr %gx8\n'
          '  %selfi = ptrtoint ptr %self to i64\n'
          '  %gx20 = getelementptr inbounds i8, ptr @__arm_xr, i64 160\n  store i64 %selfi, ptr %gx20\n'
-         # r14 (cb_common's 9th argument) is the swift ASYNC context of a native async caller = arm64 x22
+         #  10-21 r14 (cb_common's 9th argument) is the SWIFT ASYNC CONTEXT of a native async caller = arm64 x22
          '  %gx22 = getelementptr inbounds i8, ptr @__arm_xr, i64 176\n  store i64 %x22, ptr %gx22\n'
          '  %errin = load ptr, ptr %err\n  %errini = ptrtoint ptr %errin to i64\n'
          '  %gx21 = getelementptr inbounds i8, ptr @__arm_xr, i64 168\n  store i64 %errini, ptr %gx21\n'
@@ -512,13 +512,13 @@ CB_IR = ('\ndefine swiftcc ' + _CB_RET + ' @__arm2x86_cb_door('
          + '  call void @llvm.memcpy.p0.p0.i64(ptr align 16 @__arm_xr, ptr align 16 %xrsav, i64 768, i1 false)\n'
          + '  store i64 %spsav, ptr @__arm_sp\n'
          + '  ret ' + _CB_RET + ' %o7\n}\n'
-         # rung 3b · the door a libffi-closure IMP enters translated code through: the register file in, x0/v0 out
+         #  rung 3b the door a libffi-closure IMP enters translated code through: the register file in, x0/v0 out
          '\ndefine void @__arm2x86_call_rf(i64 %t) {\n  %xrsav = alloca [96 x i64], align 16\n  %spsav = load i64, ptr @__arm_sp\n'
          '  %f = call ptr @__arm2x86_lookup(i64 %t)\n'
          '  call void @llvm.memcpy.p0.p0.i64(ptr align 16 %xrsav, ptr align 16 @__arm_xr, i64 768, i1 false)\n'
          + ''.join(f'  %gx{i} = getelementptr inbounds i8, ptr @__arm2x86_rf, i64 {8 * i}\n  %x{i} = load i64, ptr %gx{i}\n' for i in range(8))
          + ''.join(f'  %gv{j} = getelementptr inbounds i8, ptr @__arm2x86_rf, i64 {80 + 16 * j}\n  %v{j} = load <2 x i64>, ptr %gv{j}, align 16\n' for j in range(8))
-         # x8 (the sret buffer) goes in through @__arm_xr; x1 and v1-v3 come back from it (pairs, HFA up to 4)
+         #  10-03 x8 (the sret buffer) goes in through @__arm_xr; x1 and v1-v3 come back from it (pairs, HFA up to 4)
          + '  %gx8 = getelementptr inbounds i8, ptr @__arm2x86_rf, i64 64\n  %x8 = load i64, ptr %gx8\n'
            '  %xr8 = getelementptr inbounds i8, ptr @__arm_xr, i64 64\n  store i64 %x8, ptr %xr8\n'
          + '  %r = call { i64, <2 x i64> } %f(' + ', '.join([f'i64 %x{i}' for i in range(8)] + [f'<2 x i64> %v{j}' for j in range(8)]) + ')\n'
@@ -537,21 +537,21 @@ def sh(*a):
 
 
 def make_binds(stub_slot, slot_sym, objc_stub_sel, sig):
-    """rung 6: the import -> bind table, shared by xlat (one image) and xlat2 (a whole program). Unchanged body."""
+    """ rung 6: the import -> bind table, shared by xlat (one image) and xlat2 (a whole program). Unchanged body."""
     binds, thunks, unbound = {}, [], []
     RF = {'objc_msgSend': '__arm2x86_objc_msgSend', 'objc_msgSendSuper2': '__arm2x86_objc_msgSendSuper2'}
-    # rung 4: what the program asks about the machine answers like an Apple Silicon Mac (identity.c, mkidentity.py)
+    #  rung 4: what the program asks about the machine answers like an Apple Silicon Mac (identity.c, mkidentity.py)
     IDF = {'sysctlbyname', 'sysctl', 'sysctlnametomib', 'uname', 'getpagesize', 'sysconf', 'mmap', 'munmap', 'mprotect', 'madvise',
-           'thread_policy_set'}   # 10-05 page + affinity parity (identity.c)
+           'thread_policy_set'}   #  10-05 page + affinity parity (identity.c)
     for st_, sref in objc_stub_sel.items():
         binds[st_] = {'sym': '__arm2x86_objc_msgSend', 'argc': 0, 'args': '', 'ret': 'void', 'rf': 1, 'va': 1, 'selref': sref}
     for stub, slot in sorted(stub_slot.items()):
         sym = slot_sym.get(slot)
         if not sym: unbound.append(f'0x{stub:x}:no-bind'); continue
         c = sym[1:] if sym.startswith('_') else sym
-        if c in RF:   # rung 3: a message send has no fixed signature — the whole register file goes to the bridge
+        if c in RF:   #  rung 3: a message send has no fixed signature — the whole register file goes to the bridge
             binds[stub] = {'sym': RF[c], 'argc': 0, 'args': '', 'ret': 'void', 'rf': 1, 'va': 1}; continue
-        if c in XARGCB:   # a callback behind an argument sigdb cannot type — see XARGCB
+        if c in XARGCB:   #  10-10 a callback behind an argument sigdb cannot type — see XARGCB
             n_, ret_, body_ = XARGCB[c]
             tn = f'__arm2x86_fpx_{c}'
             thunks.append(body_.replace('@T@', tn))
@@ -560,9 +560,9 @@ def make_binds(stub_slot, slot_sym, objc_stub_sel, sig):
             continue
         s = sig.get(c)
         if not s or s['ret'] == 'x' or 'x' in s['args']:
-            # An UNTYPEABLE argument plus A CALLBACK ARGUMENT IS A guaranteed crash, and it was silent.
+            #  10-10 AN UNTYPEABLE ARGUMENT PLUS A CALLBACK ARGUMENT IS A GUARANTEED CRASH, AND IT WAS SILENT.
             #    'x' (struct by value, long double, block, _Float16) leaves the import unbound, so its call goes through
-            #    the generic x0-x7 adapter — which passes the arm64 function pointer straight through instead of
+            #    the generic x0-x7 adapter — which passes the arm64 function pointer STRAIGHT THROUGH instead of
             #    swapping it for a trampoline. Native code then jumps into raw arm64 bytes. Measured: macOS 27's
             #    opendirectoryd handed ___fixup_schema4 to CFArrayApplyFunction (args 'ixii', the 'x' is a 16-byte
             #    CFRange) and died SIGBUS executing 0x10005b40c, a guest address. Say it out loud; never swallow it.
@@ -572,10 +572,10 @@ def make_binds(stub_slot, slot_sym, objc_stub_sel, sig):
                 unbound.append(sym)
             continue
         b = {'sym': f'__arm2x86_id_{c}' if c in IDF else c, 'argc': s['argc'], 'args': s['args'], 'ret': s['ret'], 'cache': sym,
-             'cret': s.get('cret'),   # a bool/char/short return is narrowed + extended (arm2x86.NARROW_RET)
-             'sizes': s.get('sizes'),   # rung 6: natural sizes, for arguments past x7/v7 (read off the arm64 stack)
-             'valist': [i for i, t in enumerate(s.get('ctypes') or []) if '__va_list_tag' in (t or '')]}   # 10-03 see va_conv
-        if c == '__cxa_atexit':   # rung 6: unbounded, not through the 2,048-slot pool (objc_bridge.c __arm2x86_cxa_atexit)
+             'cret': s.get('cret'),   #  10-05 a bool/char/short return is narrowed + extended (arm2x86.NARROW_RET)
+             'sizes': s.get('sizes'),   #  rung 6: natural sizes, for arguments past x7/v7 (read off the arm64 stack)
+             'valist': [i for i, t in enumerate(s.get('ctypes') or []) if '__va_list_tag' in (t or '')]}   #  10-03 see va_conv
+        if c == '__cxa_atexit':   #  rung 6: unbounded, NOT through the 2,048-slot pool (objc_bridge.c __arm2x86_cxa_atexit)
             b.update({'sym': '__arm2x86_cxa_atexit', 'va': 1}); binds[stub] = b; continue
         if s['va']:
             names = [f'a{i}' for i in range(s['argc'])]
@@ -592,15 +592,15 @@ def make_binds(stub_slot, slot_sym, objc_stub_sel, sig):
             thunks.append(f'{s["cret"]} {tn}({proto}) {{ {body} }}')
             b.update({'sym': tn, 'va': 1})
         elif c.startswith(('objc_', 'class_', 'object_')) and s['argc'] and 'd' not in s['args'] and 'f' not in s['args']:
-            # rung 3b: the runtime's C entry points get every pointer argument class-mapped (an ARM class address
+            #  rung 3b: the runtime's C entry points get every pointer argument class-mapped (an ARM class address
             #    -> the native class); anything else passes through untouched.
             names = [f'a{i}' for i in range(s['argc'])]
             proto = ', '.join(f'unsigned long {n}' for n in names)
             call = ', '.join(f'({t})__arm2x86_mapcls({n})' for t, n in zip(s['ctypes'], names))
             tn = f'__arm2x86_oc_{c}'
-            # objc_retainBlock copies the block inside libobjc, where no override can see it, so the block's
+            #  10-17 objc_retainBlock copies the block INSIDE libobjc, where no override can see it, so the block's
             #    invoke and copy/dispose helpers are wrapped first (objc_bridge.c). Measured: SIGBUS in the arm64
-            #    ___copy_helper_block_e8_32r from native _Block_copy, slice/objc1.m on a test machine.
+            #    ___copy_helper_block_e8_32r from native _Block_copy, slice/objc1.m.
             callee = '__arm2x86_objc_retainBlock' if c == 'objc_retainBlock' else c
             if callee != c: thunks.append(f'extern {s["cret"]} {callee}({", ".join(s["ctypes"]) or "void"});')
             if s.get('abi'):   # a runtime ABI function no public header declares: its prototype comes from sigdb
@@ -608,9 +608,9 @@ def make_binds(stub_slot, slot_sym, objc_stub_sel, sig):
             thunks.append(f'{s["cret"]} {tn}({proto}) {{ {"" if s["cret"] == "void" else "return "}{callee}({call}); }}')
             b['sym'] = tn
         elif s.get('fnp') or s.get('blk'):
-            # rung 2: native code will call these parameters — swap each arm64 function address for a trampoline.
+            #  rung 2: native code will CALL these parameters — swap each arm64 function address for a trampoline.
             names = [f'a{i}' for i in range(s['argc'])]
-            # a function-pointer declarator puts the name inside the parens; the thunk never uses the arm64 value's type,
+            #  a function-pointer declarator puts the NAME inside the parens; the thunk never uses the arm64 value's type,
             #    so those parameters are plain unsigned long and get their real type only in the cast at the call.
             cbp = set(s['fnp']) | set(s.get('blk', []))
             proto = ', '.join(('unsigned long' if i in cbp else t) + f' {n}' for i, (t, n) in enumerate(zip(s['ctypes'], names)))
@@ -618,25 +618,25 @@ def make_binds(stub_slot, slot_sym, objc_stub_sel, sig):
                              f'({s["ctypes"][i]})__arm2x86_blk((void *){n})' if i in s.get('blk', []) else n
                              for i, n in enumerate(names))
             tn = f'__arm2x86_fp_{c}'
-            if s.get('abi'):   # rung 6: an ABI function no public header declares (__cxa_atexit, _tlv_atexit)
+            if s.get('abi'):   #  rung 6: an ABI function no public header declares (__cxa_atexit, _tlv_atexit)
                 thunks.append(f'extern {s["cret"]} {c}({", ".join(s["ctypes"]) or "void"});')
-            cc = {'pthread_create': '__arm2x86_pthread_create'}.get(c, c)   # shim: altstack + stack scaling
+            cc = {'pthread_create': '__arm2x86_pthread_create'}.get(c, c)   #  10-03 shim: altstack + stack scaling
             if cc != c: thunks.append(f'extern {s["cret"]} {cc}({", ".join(s["ctypes"])});')
             thunks.append(f'{s["cret"]} {tn}({proto}) {{ {"" if s["cret"] == "void" else "return "}{cc}({call}); }}')
             b['sym'] = tn
-        # rung 2: every import call publishes the arm64 sp. Any native call can run a callback registered earlier
-        #    (exit() runs atexit handlers, qsort runs the comparator); a callback entering translated code with a stale
+        #  rung 2: EVERY import call publishes the arm64 sp. Any native call can run a callback registered earlier
+        #    (exit() runs atexit handlers, qsort runs the comparator); a callback entering translated code with a STALE
         #    @__arm_sp would build its frame on top of its caller's live one. One TLS store per import call.
         b['va'] = 1
         binds[stub] = b
-    # Say the dangerous ones out loud. An import whose callback could not be wrapped will make native code
+    #  10-10 SAY THE DANGEROUS ONES OUT LOUD. An import whose callback could not be wrapped will make native code
     #    jump into raw arm64 bytes the first time it is invoked — a SIGBUS at a guest address, with nothing in the log
     #    to connect it to this import. It went unprinted once and cost a boot (opendirectoryd, CFArrayApplyFunction).
     cbu = sorted({u.split(':')[0] for u in unbound if 'CALLBACK-UNWRAPPED' in u})
     if cbu:
-        print(f'callbacks NOT wrapped ({len(cbu)}): native code will jump into arm64 bytes if these are called — '
+        print(f' callbacks NOT wrapped ({len(cbu)}): native code will jump into arm64 bytes if these are called — '
               + ', '.join(cbu))
-    # rung 6 (10-03, l6 ruler): one thunk per stub — two images importing printf defined __arm2x86_va_printf twice
+    #  rung 6 (10-03, l6 ruler): one thunk per STUB — two images importing printf defined __arm2x86_va_printf twice
     #    and the link refused. Same symbol, same text: keep the first, in order.
     return binds, list(dict.fromkeys(thunks)), unbound
 
@@ -678,7 +678,7 @@ def main(exe, out, cpu='x86-64-v3'):
             off = re.search(r'#(0x[0-9a-f]+|\d+)\]', rest)
             stub_slot[cur[0]] = cur[1] + (int(off.group(1), 0) if off else 0); cur = None
     # --- __objc_stubs: `adrp x1,P ; ldr x1,[x1,#o] ; (adrp x16,Q ; ldr x16,[x16,#o2] ; br x16 | b objc_msgSend)` ----
-    #    rung 3: modern clang emits each message send as a call to one of these. Each becomes a full-register bind
+    #     rung 3: modern clang emits each message send as a call to one of these. Each becomes a FULL-REGISTER bind
     #    to the ObjC bridge that loads x1 from its selector reference first.
     objc_stub_sel, cur = {}, None
     try:
@@ -704,7 +704,7 @@ def main(exe, out, cpu='x86-64-v3'):
         a, kind, t = int(m.group(1), 16), m.group(2), m.group(3)
         if 'rebase' in kind: recs.append((a, int(t, 16)))
         else:
-            slot_sym[a] = t.split('/', 1)[1]; recs.append((a, 0))   # 0, never raw chained bits; main.c writes the native
+            slot_sym[a] = t.split('/', 1)[1]; recs.append((a, 0))   #  0, never raw chained bits; main.c writes the native
     assert len(recs) == nrows, 'unparsed fixup rows'
     fxp = os.path.join(out, 'fixups.bin')
     with open(fxp + '.tmp', 'wb') as f:
@@ -728,7 +728,7 @@ def main(exe, out, cpu='x86-64-v3'):
     print(f'lifted {len(specs)} functions -> {ll} ({len(mod)} bytes)')
 
     # --- host main ------------------------------------------------------------------------------------------------------
-    # rung 4: the page-size data imports point at identity.c's 16 KB values, not the kernel's 4 KB ones
+    #  rung 4: the page-size DATA imports point at identity.c's 16 KB values, not the kernel's 4 KB ones
     IDD = {'vm_page_size', 'vm_page_mask', 'vm_page_shift'}
     slots = ',\n'.join(f'  {{0x{a:x}UL, "{("__arm2x86_id_" if s.lstrip("_") in IDD and s.startswith("_") else "") + (s[1:] if s.startswith("_") else s)}"}}'
                        for a, s in sorted(slot_sym.items()))
@@ -738,7 +738,7 @@ def main(exe, out, cpu='x86-64-v3'):
     for nm in ('__objc_classlist', '__objc_catlist', '__objc_classrefs', '__objc_superrefs'):
         mm = re.search(rf'sectname {nm}\s+segname \S+\s+addr (0x[0-9a-f]+)\s+size (0x[0-9a-f]+)', lc)
         osec[nm] = (int(mm.group(1), 16), int(mm.group(2), 16)) if mm else (0, 0)
-    umbrella = open(os.path.join(S, 'sigdb_umbrella.c')).read()   # the same declarations sigdb read, so every thunk compiles
+    umbrella = open(os.path.join(S, 'sigdb_umbrella.c')).read()   # the SAME declarations sigdb read, so every thunk compiles
     mainc = f'''/* generated by xlat.py for {os.path.basename(exe)} — do not edit */
 {umbrella}
 #include <stdio.h>
@@ -796,7 +796,7 @@ int main(int argc, char **argv, char **envp, char **apple) {{
     exit((int)rc);
 }}
 '''
-    # L1 self-contained: the fixups ride inside the host; a constructor that runs before the loader's (priority 101)
+    #  L1 self-contained: the fixups ride inside the host; a constructor that runs BEFORE the loader's (priority 101)
     #    points ARM_IMAGE at this file's own arm64 slice. Finder gives a program no environment, so nothing may need one.
     blob = ', '.join([f'0x{len(recs):x}ULL'] + [f'0x{a:x}ULL, 0x{v:x}ULL' for a, v in recs])
     mainc += f'''
@@ -824,7 +824,7 @@ __attribute__((constructor(101))) static void xlat_self(void) {{
 }}
 '''
     mp = os.path.join(out, 'main.c'); open(mp, 'w').write(mainc)
-    with open(ll, 'a') as f: f.write(CB_IR)   # the IR door native trampolines enter translated code through
+    with open(ll, 'a') as f: f.write(CB_IR)   #  the IR door native trampolines enter translated code through
 
     # --- compile + link -------------------------------------------------------------------------------------------------
     base = os.path.join(out, 'all')
@@ -834,7 +834,7 @@ __attribute__((constructor(101))) static void xlat_self(void) {{
                    f'{base}_opt.bc', '-o', f'{base}.o'],)):
         subprocess.run(args[0], check=True)
     xe = os.path.join(out, os.path.basename(exe) + '.x86')
-    # rung 5: a framework the program links but this list lacked (MetalFX) left its classes' slots 0 and every message
+    #  rung 5: a framework the program links but this list lacked (MetalFX) left its classes' slots 0 and every message
     #    to them answered nil/NO. Link EVERY framework the arm64 image names in its load commands.
     linkfw = []
     for fw in re.findall(r'name /System/Library/Frameworks/(\w+)\.framework/\S+ \(offset', lc):

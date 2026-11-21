@@ -1,12 +1,12 @@
 /* ls_gate.c — the host lets LaunchServices accept arm64/arm64e apps on this x86_64 machine, inside every process.
- * reuses: the earlier standalone LaunchServices fix — the same three sites and fixes, byte for byte, and its exactly-once rule;
+ * reuses: interp/lsgate/a2xlsfix.c (10-28/10-30) — the same three sites and fixes, byte for byte, and its exactly-once rule;
  *   ws_quartz.c's arming pattern (_dyld_register_func_for_add_image, which replays images already loaded).
- * new-because: Apple's lsd / CoreServicesUIAgent plists stay unmodified, so no dylib can be inserted with DYLD_INSERT.
- *   The host is already the x86_64 slice of every one of those processes, so the patch lives here. Without it, every
- *   Dock icon carries the prohibitory badge —
+ * new-because (11-02 1102i): the stock-27 bench may not edit Apple's lsd / CoreServicesUIAgent plists to DYLD_INSERT a dylib
+ *   (every Apple file stays stock). The host is already the x86_64 slice of every one of those processes, so the
+ *   patch lives here. Measured on the first stock-27 desktop (host 1102h): every Dock icon carries the prohibitory badge —
  *   LaunchServices' _LSBundleDataGetUnsupportedFormatFlag asks for an x86_64 slice and an arm64e-only app has none.
- * Patch 1 gate: the movabs $0xffffffff01000007 (x86_64, any subtype) request becomes -1/-1 = "any slice".
- * Patch 2/3 mask (lsd): _LSSliceMaskForSliceArray's arm64 (0x80) and arm64e (0x100) arms also set x86_64's 0x8, so the
+ *  PATCH 1 gate: the movabs $0xffffffff01000007 (x86_64, any subtype) request becomes -1/-1 = "any slice".
+ *  PATCH 2/3 mask (lsd): _LSSliceMaskForSliceArray's arm64 (0x80) and arm64e (0x100) arms also set x86_64's 0x8, so the
  *   database itself says this host can run them and every client agrees.
  * Each site must match exactly once in LaunchServices __TEXT or nothing changes for it and it says so. A2X_LSGATE=0 = off.
  */
@@ -26,7 +26,7 @@ static const unsigned char LSG_M64[] = {0x85,0xc0, 0x0f,0x85,0x27,0x01,0x00,0x00
 static const unsigned char LSG_M64_FIX[] = {0x88};
 static const unsigned char LSG_M64E[] = {0x41,0x83,0xcf,0x08, 0xeb,0x43, 0x41,0x81,0xcf,0x00,0x01,0x00,0x00, 0xeb,0x3a, 0x41,0x81,0xcf,0x00,0x80,0x00,0x00};
 static const unsigned char LSG_M64E_FIX[] = {0x08};
-/* 27.2 moved both arms. Read from the 27.2 image: subtype 2 (arm64e) falls into or r15d,0x100 after its jne; subtype 0
+/* 11-05 27.2 moved both arms. Read from the live 27.2 image: subtype 2 (arm64e) falls into or r15d,0x100 after its jne; subtype 0
  * (arm64) je lands on or r15d,0x80 inside the arm list (0x8 / 0x8000 / 0x80). Same fix, new anchors, 27.0 anchors kept. */
 static const unsigned char LSG_M64_272[] = {0x41,0x83,0xcf,0x08, 0xeb,0x4c, 0x41,0x81,0xcf,0x00,0x80,0x00,0x00, 0xeb,0x43, 0x41,0x81,0xcf,0x80,0x00,0x00,0x00, 0xeb,0x3a};
 static const unsigned char LSG_M64E_272[] = {0x83,0xf8,0x02, 0x0f,0x85,0x46,0x01,0x00,0x00, 0x41,0x81,0xcf,0x00,0x01,0x00,0x00, 0xe9,0x3a,0x01,0x00,0x00};
@@ -41,9 +41,9 @@ static volatile int lsg_done, lsg_loud;
 static const char *lsg_self = "?";
 
 #define LSG_N (sizeof LSG / sizeof LSG[0])
-/* One pass over __TEXT counts every site and keeps its last hit. Scanning the whole of LaunchServices once per
- * question (7 passes on 27.2) in every guest process cost 7.3 ms of a 21 ms route launch (native true: 3.4 ms),
- * measured over 100 launches of a true route on macOS 27.2. */
+/* ONE pass over __TEXT counts every site and keeps its last hit. 11-19: the old code scanned the whole of
+ * LaunchServices once per question (7 passes on 27.2) in every guest process: 7.3 ms of a 21 ms route launch
+ * (native true = 3.4 ms), measured with dtrace over 100 launches of a true route on the 27.2 PC. */
 static void lsg_census(const unsigned char *text, uint64_t tsize, int cnt[LSG_N], unsigned char *last[LSG_N]) {
     for (size_t k = 0; k < LSG_N; k++) { cnt[k] = 0; last[k] = 0; }
     const unsigned char *end = text + tsize;
@@ -125,7 +125,7 @@ static void lsg_added(const struct mach_header *mh, intptr_t slide) {
         int cnt[LSG_N]; unsigned char *last[LSG_N];
         if (!lsg_known((const unsigned char *)ls, tsize, cnt, last)) lsg_census((const unsigned char *)ls, tsize, cnt, last);
         for (size_t k = 0; k < LSG_N; k++) {
-            /* a site with a newer-build alternate is tried only if present, so one refused line means no build matched */
+            /* a site with a newer-build alternate is tried only if present, so one REFUSED line means no build matched */
             if (k + 1 < LSG_N && LSG[k + 1].alt && !LSG[k].alt && !cnt[k]) continue;
             if (LSG[k].alt && cnt[k - 1] == 1) continue;
             lsg_patch_at(last[k], cnt[k], &LSG[k], 0);
@@ -140,8 +140,8 @@ void a2x_lsgate_arm(const char *gpath) {
     const char *b = gpath ? strrchr(gpath, '/') : 0;
     lsg_self = b ? b + 1 : (gpath ? gpath : "?");
     lsg_loud = !strcmp(lsg_self, "lsd") || !strcmp(lsg_self, "CoreServicesUIAgent");
-    /* Arming only CoreServicesUIAgent gives 1 patch there, and whole-__TEXT scans refused in every other process (xpcproxy 2,300+ in 30 min) */
-    /* Dock and other LaunchServices clients evaluate the gate too; arming only two processes brings the crossed icons back. xpcproxy never needs it. */
+    /* 11-05: r14d boot: 1 patch, in CoreServicesUIAgent, and two whole-__TEXT scans refused in every other process (xpcproxy 2,300+ in 30 min) */
+    /* 11-05 r14g: Dock and other LaunchServices clients evaluate the gate too; r14d arming only two processes brought the crossed icons back. xpcproxy never needs it. */
     if (!strcmp(lsg_self, "xpcproxy")) return;
     _dyld_register_func_for_add_image(lsg_added);
 }
@@ -188,7 +188,7 @@ int main(void) {
 }
 #endif
 #ifdef LSG_SELFTEST
-/* named arms, both directions: a site present once is patched to the exact fix; twice or never is refused unchanged. */
+/* named arms, both directions: a site present once is patched to the exact fix; twice or never is REFUSED unchanged. */
 static int arm(const char *name, int copies, int want) {
     static unsigned char buf[1 << 16];
     memset(buf, 0x90, sizeof buf);
@@ -204,9 +204,9 @@ static int arm(const char *name, int copies, int want) {
 }
 int main(void) {
     int f = 0;
-    f += !arm("a gate site present ONCE is patched to any-slice, surrounding bytes untouched", 1, 1);
-    f += !arm("a gate site present TWICE is refused and nothing changes", 2, 0);
-    f += !arm("a LaunchServices with NO gate site is refused and nothing changes", 0, 0);
+    f += !arm(" a gate site present ONCE is patched to any-slice, surrounding bytes untouched", 1, 1);
+    f += !arm(" a gate site present TWICE is refused and nothing changes", 2, 0);
+    f += !arm(" a LaunchServices with NO gate site is refused and nothing changes", 0, 0);
     {   /* both 27.2 arms land on the immediate byte: 0x80 becomes 0x88, 0x100 becomes 0x108, neighbours untouched */
         static unsigned char b[4096];
         for (int w = 0; w < 2; w++) {
@@ -214,7 +214,7 @@ int main(void) {
             memset(b, 0x90, sizeof b); memcpy(b + 64, pt->site, pt->n);
             int r = lsg_apply(b, sizeof b, pt, 1);
             int ok = r == 1 && (w ? (b[64 + 12] == 0x08 && b[64 + 13] == 0x01 && b[64 + 11] == 0xcf) : (b[64 + 18] == 0x88 && b[64 + 19] == 0 && b[64 + 17] == 0xcf));
-            printf("%s %s\n", ok ? "ok  " : "FAIL", w ? "27.2 arm64e arm becomes or r15d,0x108" : "27.2 arm64 arm becomes or r15d,0x88");
+            printf("%s %s\n", ok ? "ok  " : "FAIL", w ? " 27.2 arm64e arm becomes or r15d,0x108" : " 27.2 arm64 arm becomes or r15d,0x88");
             f += !ok;
         }
         f += !(LSG[2].alt == 1 && LSG[4].alt == 1 && !LSG[1].alt && !LSG[3].alt);
@@ -231,13 +231,13 @@ int main(void) {
         lsg_census(img, sizeof img, c1, l1);
         int r = lsg_known_in(&t, 1, img, sizeof img, c2, l2);
         int same = r == 1 && !memcmp(c1, c2, sizeof c1) && !memcmp(l1, l2, sizeof l1);
-        printf("%s a known build answers exactly what the full census answers (r=%d)\n", same ? "ok  " : "FAIL", r); f += !same;
+        printf("%s  a known build answers exactly what the full census answers (r=%d)\n", same ? "ok  " : "FAIL", r); f += !same;
         img[0x3000 + 3] ^= 1;
         r = lsg_known_in(&t, 1, img, sizeof img, c2, l2);
-        printf("%s one changed byte at a known site falls back to the census (r=%d)\n", r == 0 ? "ok  " : "FAIL", r); f += r != 0;
+        printf("%s  one changed byte at a known site falls back to the census (r=%d)\n", r == 0 ? "ok  " : "FAIL", r); f += r != 0;
         img[0x3000 + 3] ^= 1; uc->uuid[0] ^= 1;
         r = lsg_known_in(&t, 1, img, sizeof img, c2, l2);
-        printf("%s an unknown UUID falls back to the census (r=%d)\n", r == 0 ? "ok  " : "FAIL", r); f += r != 0;
+        printf("%s  an unknown UUID falls back to the census (r=%d)\n", r == 0 ? "ok  " : "FAIL", r); f += r != 0;
     }
     printf("%d failed\n", f);
     return f != 0;

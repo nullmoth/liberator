@@ -2,17 +2,17 @@
  *
  * WHY: macOS 27.2 ships kernelmanagerd for Apple silicon only. On Apple silicon the bootloader maps the auxiliary
  * kernel collection, so kernelmanagerd's first "loadfilesetkc" request names only the pageable (System) collection.
- * On Intel nothing else loads the auxiliary collection: an Intel kernelmanagerd names both in that first request.
- * The kernel accepts the auxiliary collection only in that first request of a boot: OSKext::loadFileSetKexts
+ * On Intel nothing else loads the auxiliary collection: an Intel kernelmanagerd names BOTH in that first request.
+ * The kernel accepts the auxiliary collection ONLY in that first request of a boot: OSKext::loadFileSetKexts
  * (27.2 KDK 0xffffff8000989540) gates the AuxKCName branch on a flag that is cleared once the pageable collection
  * has been loaded, logs "KextLog: Ignoring AuxKC load from %s" and returns kOSKextReturnUnsupported (0xdc008009)
- * for any later request (a separate aux-only request returns exactly 0xdc008009).
- * Without this, the kernel log shows "Loading FileSet KC(s)" -> "Loading Pageable KC from file
+ * for any later request (measured on the box 11-06: a separate aux-only request returned exactly 0xdc008009).
+ * Measured on the box 11-06 with the GPU up: "Loading FileSet KC(s)" -> "Loading Pageable KC from file
  * …SystemKernelExtensions.kc" and never "Loading Aux KC from file …", so every kext in
- * /Library/KernelCollections/AuxiliaryKernelExtensions.kc stays unloaded.
+ * /Library/KernelCollections/AuxiliaryKernelExtensions.kc stayed unloaded.
  *
- * What: the host exports kext_request; a guest's libSystem import binds here (the host answering the flat lookup is
- * deliberate, host.c a2x_flat_is_deliberate). Every request passes through unchanged except an XML "loadfilesetkc"
+ * WHAT: the host exports kext_request; a guest's libSystem import binds here (the host answering the flat lookup is
+ * deliberate, host.c a2x_flat_is_deliberate). Every request passes through unchanged EXCEPT an XML "loadfilesetkc"
  * request that names PageableKCName and no AuxKCName while the auxiliary collection file exists: that one gets
  * AuxKCName added, which is the request an Intel kernelmanagerd sends. The kernel still does every check itself
  * (the collection must be linked against the running boot collection), so this never builds, rewrites or deletes
@@ -65,10 +65,10 @@ static int __attribute__((unused)) kreq_aux_present(void)
 
 /* MissingAuxKCBundles — the kernel's own definition (xnu kext_request_keys.h): "kexts which have been removed from
  * disk, but still exist in the AuxKC"; OSKext::isLoadable refuses to match any ID on that list. An Intel
- * kernelmanagerd lists an ID only when its bundle is gone from /Library/Extensions. The interpreted Apple-silicon
- * kernelmanagerd sends this request (the string is in its 27.2 binary), and with it the aux kexts never
- * auto-load, although their bundles are on disk and a direct LoadFromKC loads each one. So an
- * ID whose bundle is on disk is dropped from the list; an ID whose bundle is really gone stays listed. */
+ * kernelmanagerd lists an ID only when its bundle is gone from /Library/Extensions. Measured 11-06 on the box: the
+ * interpreted Apple-silicon kernelmanagerd sends this request (the string is in its 27.2 binary) and the four aux
+ * NVIDIA kexts never auto-loaded, although their bundles are on disk and a direct LoadFromKC loaded each one. So an
+ * ID whose bundle IS on disk is dropped from the list; an ID whose bundle is really gone stays listed. */
 typedef int (*kreq_on_disk_fn)(const char *bundle_id);
 
 static char *kreq_filter_missing(const char *req, size_t len, kreq_on_disk_fn on_disk, size_t *out_len, int *dropped)
@@ -104,25 +104,25 @@ static char *kreq_filter_missing(const char *req, size_t len, kreq_on_disk_fn on
     return o;
 }
 
-/* Explicit-load kexts in the auxiliary collection.
- * WHY: the aux collection loads (dmesg "Loading Aux KC from file", kern.auxiliaryfilesetuuid is set) yet none
- * of its kexts ever loads by matching, and the kernel log shows no attempt. Cause, read from the collection
+/* EXPLICIT-LOAD KEXTS IN THE AUXILIARY COLLECTION (rev-auxmatch 11-06).
+ * WHY: the aux collection loads (dmesg "Loading Aux KC from file", kern.auxiliaryfilesetuuid 6A2F45EA…) yet none
+ * of its four kexts ever loads by matching, and the kernel log shows no attempt. Cause, read from the collection
  * and the 27.2 kernel, not guessed:
- *  - kmutil writes OSBundleRequireExplicitLoad=<true/> into the prelink info of the aux kexts (__PRELINK_INFO
- *    carries it for each one; their source Info.plists do not).
+ *  - kmutil wrote OSBundleRequireExplicitLoad=<true/> into the prelink info of ALL FOUR kexts (aux KC 6A2F45EA,
+ *    __PRELINK_INFO: NMXAudio, NVAccel, NVRMAGDC, NVRMFB each carry it; their source Info.plists do not).
  *  - OSKext::initWithPrelinkedInfoDict turns that key into flags.requireExplicitLoad, and
- *    OSKext::copyAllKextPersonalities (27.2 KDK 0xffffff800098a659: testb $0x40,0x81(%r12)) skips that kext's
+ *    OSKext::copyAllKextPersonalities (27.2 KDK 0xffffff800098a659: testb $0x40,0x81(%r12)) SKIPS that kext's
  *    personalities, logging "requires an explicit kextload; omitting its personalities" at DEBUG level (0x27),
  *    which no saved log shows. So sendAllKextPersonalitiesToCatalog(true), which loadFileSetKexts does run,
- *    sends none of them to the IOCatalogue: nothing can match, so nothing is ever asked to load.
+ *    sends nothing of ours to the IOCatalogue: nothing can match, so nothing is ever asked to load.
  *  - A "LoadFromKC" request goes OSKext::loadKextFromKC -> load() -> sendPersonalitiesToCatalog(true), which
- *    copies the kext's own personalities with no explicit-load filter: that is why a direct LoadFromKC loads
- *    each kext and it then matches at once.
- * What: the explicit load is the kernel's documented contract for such a kext, and "LoadFromKC" is the request
+ *    copies the kext's own personalities with no explicit-load filter: that is why a direct LoadFromKC loaded
+ *    each kext and it then matched at once (measured on the box 11-06).
+ * WHAT: the explicit load is the kernel's documented contract for such a kext, and "LoadFromKC" is the request
  * `kmutil load -b <id>` makes kernelmanagerd send. Right after the first loadfilesetkc (the one we add AuxKCName
  * to) succeeds, send one LoadFromKC per aux kext that carries OSBundleRequireExplicitLoad=true, read from the
  * collection file itself (O_RDONLY). A kext without the key is left to matching, as Apple would.
- * Not done here: rewriting the collection to drop the key (the kernel never re-reads it, and this file never
+ *  Not done here: rewriting the collection to drop the key (the kernel never re-reads it, and this file never
  * builds, rewrites or deletes a collection). */
 #define KREQ_ID_MAX   128
 #define KREQ_IDS_MAX  16
@@ -147,7 +147,7 @@ static int kreq_id_ok(const char *s, size_t n)
 }
 
 /* Pure: from prelink-info XML, the CFBundleIdentifier of every kext dict directly inside _PrelinkInfoDictionary
- * whose own (depth-1) keys hold OSBundleRequireExplicitLoad=<true/>. Personality dicts are depth 2+, so their
+ * whose OWN (depth-1) keys hold OSBundleRequireExplicitLoad=<true/>. Personality dicts are depth 2+, so their
  * CFBundleIdentifier / publisher keys are never taken for the kext's. Returns the count, or -1 when the XML has
  * no _PrelinkInfoDictionary array (the caller then says so; it never reads that as "nothing to load"). */
 static int kreq_explicit_ids(const char *x, size_t len, char ids[][KREQ_ID_MAX], int max)
@@ -219,7 +219,7 @@ static int kreq_should_load_explicit(int added_aux, kern_return_t kr, int have_o
 }
 
 /* Pure: is `id` one whole line of `list`? The bring-up skip list holds kexts that must stay unloaded for now
- * (for example a kext whose restart path is not yet proven). Whole-line match only,
+ * (11-06: NVAccel panics a restart until the getVRAMRange window fix is proven on a boot). Whole-line match only,
  * so "com.nullmoth.NVRMFB" never skips "com.nullmoth.NVRMFBx" or the reverse. */
 static int kreq_id_skipped(const char *list, const char *id)
 {
@@ -273,7 +273,7 @@ static void kreq_log(const char *what, const char *req, size_t len, kern_return_
 #if A2X_SHIP
     (void)what; (void)req; (void)len; (void)kr; (void)op;     /* the request log is a lab diagnostic */
 #else
-    int fd = open("/var/tmp/a2x-reports/kext_request.log", O_WRONLY | O_CREAT | O_APPEND, 0600);
+    int fd = open("/var/tmp/a2x-reports/kext_request.log", O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
     if (fd < 0) return;
     if (lseek(fd, 0, SEEK_END) > (256 << 10)) { ftruncate(fd, 0); }
     char line[700];
@@ -431,7 +431,7 @@ int main(void)
         "</array><key>_PageableKCID</key><data>AA==</data></dict>";
     int ne = kreq_explicit_ids(pl, strlen(pl) + 1, ids, KREQ_IDS_MAX);
     why = ne >= 1 ? ids[0] : "(none)";
-    ARM("only kexts whose OWN dict says OSBundleRequireExplicitLoad=true are listed (Explicit, Second, in order)",
+    ARM(" only kexts whose OWN dict says OSBundleRequireExplicitLoad=true are listed (Explicit, Second, in order)",
         ne == 2 && !strcmp(ids[0], "com.x.Explicit") && !strcmp(ids[1], "com.x.Second"));
     why = "a nested personality key leaked into the kext's";
     int leak = 0; for (int i = 0; i < ne; i++) leak |= !strcmp(ids[i], "com.x.Other") || !strcmp(ids[i], "com.x.NoKey");
@@ -464,7 +464,7 @@ int main(void)
         !kreq_should_load_explicit(1, KERN_SUCCESS, 1, (kern_return_t)0xdc008009) && !kreq_should_load_explicit(0, KERN_SUCCESS, 1, 0)
           && !kreq_should_load_explicit(1, KERN_FAILURE, 1, 0) && !kreq_should_load_explicit(1, KERN_SUCCESS, 0, 0));
 
-    /* the real collection, when KREQ_SELFTEST_AUXKC names one: an aux KC must list every explicit-load kext */
+    /* the real collection, when KREQ_SELFTEST_AUXKC names one: the box's aux KC 6A2F45EA must list all four */
     const char *real_kc = A2X_DBGENV("KREQ_SELFTEST_AUXKC");
     if (real_kc) {
         FILE *f = fopen(real_kc, "rb");
@@ -476,7 +476,7 @@ int main(void)
             char got[600] = ""; for (int i = 0; i < nk; i++) { strcat(got, ids[i]); strcat(got, " "); }
             why = got;
             printf("     real collection %s: %d explicit-load kexts: %s\n", real_kc, nk, got);
-            ARM("the real aux KC lists exactly NMXAudio NVAccel NVRMAGDC NVRMFB as explicit-load",
+            ARM(" the real aux KC lists exactly NMXAudio NVAccel NVRMAGDC NVRMFB as explicit-load",
                 nk == 4 && strstr(got, "com.nullmoth.NMXAudio ") && strstr(got, "com.nullmoth.NVAccel ")
                   && strstr(got, "com.nullmoth.NVRMAGDC ") && strstr(got, "com.nullmoth.NVRMFB "));
         } else { why = real_kc; ARM("the real aux KC named by KREQ_SELFTEST_AUXKC is readable", 0); }

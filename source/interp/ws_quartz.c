@@ -1,18 +1,18 @@
 /* ws_quartz.c — the host's WindowServer fix for QuartzCore's prepare_one_filter call through a short table.
  *
- * reuses: the earlier standalone WindowServer fix (same 14-byte site, same 6-byte replacement, same exactly-one-hit refusal).
- * new-because: that fix was a DYLD_INSERT in Apple's WindowServer plist, which an unmodified system cannot carry;
- *   the host is ours, so the fix lives here and every Apple file stays stock.
+ * reuses: mini wsfilter-1028/a2xwsfix.c (same 14-byte site, same 6-byte replacement, same exactly-one-hit refusal).
+ * new-because: 11-01 the stock-27 bench may not carry a2xwsfix (it was a DYLD_INSERT in Apple's WindowServer plist,
+ *   which stock forbids); the host is ours, so the fix lives here and every Apple file stays stock.
  *
- * The bug (9 WindowServer crashes, one frame, exit 139 with no .ips report):
+ *  THE BUG (measured 10-28, 9 WindowServer crashes, one frame; 11-01 bench: exit 139 x9, the same no-.ips shape):
  *    QuartzCore CA::OGL::prepare_one_filter +0x7cd: rax = obj->vfn(+0x10)(); call *0x3e0(*rax). The object is
  *    SkyLight's quartzcore_vtable, a 14-entry dlsym table (0x70 bytes); +0x3e0 lies 0x370 past its end, on a SkyLight
  *    debug flag that is 0 → call 0. A WindowServer crash takes the whole GUI session with it.
- * 27's own x86_64 QuartzCore (Rosetta cryptex dyld_shared_cache_x86_64) holds the site exactly
+ *  11-01 offline: 27's own x86_64 QuartzCore (Rosetta cryptex dyld_shared_cache_x86_64) holds the site exactly
  *    once, QuartzCore __TEXT +0x1c9e72 — the library the host binds natively in the guest.
- * The fix: the call returns a bool, and FALSE is the branch QuartzCore takes when there is no delegate at all.
+ *  THE FIX: the call returns a bool, and FALSE is the branch QuartzCore takes when there is no delegate at all.
  *    The 6-byte call becomes `xor eax,eax; nopl 0(%rax)`. Nothing else is touched; refuses unless exactly one hit.
- * The table cannot be patched instead: the word at +0x3e0 is a live SkyLight flag.
+ *  The table cannot be patched instead: the word at +0x3e0 is a live SkyLight flag.
  * Armed only when the guest program is WindowServer; patches when QuartzCore is added (or at once if it already is).
  */
 #include <dlfcn.h>
@@ -27,12 +27,12 @@
 #include <unistd.h>
 
 static const unsigned char WSQ_SITE[] = {0x48,0x8b,0x08, 0x48,0x89,0xc7, 0xff,0x91,0xe0,0x03,0x00,0x00, 0x84,0xc0};
-/* 27.2 (26B123) QuartzCore grew its render structures by 0x10 (read from the 27.2 Rosetta x86 cache):
+/* 11-03 27.2 (26B123) QuartzCore grew its render structures by 0x10 (dsc272x86/qc272.py, 27.2 Rosetta x86 cache):
  *    delegate slot 0x3e0 -> 0x3f0; Update flag qword 0x540 -> 0x550, so backdrop-finalized 0x543&4 -> 0x553&4 and the
  *    added-all bit 38 (0x544&0x40) -> bit 39 (0x554&0x80). Every other byte of the three sites is identical. The layout
  *    is decided by whichever site matches first; every later site must agree or it is refused. */
 static const unsigned char WSQ_SITE_272[] = {0x48,0x8b,0x08, 0x48,0x89,0xc7, 0xff,0x91,0xf0,0x03,0x00,0x00, 0x84,0xc0};
-static int wsq_layout = -1;                       /* -1 unknown · 0 = 27.0 · 1 = 27.2 */
+static int wsq_layout = -1;                       /* -1 unknown 0 = 27.0 1 = 27.2 */
 static int wsq_layout_agree(int l, const char *what) {
     if (wsq_layout < 0) wsq_layout = l;
     if (wsq_layout == l) return 1;
@@ -42,15 +42,15 @@ static int wsq_layout_agree(int l, const char *what) {
 static const unsigned char WSQ_FIX[]  = {0x31,0xc0, 0x0f,0x1f,0x40,0x00};   /* replaces WSQ_SITE[6..11] */
 static volatile int wsq_done;
 
-/* The second site: CARenderUpdateAddedAllContexts is dead code in 27's QuartzCore (1223.2.2, both arches):
+/* 11-02 THE SECOND SITE: CARenderUpdateAddedAllContexts is DEAD CODE in 27's QuartzCore (1223.2.2, both arches):
  *    `cmpl $0, 0x21c(%rdi); je ret` tests an Update field nothing in the image ever writes (arm64e twin: 0x22c), so the
  *    call never reaches Update::added_all_contexts(false) -> add_backdrop_invalidations -> finalize_backdrop_invalidations,
- *    the only writer of the flag prepare_layers_roi asserts on (ogl-layer.cpp:7179, bit 2 of byte 0x543).
+ *    the ONLY writer of the flag prepare_layers_roi asserts on (ogl-layer.cpp:7179, bit 2 of byte 0x543).
  *    Real Macs never notice: SkyLight's Metal path (MetalCompositeLayer) has CARenderUpdateAddContext2 reach
- *    added_all_contexts on its own. Without an accelerator, SkyLight composites in software
- *    (CompositorSW::CompositeLayersToDestination -> layer_tile_traverse), which calls only CARenderUpdateAddedAllContexts
- *    before rendering -> unfinalized Update -> abort(), repeatedly.
- * The fix: test the Update's real "added all contexts" bit instead — bit 38 of the flag word (0x544 & 0x40), the
+ *    added_all_contexts on its own. The bench has no accelerator, so SkyLight composites in software
+ *    (CompositorSW::CompositeLayersToDestination -> layer_tile_traverse), which calls ONLY CARenderUpdateAddedAllContexts
+ *    before rendering -> unfinalized Update -> abort(), 20 runs on 11-02 (serial-1101au.log 11249, 13039).
+ *  THE FIX: test the Update's real "added all contexts" bit instead — bit 38 of the flag word (0x544 & 0x40), the
  *    bit added_all_contexts sets and CARenderUpdateFinish already tests before calling it. An Update that was never
  *    finalized now is; one that was stays untouched. 9 bytes change at +4; the tail `jmp added_all_contexts` keeps its
  *    offset, so its rel32 is byte-identical. The address comes from dlsym (exported C symbol), the 23 bytes are checked
@@ -71,7 +71,7 @@ static const unsigned char WSQ_AAC_FIX_272[9] = {
 enum { WSQ_AAC_AT = 4, WSQ_AAC_REL = 17 };
 static volatile int wsq_aac_done;
 
-/* the REAL WindowServer render-path fix: NOP the prepare_layers_roi backdrop-finalized assertion.
+/* 11-02 the REAL WindowServer render-path fix: NOP the prepare_layers_roi backdrop-finalized assertion.
  *    bytes = testb $0x4,0x543(%rcx) ; je <__assert_rtn ogl-layer.cpp:7179>. If the Update's finalized bit is clear the
  *    software compositor path asserts and WindowServer abort()s (48x on the VGA bench). NOP the 6-byte je so it always
  *    falls through (= treat as finalized, the only path a GPU Mac takes). rel32 pins the anchor to this exact 27 build. */
@@ -108,7 +108,7 @@ static int wsq_bd_patch(const struct mach_header_64 *mh, const char *name, uint6
     return 0;
 }
 
-/* 0 patched · -1 refused (reason printed, bytes untouched). f = CARenderUpdateAddedAllContexts. */
+/* 0 patched -1 refused (reason printed, bytes untouched). f = CARenderUpdateAddedAllContexts. */
 static int wsq_aac_patch(unsigned char *f, const char *name) {
     for (unsigned i = 0; i < sizeof WSQ_AAC_SITE; i++) {
         if (i >= WSQ_AAC_REL && i < WSQ_AAC_REL + 4) continue;
@@ -148,7 +148,7 @@ static int wsq_aac_try(const char *name) {
     return wsq_aac_patch(f, name);
 }
 
-/* 0 patched · 1 not QuartzCore · -1 refused (reason printed). */
+/* 0 patched 1 not QuartzCore -1 refused (reason printed). */
 static int wsq_try(const struct mach_header *mh0, const char *name) {
     if (!name || !strstr(name, "/QuartzCore.framework/") || strstr(name, ".framework/Frameworks/")) return 1;
     if (!__sync_bool_compare_and_swap(&wsq_done, 0, 1)) return 0;
@@ -172,7 +172,7 @@ static int wsq_try(const struct mach_header *mh0, const char *name) {
     if (nhit != 1) {
         fprintf(stderr, "[wsquartz] REFUSED: the call site matched %d times in %s (expected 1) — nothing changed\n",
                 nhit, name);
-        wsq_bd_patch(mh, name, tsize);   /* an independent site — on 27.2 this refusal would keep the real fix from running */
+        wsq_bd_patch(mh, name, tsize);   /* 11-03: an independent site — on 27.2 this refusal kept the real fix from running */
         return -1;
     }
     if (!wsq_layout_agree(lay, "delegate call site")) { wsq_bd_patch(mh, name, tsize); return -1; }
@@ -191,7 +191,7 @@ static int wsq_try(const struct mach_header *mh0, const char *name) {
     fprintf(stderr, "[wsquartz] patched QuartzCore prepare_one_filter delegate call at %p (+0x%lx) pid %d%s%s\n",
             (void *)at, (unsigned long)(at - text), getpid(), kr ? " — restoring r-x FAILED: " : "",
             kr ? mach_error_string(kr) : "");
-    wsq_bd_patch(mh, name, tsize);   /* the render-path backdrop assertion, same QuartzCore image */
+    wsq_bd_patch(mh, name, tsize);   /* 11-02 the render-path backdrop assertion, same QuartzCore image */
     return 0;
 }
 
@@ -239,9 +239,9 @@ static int run(int copies, const char *label, int want) {
 }
 int main(void) {
     int f = 0;
-    f += run(1, "one site → patched to xor eax,eax", 0);
-    f += run(2, "two sites → REFUSED and the bytes stay untouched", -1);
-    f += run(0, "no site → REFUSED", -1);
+    f += run(1, " one site → patched to xor eax,eax", 0);
+    f += run(2, " two sites → REFUSED and the bytes stay untouched", -1);
+    f += run(0, " no site → REFUSED", -1);
     /* the second site: a fake CARenderUpdateAddedAllContexts, exact bytes / one byte off / switched off */
     {
         unsigned char *m = mmap(0, 16384, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -255,7 +255,7 @@ int main(void) {
         int ok = r == 0 && !memcmp(fn + 4, WSQ_AAC_FIX, 9) && !memcmp(fn, WSQ_AAC_SITE, 4)
                  && !memcmp(fn + 13, WSQ_AAC_SITE + 13, 4) && fn[17] == 0xc9 && fn[20] == 0xff && fn[21] == 0x5d && fn[22] == 0xc3
                  && fn[-1] == 0xcc && fn[23] == 0xcc;
-        printf("%s AddedAllContexts: exact 23 bytes → 9 patched, prologue/tail/rel32/neighbours untouched (r=%d)\n", ok ? "ok  " : "FAIL", r);
+        printf("%s  AddedAllContexts: exact 23 bytes → 9 patched, prologue/tail/rel32/neighbours untouched (r=%d)\n", ok ? "ok  " : "FAIL", r);
         f += !ok;
         unsigned char *fn2 = m + 2000;
         mprotect(m, 16384, PROT_READ | PROT_WRITE);
@@ -265,16 +265,16 @@ int main(void) {
         mprotect(m, 16384, PROT_READ | PROT_EXEC);
         r = wsq_aac_patch(fn2, "fake QuartzCore");
         ok = r == -1 && !memcmp(fn2, keep, 23);
-        printf("%s AddedAllContexts: one byte off → REFUSED and untouched (r=%d)\n", ok ? "ok  " : "FAIL", r);
+        printf("%s  AddedAllContexts: one byte off → REFUSED and untouched (r=%d)\n", ok ? "ok  " : "FAIL", r);
         f += !ok;
         setenv("A2X_WSQUARTZ_AAC", "0", 1); wsq_aac_done = 0;
         r = wsq_aac_try("fake QuartzCore");
-        printf("%s A2X_WSQUARTZ_AAC=0 → off (r=%d)\n", r == -1 ? "ok  " : "FAIL", r);
+        printf("%s  A2X_WSQUARTZ_AAC=0 → off (r=%d)\n", r == -1 ? "ok  " : "FAIL", r);
         f += r != -1;
         unsetenv("A2X_WSQUARTZ_AAC");
     }
-    /* 27.2: the 0x3f0 delegate site is recognised (layout 1); AddedAllContexts then gets the 0x554&0x80 test;
-     * with the layout unknown AddedAllContexts is refused and untouched. */
+    /* 11-03 27.2: the 0x3f0 delegate site is recognised (layout 1); AddedAllContexts then gets the 0x554&0x80 test;
+     *  with the layout unknown AddedAllContexts is refused and untouched. */
     {
         size_t sz = 3 * 16384;
         unsigned char *m = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -289,17 +289,17 @@ int main(void) {
         wsq_done = 0; wsq_layout = -1;
         int r = wsq_try((void *)m, "/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore");
         int ok = r == 0 && wsq_layout == 1 && !memcmp(m + 20006, WSQ_FIX, sizeof WSQ_FIX);
-        printf("%s 27.2 delegate site (slot 0x3f0) → patched, layout 1 (r=%d layout=%d)\n", ok ? "ok  " : "FAIL", r, wsq_layout);
+        printf("%s  27.2 delegate site (slot 0x3f0) → patched, layout 1 (r=%d layout=%d)\n", ok ? "ok  " : "FAIL", r, wsq_layout);
         f += !ok;
         r = wsq_aac_patch(fn, "fake 27.2 QuartzCore");
         ok = r == 0 && !memcmp(fn + 4, WSQ_AAC_FIX_272, 9);
-        printf("%s 27.2 AddedAllContexts → testb $0x80,0x554 (r=%d)\n", ok ? "ok  " : "FAIL", r);
+        printf("%s  27.2 AddedAllContexts → testb $0x80,0x554 (r=%d)\n", ok ? "ok  " : "FAIL", r);
         f += !ok;
         wsq_layout = -1;
         unsigned char keep[23]; memcpy(keep, fn2, 23);
         r = wsq_aac_patch(fn2, "fake QuartzCore, layout unknown");
         ok = r == -1 && !memcmp(fn2, keep, 23);
-        printf("%s layout unknown → AddedAllContexts REFUSED and untouched (r=%d)\n", ok ? "ok  " : "FAIL", r);
+        printf("%s  layout unknown → AddedAllContexts REFUSED and untouched (r=%d)\n", ok ? "ok  " : "FAIL", r);
         f += !ok;
     }
     wsq_done = 0;

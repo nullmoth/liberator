@@ -50,7 +50,9 @@ else:
     # And no $HOME guess. A fallback to a fixed checkout under the home directory would read a stale clone on
     #    a build machine and say nothing; every candidate below is derived from where this script is or where
     #    it was run.
-    CAND = [os.path.normpath(os.path.join(HERE, *([os.pardir] * n))) for n in (0, 1, 2, 3)]
+    # translator/ beside interp/ in this tree; then the walk-up for a flat build copy
+    CAND = [os.path.normpath(os.path.join(HERE, os.pardir, 'translator'))]
+    CAND += [os.path.normpath(os.path.join(HERE, *([os.pardir] * n))) for n in (0, 1, 2, 3)]
     CAND += [os.path.abspath(os.curdir),
              os.path.normpath(os.path.join(os.path.abspath(os.curdir), os.pardir))]
 seen, ROOT = set(), None

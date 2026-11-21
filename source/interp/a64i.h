@@ -1,13 +1,12 @@
 // a64i.h — the arm64 interpreter core: one instruction at a time against an explicit register file.
-//
-// Translation stays the fast path; this runs code the translator never
-//    saw (a target outside every lifted function, a first launch before the background translation exists), so a
-//    miss in __arm2x86_lookup becomes execution instead of `no entry for <addr>` + abort.
+// // 10-25 RUNG 1 OF UNIVERSAL-27-PLAN.md. Translation stays the fast path; this runs code the translator never
+// saw (a target outside every lifted function, a first launch before the background translation exists), so a
+// miss in __arm2x86_lookup becomes execution instead of `no entry for <addr>` + abort.
 // The core is host-independent C: memory is the process's own (arm64 images are mapped at their addresses),
-//    so a load is a load. It is checked against the same 2,224-form, 16-state hardware reference the lifter is,
-//    on an arm64 host and on an x86 host.
+// so a load is a load. It is certified by the same 2,224-form, 16-state M4 truth the lifter is (ops/risu,
+// interp/idriver), on the mini (arm64 host) and on studio (x86 host).
 // It never guesses. An encoding it does not implement returns A64_UNDEF with the pc unchanged, and the caller
-//    reports the word and the address; nothing is approximated.
+// reports the word and the address; nothing is approximated.
 #pragma once
 #include <stdint.h>
 
@@ -26,13 +25,16 @@ typedef struct a64 {
     uint64_t excl_addr, excl_val[2];
     int excl_size;                  // bytes per register; 0 = no reservation
     int excl_pair;
-    // bit0 = x6 and bit1 = x7 were written since the last call boundary (set by wz/wsp, cleared by the runtime).
-    // A shadow compare of the value cannot tell "rewritten with the same value" from "never written".
+    // bit0 = x6 and bit1 = x7 were WRITTEN since the last call boundary (set by wz/wsp, cleared by the runtime).
+    // A shadow compare of the VALUE cannot tell "rewritten with the same value" from "never written".
     uint8_t argw;
-    // the a64_code_gen the current run's decode-cache epoch was taken against (a64_cache.c). A generic entry that
+    // the slot engine's x6/x7 write marks as two plain bytes (no read-modify-write); the runtime ORs them into argw
+    uint8_t argwx[2];
+    // 10-31 the a64_code_gen this run's decode-cache epoch was taken against (a64_cache.c). A generic entry that
     // finds the generation moved (a guest IC IVAU, or another thread's code change followed by this thread's ISB or
     // any other generic instruction) hands control back so the run takes a new epoch before the next fetch.
     unsigned cgen;
+    uint64_t hostsp;                // the slot engine's host stack pointer while guest sp lives in rsp (a64slot.c OPT_RSP)
 } a64;
 
 enum {

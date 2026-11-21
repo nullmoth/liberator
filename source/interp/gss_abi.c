@@ -1,24 +1,24 @@
 /* gss_abi.c — GSS-API across the arm64 / x86_64 boundary. The x86_64 GSS headers are #pragma pack(2); arm64's are not.
    reuses: host.c a2x_late_wrapper (the name -> host function table every bind consults first) — this file answers its
      misses; native GSS.framework does all the real work, this file only re-lays the structs that differ.
-   new-because: without it, an unmodified macOS 27 sshd-auth SIGSEGVs in native
+   new-because: 11-01 offline ssh ruler (vm/stock27-1101/sshrun.sh), host 1101aa: the stock-27 sshd-auth SIGSEGVs in native
      gss_test_oid_set_member with rdi = 0x0005e661_00000000 — the guest pointer 0x1_0005e661 read 4 bytes early. Apple's
      x86_64 gssapi.h wraps every type in #pragma pack(push,2) ("Compatibility with MIT Kerberos on the Mac"); the arm64
      build does not. So gss_OID_desc {u32 length; void *elements} is 12 bytes with elements at +4 on x86 and 16 bytes with
      elements at +8 on arm64; a gss_OID_set's array strides 12 vs 16; gss_channel_bindings_struct is 56 vs 64.
      gss_buffer_desc and gss_OID_set_desc themselves are {size_t, pointer} and do not differ.
 
-   Layout rule: an OID or OID set the guest can see is always arm64 layout; one native GSS sees is always packed.
-      - The OID-set functions that are pure data structure (create_empty, add_member, test_member, release) run here on
+    THE RULE: an OID or OID set the GUEST can see is always arm64 layout; one native GSS sees is always packed.
+      - The OID-set functions that are pure data structure (create_empty, add_member, test_member, release) run HERE on
         arm64-layout sets. A set native GSS returns is converted at once and released natively.
       - OIDs going in: guest desc -> interned packed copy. Coming out: native desc -> interned arm64 copy. Interned copies
         are never freed (an OID is a constant; a process sees a handful; the table is capped and says so when full).
       - OID data exports (GSS_C_NT_* pointer variables, __gss_*_oid_desc descriptors) bind to arm64 copies.
-   Not covered — named so nobody assumes they are: krb5.h structs (krb5_creds etc. are pack(2) on x86 too; reached only
+    NOT covered — named so nobody assumes they are: krb5.h structs (krb5_creds etc. are pack(2) on x86 too; reached only
       by KerberosAuthentication / password-to-ticket), gss_duplicate_oid / gss_release_oid, and the Apple/Heimdal
       extensions that take OIDs (gss_inquire_attrs_for_mech, gss_aapl_*, ...). Every wrapped name is in g_fn below.
    ARM2X86_NO_GSSABI=1 turns the whole layer off (binds go native exactly as before); ARM2X86_TRACE_GSS=1 traces it.
-   Selftest (x86_64 macOS, real GSS): clang -arch x86_64 -DGSS_ABI_SELFTEST gss_abi.c -framework GSS -o gsst && ./gsst
+   Selftest (studio, real x86 GSS): clang -arch x86_64 -DGSS_ABI_SELFTEST gss_abi.c -framework GSS -o gsst && ./gsst
 */
 #include <dlfcn.h>
 #include <os/lock.h>
@@ -356,28 +356,28 @@ int main(void) {
     dlopen("/System/Library/Frameworks/Kerberos.framework/Versions/A/Kerberos", RTLD_LAZY);
     g_oid krb5 = { sizeof KRB5, 0, KRB5 }, stranger = { sizeof STRANGER, 0, STRANGER };
 
-    /* the bug, reproduced in this process: the native export read with the guest's layout */
+    /* the bug, measured in this process: the native export read with the guest's layout */
     const n_oid *nh = *(const n_oid **)gsym("GSS_C_NT_HOSTBASED_SERVICE");
     uint64_t at8 = 0; memcpy(&at8, (const char *)nh + 8, 8);
     snprintf(b, sizeof b, "length %u, elements@+4 %p, the guest's elements@+8 0x%llx", nh->length, nh->elements,
              (unsigned long long)at8);
     arm(nh->length == sizeof HBS && !memcmp(nh->elements, HBS, sizeof HBS) && at8 != (uint64_t)(uintptr_t)nh->elements,
-        "the native GSS_C_NT_HOSTBASED_SERVICE is packed: read at +8 (arm64) it is NOT the elements pointer", b);
+        " the native GSS_C_NT_HOSTBASED_SERVICE is packed: read at +8 (arm64) it is NOT the elements pointer", b);
 
     const g_oid **cell = a2x_gss_wrapper("GSS_C_NT_HOSTBASED_SERVICE");
     snprintf(b, sizeof b, "cell %p length %u", (void *)cell, cell && *cell ? (*cell)->length : 0);
     arm(cell && *cell && (*cell)->length == sizeof HBS && !memcmp((*cell)->elements, HBS, sizeof HBS),
-        "the GSS_C_NT_HOSTBASED_SERVICE bind hands the guest an arm64 desc with the right 10 bytes", b);
+        " the GSS_C_NT_HOSTBASED_SERVICE bind hands the guest an arm64 desc with the right 10 bytes", b);
 
     g_set *mechs = 0; OM min = 0; OM r = ((OM (*)(OM *, g_set **))a2x_gss_wrapper("gss_indicate_mechs"))(&min, &mechs);
     int present = -1;
     if (!r && mechs) w_test_oid_set_member(&min, &krb5, mechs, &present);
     snprintf(b, sizeof b, "r 0x%x, %zu mechs, krb5 present %d", r, mechs ? mechs->count : 0, present);
-    arm(!r && mechs && mechs->count >= 1 && present == 1, "indicate_mechs returns an arm64 set in which krb5 is found", b);
+    arm(!r && mechs && mechs->count >= 1 && present == 1, " indicate_mechs returns an arm64 set in which krb5 is found", b);
     present = -1;
     if (mechs) w_test_oid_set_member(&min, &stranger, mechs, &present);
     snprintf(b, sizeof b, "present %d", present);
-    arm(present == 0, "a stranger OID is NOT a member of that set", b);
+    arm(present == 0, " a stranger OID is NOT a member of that set", b);
     w_release_oid_set(&min, &mechs);
     arm(mechs == 0, "release_oid_set clears the caller's pointer", mechs ? "non-null" : "null");
 
@@ -396,7 +396,7 @@ int main(void) {
     snprintf(b, sizeof b, "import 0x%x display 0x%x type %p len %u '%.*s'", r, r2, (const void *)type,
              type ? type->length : 0, (int)out.length, out.value ? (char *)out.value : "");
     arm(!r && !r2 && type && same(type, *cell),
-        "import_name takes the guest OID and display_name returns the name type as an arm64 desc", b);
+        " import_name takes the guest OID and display_name returns the name type as an arm64 desc", b);
 
     void *cred = 0; g_set *act = 0; OM tr = 0;
     r = w_acquire_cred(&min, 0, 0, s, 2 /* ACCEPT */, &cred, &act, &tr);
@@ -413,11 +413,11 @@ int main(void) {
     snprintf(b, sizeof b, "malloc %p, GSS_C_NT_nonexistent %p", a2x_gss_wrapper("malloc"),
              a2x_gss_wrapper("GSS_C_NT_NO_SUCH_NAME_1101"));
     arm(!a2x_gss_wrapper("malloc") && !a2x_gss_wrapper("GSS_C_NT_NO_SUCH_NAME_1101"),
-        "a non-GSS name and an absent GSS name bind nothing", b);
+        " a non-GSS name and an absent GSS name bind nothing", b);
     setenv("ARM2X86_NO_GSSABI", "1", 1);
     void *off = a2x_gss_wrapper("gss_indicate_mechs");
     unsetenv("ARM2X86_NO_GSSABI");
-    arm(!off && a2x_gss_wrapper("gss_indicate_mechs"), "ARM2X86_NO_GSSABI=1 turns the layer off, and only while set",
+    arm(!off && a2x_gss_wrapper("gss_indicate_mechs"), " ARM2X86_NO_GSSABI=1 turns the layer off, and only while set",
         off ? "still bound" : "off, then on");
 
     printf("%d arms, %d failed\n", arms, fails);

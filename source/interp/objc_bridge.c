@@ -1,16 +1,16 @@
-/* objc_bridge.c — Objective-C message sends and blocks between translated arm64 code and the native runtime.
+/* objc_bridge.c — ladder rung 3: Objective-C message sends and blocks between translated arm64 code and the NATIVE runtime.
  *
- * objc_msgSend has no fixed signature: its arguments are what the method declares, and the method is only known at run
+ *  objc_msgSend has no fixed signature: its arguments are what the METHOD declares, and the method is only known at run
  *    time. The lifter's full-register bind ('rf') hands us the whole arm64 argument state in the thread-local
- *    __arm2x86_rf (x0..x8 at +8*i, v0..v7 at +80+16*j) with the arm64 sp published in __arm_sp. We read the method's type
- *    encoding from the native runtime, take every argument from where AAPCS64 (Apple) put it, call the native
+ *    __arm2x86_rf (x0..x8 at +8*i, v0..v7 at +80+16*j) with the arm64 sp published in __arm_sp. We read the method's TYPE
+ *    ENCODING from the native runtime, take every argument from where AAPCS64 (Apple) put it, call the NATIVE
  *    objc_msgSend through libffi with the SysV signature that encoding describes, and write the result back where an arm64
  *    caller reads it: x0 (+x1) for integers and small structs, v0..v3 for floating point and HFAs (CGRect), and the
  *    memory at x8 for a large struct.
- * x86_64 returns a struct > 16 bytes through a hidden pointer, and the runtime has a separate entry for that:
+ *  x86_64 returns a struct > 16 bytes through a hidden pointer, and the runtime has a separate entry for that:
  *    objc_msgSend_stret / objc_msgSendSuper2_stret. Using plain objc_msgSend there shifts every argument by one register.
- * A method the runtime cannot describe (no Method, no NSMethodSignature) aborts by name, never "best effort".
- * Not yet: long double arguments (refused by name). Variadic methods go to their va_list twins, unions are
+ *  A method the runtime cannot describe (no Method, no NSMethodSignature) ABORTS BY NAME, never "best effort".
+ *  Not yet: long double arguments (refused by name). Variadic methods go to their va_list twins (rung 3c), unions are
  *    a struct with the union's size, alignment and per-eightbyte class (parse_union), and a native va_list parameter is
  *    rebuilt as an x86 va_list (msg_send).
  */
@@ -42,9 +42,6 @@ extern void a2x_stop_objc(const char *sel, const char *cls);
 static void die2(const char *m, const char *a) {
     char r[256]; snprintf(r, sizeof r, "objc_bridge: %s", m);
     a2x_stop(r, a ? a : "");
-#if !A2X_SHIP
-    a2x_dump_msgring();
-#endif
     abort(); }
 #define RX(i) (((uint64_t *)__arm2x86_rf)[i])
 #define RV(j) (__arm2x86_rf + 80 + 16 * (j))   /* 16-aligned: +72 faulted on vmovaps */
@@ -58,17 +55,17 @@ static const char *parse_type(const char *t, ffi_type **out);
 static const char *skip_type(const char *t);
 static int hfa(ffi_type *t, int *isd);
 
-/* UNIONS. /usr/bin/log on macOS 27 died at every start: `union argument (not yet bridged) (?={?=CCSI}QAQ)16`,
-      thrown while add_methods registered the binary's own methods, before main. libffi has no union type, so a union
+/* 10-20 UNIONS. /usr/bin/log on macOS 27 died at EVERY start: `union argument (not yet bridged) (?={?=CCSI}QAQ)16`,
+      thrown while add_methods registered the binary's OWN methods, before main. libffi has no union type, so a union
       becomes an FFI_TYPE_STRUCT that reproduces the three things either ABI looks at:
-      size = the largest member rounded to the alignment, alignment = the largest member's;
-      x86-64 SysV class: the union is cut into chunks of its own alignment A (<= 8: a member wider than A would raise A),
+       size = the largest member rounded to the alignment, alignment = the largest member's;
+       x86-64 SysV class: the union is cut into chunks of its own alignment A (<= 8: a member wider than A would raise A),
          each chunk is INTEGER if any member puts an integer byte in it, SSE if only float/double bytes. One element per
          chunk (uintA, or float/double) gives libffi exactly that classification, and it still holds when the union sits
          at a non-eightbyte offset inside a parent struct (a chunk never straddles an eightbyte). A chunk no member covers
          is called INTEGER — the SysV merge would leave it NO_CLASS; only a padding-only chunk next to a float differs.
-      AAPCS64 HFA: clang (isHomogeneousAggregate) takes the MAX member count over members of one base type and requires
-         size == count * base. {double; float} is SSE on x86 yet not an HFA on arm64, which the element list cannot say,
+       AAPCS64 HFA: clang (isHomogeneousAggregate) takes the MAX member count over members of ONE base type and requires
+         size == count * base. {double; float} is SSE on x86 yet NOT an HFA on arm64, which the element list cannot say,
          so each union's HFA answer is recorded here and hfa() reads it first. Not an HFA: <= 16 bytes rides x registers,
          larger goes by reference — the existing struct paths, unchanged. */
 struct uinfo { struct uinfo *next; ffi_type *t; int nh, isd; };
@@ -78,7 +75,7 @@ static struct uinfo *ufind(ffi_type *t) {
     return NULL;
 }
 /* Lay out a struct now (libffi's initialize_aggregate does the same at prep time and skips a type whose size is set).
-   alignment is stored before size: another thread's ffi_prep_cif treats size != 0 as "laid out" and reads alignment. */
+    alignment is stored BEFORE size: another thread's ffi_prep_cif treats size != 0 as "laid out" and reads alignment. */
 static void lay(ffi_type *t) {
     if (t->type != FFI_TYPE_STRUCT || t->size || !t->elements) return;
     size_t off = 0, al = 1;
@@ -115,11 +112,11 @@ static const char *enc_end(const char *t) {
     } while (d > 0);
     return t;
 }
-/* A pointee is skipped, never built. skip_type was parse_type: every `^{...}` argument built (and cached) ffi
+/* 10-20 A POINTEE IS SKIPPED, NEVER BUILT. skip_type WAS parse_type: every `^{...}` argument built (and cached) ffi
       types for a struct nobody passes by value, so /usr/bin/log — past the union — died `unknown type encoding b48b16`
       on a BITFIELD inside ^{firehose_tracepoint_s=...(?={?=b48b16}QAQ)[0C]}, a pointer. Only a by-value type needs a
       layout; a pointer's target only needs its end. */
-/* A block parameter can carry its own signature: @?<v@?@"NSError">. macOS 27's mbsystemadministration
+/* 10-20 A BLOCK PARAMETER CAN CARRY ITS OWN SIGNATURE: @?<v@?@"NSError">. macOS 27's mbsystemadministration
       registers methods typed that way and the bridge died on "unknown type encoding <v@?@"NSError">". The <...> part is
       the block's prototype, only metadata for us (the argument itself is still one pointer). It nests, and a quoted
       class name inside it can hold <Protocol> brackets of its own, so skip quotes while counting. */
@@ -140,10 +137,10 @@ static const char *skip_type(const char *t) {
     case '{': case '(': case '[': return enc_end(t);
     case '^': return skip_type(t + 1);
     case 'b': t++; while (*t >= '0' && *t <= '9') t++; return t;
-    /* _Complex T is 'j' then T, and skip_type stepped over the 'j' as if it were the whole type,
+    /* 10-26 _Complex T is 'j' then T, and skip_type stepped over the 'j' as if it were the whole type,
           leaving the base type to be read as the next member. */
     case 'j': return skip_type(t + 1);
-    /* An empty type consumes nothing, and the old `default: return t + 1` ate the `]`. A vector
+    /* 10-26 AN EMPTY TYPE CONSUMES NOTHING, AND THE OLD `default: return t + 1` ATE THE `]`. A vector
           encodes as no characters at all (see a2x_lane), so `[4]` is a count with no element: the cursor
           arrives on the `]`, which belongs to the array branch that called us. Stepping past it left that
           branch looking at `}` and the whole struct was mis-read from there on. */
@@ -154,37 +151,37 @@ static const char *skip_type(const char *t) {
     default: return t + 1;
     }
 }
-/* A vector type encodes as nothing at all, and that kills apps at start-up.
-      clang writes no characters for an ext_vector_type — every simd_ and vector_ type — so the vector is simply
-      absent from the encoding and the parse cursor stops on whatever byte follows it. From the macOS 27
+/* 10-26 A VECTOR TYPE ENCODES AS NOTHING AT ALL, AND THAT IS WHAT KILLED THREE APPS AT START-UP.
+      clang writes NO characters for an ext_vector_type — every simd_ and vector_ type — so the vector is simply
+      ABSENT from the encoding and the parse cursor stops on whatever byte follows it. MEASURED in the macOS 27
       binaries, read straight out of __TEXT,__objc_methtype:
         Chess     {?=[4]}16@0:8                      -> cursor on "]}16@0:8"   (an array element that is not there)
         Freeform  v104@0:8@16@24{?=[4]}32@?96        -> cursor on "]}32@?96"
-        Music     v36@0:8{vec3=}16f32                -> a struct with zero members, whose size stays 0
-      The `types` pointer is not wrong, and neither is the relative-method-list reader: every one of
-         those error strings is a valid encoding read from the middle, which is exactly what a parse cursor
-         looks like. A method list entry's three int32 offsets are each relative to their own field and the
-         code reads them that way.
-   The width is not in the encoding; the method's own frame offsets carry it, and every instance in the
-      65 apps examined is 16 bytes per lane. Chess's and Freeform's `{?=[4]}` spans offsets 24->88 and
+        Music     v36@0:8{vec3=}16f32                -> a struct with ZERO members, whose size stays 0
+       The `types` pointer was never wrong, and neither was the relative-method-list reader: every one of
+         those error strings is a VALID encoding read from the middle, which is exactly what a parse cursor
+         looks like. A method list entry's three int32 offsets are each relative to their OWN field and the
+         code already reads them that way — test_mlist.c locks that down so it cannot drift.
+    THE WIDTH IS NOT IN THE ENCODING; the method's own frame offsets carry it, and every instance in the
+      65-app sweep measures 16 bytes per lane. Chess's and Freeform's `{?=[4]}` spans offsets 24->88 and
       32->96 (64 bytes over 4 elements), Music's `{vec3=}` spans 16->32, and Music's named
       {Uniforms="viewMatrix"{?="columns"[4]}"time"f...} lays out to 368 bytes against its own frame size of
       384-16 = 368. So one lane is 16 bytes at 16-byte alignment — and make_imp below checks that against the
       offsets for every argument, in both directions, rather than trusting it.
-   Four floats is the right element list for both ABIs. x86-64 SysV classes a 16-byte vector SSE whatever
+    FOUR FLOATS IS THE RIGHT ELEMENT LIST FOR BOTH ABIs. x86-64 SysV classes a 16-byte vector SSE whatever
       its element type (__m128, __m128i and __m128d alike), which {f,f,f,f} reproduces exactly; size and
       alignment are set here so libffi's initialize_aggregate sees a laid-out type and leaves them alone.
-   Not an HFA, deliberately: {f,f,f,f} would otherwise count as an HFA of four floats and arm64 would place
+    NOT AN HFA, DELIBERATELY: {f,f,f,f} would otherwise count as an HFA of four floats and arm64 would place
       it in s0-s3 instead of one q register. The lane is recorded in the gU table with nh = 0, which is how a
       union already tells hfa() "this element list describes x86, not arm64" — so hfa() answers "not an HFA"
       and a lane rides the plain aggregate paths.
-   What is still wrong, and it is named rather than hidden: AAPCS64 passes an HVA of 1-4 lanes in v0-v3 and
+    WHAT IS STILL WRONG, AND IT IS NAMED RATHER THAN HIDDEN: AAPCS64 passes an HVA of 1-4 lanes in v0-v3 and
       returns it there. The plain aggregate paths put a 16-byte lane in x0:x1 and a 64-byte one through the
-      indirect buffer, so a method that really takes or returns a vector has its register placement wrong even
-      though its size and its x86 class are right. That half is not built yet. */
+      indirect buffer, so a method that really takes or returns a vector has its REGISTER PLACEMENT wrong even
+      though its size and its x86 class are right. That is the half that is not built; see NOTES.md. */
 static ffi_type *a2x_lane_el[5] = { &ffi_type_float, &ffi_type_float, &ffi_type_float, &ffi_type_float, NULL };
 static ffi_type a2x_lane_t = { .size = 16, .alignment = 16, .type = FFI_TYPE_STRUCT, .elements = a2x_lane_el };
-/* set whenever a lane was synthesised while parsing the current type, so make_imp knows which arguments to
+/* set whenever a lane was synthesised while parsing the CURRENT type, so make_imp knows which arguments to
       measure against the frame offsets. Per-thread: parse_type runs on whatever thread sends the message. */
 static __thread int a2x_lane_used;
 static ffi_type *a2x_lane(void) {
@@ -201,21 +198,21 @@ static ffi_type *a2x_lane(void) {
     pthread_mutex_unlock(&gTm);
     return &a2x_lane_t;
 }
-/* The lane width is A measurement, so it is checked where the measurement lives. A wrong argument
-      size does not fail by itself — it slides every later argument one place. That is the audit_token_t bug
+/* 10-26 THE LANE WIDTH IS A MEASUREMENT, SO IT IS CHECKED WHERE THE MEASUREMENT LIVES. A wrong argument
+      size does not fail by itself — it slides every LATER argument one place. That is the audit_token_t bug
       already recorded in this file, where a 32-byte token sized at 8 handed FSKit the token's bytes as a
       reply block. So compare the size we built against the gap the method's own offsets measure: a gap
-      smaller than our type means we overlap the next argument, which is impossible, and a gap a whole lane
+      SMALLER than our type means we overlap the next argument, which is impossible, and a gap a whole lane
       larger means we are short by at least one lane. One lane of slack is allowed because the next argument's
       offset is rounded up to its own alignment, and 16 is the largest alignment anything here produces. */
-/* A lane is not always 16 BYTES, and when it is not the whole aggregate is still A known size.
+/* 10-27 A LANE IS NOT ALWAYS 16 BYTES, AND WHEN IT IS NOT THE WHOLE AGGREGATE IS STILL A KNOWN SIZE.
       Books -[... setVertexUniforms:] is typed {?={?=[4]}fff{?=[3]}fB[9][9f]} with a frame gap of 256; this bridge
       built it at 336 because the `[9]` array is simd_float2 (8-byte lanes), which clang writes no width for.
       Mixed lane widths inside one struct cannot be told from the encoding, but the offsets still give the
       struct's rounded size, and a by-value aggregate wider than 16 bytes is passed in memory by both ABIs
       (AAPCS64 by reference, SysV on the stack), so only its size and alignment matter. So a gap wider than one
       register is trusted over the lane guess and the argument becomes an opaque laid-out block of that size.
-      Narrower than that (a single 8-byte lane, a gap that disagrees at register width) stays fatal: the
+       Narrower than that (a single 8-byte lane, a gap that disagrees at register width) stays fatal: the
          register class decides placement there and a guess would misplace every later argument. */
 static ffi_type *a2x_opaque(size_t size) {
     char key[48];
@@ -273,7 +270,7 @@ static ffi_type *a2x_repeat(const char *enc, size_t len, ffi_type *base, int n) 
 }
 static const char *parse_union(const char *t, ffi_type **out) {
     const char *start = t, *end = enc_end(t); size_t len = (size_t)(end - start);
-    pthread_mutex_lock(&gTm);   /* cached by encoding text before parsing: msg_send re-parses on every call */
+    pthread_mutex_lock(&gTm);   /* cached by encoding text BEFORE parsing: msg_send re-parses on every call */
     for (struct tcache *c = gT; c; c = c->next)
         if (strlen(c->enc) == len && !memcmp(c->enc, start, len)) { *out = c->t; pthread_mutex_unlock(&gTm); return end; }
     pthread_mutex_unlock(&gTm);
@@ -288,7 +285,7 @@ static const char *parse_union(const char *t, ffi_type **out) {
             const char *q = p + 1; cnt = 0;
             while (*q >= '0' && *q <= '9') cnt = cnt * 10 + (size_t)(*q++ - '0');
             q = parse_type(q, &et); if (*q == ']') q++; p = q;
-        } else { const char *was = p; p = parse_type(p, &et);   /* see the struct member loop */
+        } else { const char *was = p; p = parse_type(p, &et);   /* 10-26: see the struct member loop */
                  if (p == was) die2("a union member encoding that consumes nothing (corrupt) at", p); }
         lay(et); mt[nm] = et; mn[nm] = cnt; nm++;
     }
@@ -348,13 +345,13 @@ static const char *parse_type(const char *t, ffi_type **out) {
         const char *start = t, *p = t + 1;
         while (*p && *p != '=' && *p != '}') p++;
         if (*p == '=') p++;
-        /* Not a fixed el[128]: macOS 27's mds passes {MDCredential=Ii[16I]ii[1024c]} — 1,044 members once the
-              inline arrays are expanded — and a fixed list dies "struct array member too large to bridge". The list grows. */
+        /* 10-20 WAS a fixed el[128]: macOS 27's mds passes {MDCredential=Ii[16I]ii[1024c]} — 1,044 members once the
+              inline arrays are expanded — and died "struct array member too large to bridge". The list grows. */
         int cap = 32, n = 0; ffi_type **el = malloc((size_t)cap * sizeof *el);
         if (!el) die2("out of memory parsing struct", start);
         while (*p && *p != '}') {
             if (n + 1 >= cap) { cap *= 2; el = realloc(el, (size_t)cap * sizeof *el); if (!el) die2("out of memory parsing struct", start); }
-            /* An array inside A struct is inline BYTES, not A POINTER. audit_token_t is {?=[8I]}: parsed
+            /* 10-20 AN ARRAY INSIDE A STRUCT IS INLINE BYTES, NOT A POINTER. audit_token_t is {?=[8I]}: parsed
                   as one pointer member it came out 8 bytes, so macOS 27's diskarbitrationd passed
                   -[FSClient installedExtensionsForUser:replyHandler:] its 32-byte token in a register and every later
                   argument slid one place: FSKit retained the token's bytes as the reply block (objc_retain, fault 0x20).
@@ -369,7 +366,7 @@ static const char *parse_type(const char *t, ffi_type **out) {
                 for (int k = 0; k < cnt; k++) el[n++] = et;
                 p = q; continue;
             }
-            /* BITFIELDS INSIDE A by-value struct. macOS 27's mds registers a method taking a struct whose
+            /* 10-20 BITFIELDS INSIDE A BY-VALUE STRUCT. macOS 27's mds registers a method taking a struct whose
                   encoding ends ...b8b4b1b51}: the bridge refused ("layout unknowable") and mds aborted at start-up,
                   which kept loginwindow blocked on its mds.legacy port. The encoding gives widths, not the storage unit,
                   but the compiler packs a run of consecutive bitfields into integer units, so sum the run and lay it out
@@ -386,27 +383,27 @@ static const char *parse_type(const char *t, ffi_type **out) {
                 }
                 continue;
             }
-            /* A member that consumes nothing would spin this loop for ever and grow the
+            /* 10-26 A MEMBER THAT CONSUMES NOTHING WOULD SPIN THIS LOOP FOR EVER and grow the
                   element list until the allocator gave up — a hang instead of a message. parse_type now
                   returns without consuming for an empty type, which is right for an array element and for
-                  a whole argument but is not readable at a member position (a zero-length member in the
+                  a whole argument but is NOT readable at a member position (a zero-length member in the
                   middle of a member list cannot be told from no member at all), so a cursor that did not
                   move here means the encoding is corrupt. Name it and stop. */
             { const char *was = p; p = parse_type(p, &el[n++]);
               if (p == was) die2("a struct member encoding that consumes nothing (corrupt) at", p); }
         }
-        /* A by-value struct with no members holds A VECTOR. macOS 27 Music died
-              "fatal: objc_bridge: ffi_prep_cif (closure) setRenderColor:withAlpha:". That method is typed
+        /* 10-26 A BY-VALUE STRUCT WITH NO MEMBERS HOLDS A VECTOR. macOS 27 Music died
+              "FATAL: objc_bridge: ffi_prep_cif (closure) setRenderColor:withAlpha:". That method is typed
               v36@0:8{vec3=}16f32, and {vec3=} parsed to a struct with zero elements whose size therefore
               stayed 0 — libffi's initialize_aggregate ends with `if (arg->size == 0) return FFI_BAD_TYPEDEF`,
               which is the whole of that abort. Its own offsets measure the type at 32 - 16 = 16 bytes:
               one lane.
-           An incomplete struct cannot be passed by value in C, so a zero-member struct reaching this
+            AN INCOMPLETE STRUCT CANNOT BE PASSED BY VALUE IN C, so a zero-member struct reaching this
               branch is never an opaque handle: ^{CGImage=}, ^{CGColor=}, ^{_NSZone=} and the forty-odd other
-              opaque types in these binaries arrive as pointers, and skip_type steps over a pointee without
+              opaque types in these binaries arrive as POINTERS, and skip_type steps over a pointee without
               ever building it. What is missing is a member clang could not write, and the only member clang
               writes nothing for is a vector.
-           A by-value union with no members is left alone: it does not occur anywhere in the 65-app sweep,
+            A by-value UNION with no members is left alone: it does not occur anywhere in the 65-app sweep,
               and parse_union would refuse a 16-aligned member anyway ("aligned beyond 8 bytes"). It keeps
               dying loudly rather than being guessed at. */
         if (!n) el[n++] = a2x_lane();
@@ -426,10 +423,10 @@ static const char *parse_type(const char *t, ffi_type **out) {
         if (bits > 64) die2("bitfield run wider than 64 bits outside a struct", t);
         *out = bits > 32 ? &ffi_type_uint64 : bits > 16 ? &ffi_type_uint32 : bits > 8 ? &ffi_type_uint16 : &ffi_type_uint8;
         return t; }
-    /* _Complex had no case. macOS 27 Grapher died at start-up with "unknown type encoding
+    /* 10-26 _Complex HAD NO CASE. macOS 27 Grapher died at start-up with "unknown type encoding
           jd)}16@0:8" — the cursor on the `j` of a _Complex double inside its own number type,
           {_NComplex=(?={?=dd}jd)}16@0:8. clang encodes _Complex T as 'j' followed by T.
-       _Complex T IS A PAIR OF T TO BOTH ABIs, so it needs no new rule anywhere else: AAPCS64 makes it an
+        _Complex T IS A PAIR OF T TO BOTH ABIs, so it needs no new rule anywhere else: AAPCS64 makes it an
           HFA of two T (d0,d1 for a double) and x86-64 SysV classes it SSE,SSE (xmm0,xmm1), and a two-member
           struct of T is exactly that on both sides — it goes through the HFA and struct paths already here. */
     case 'j': {
@@ -437,26 +434,26 @@ static const char *parse_type(const char *t, ffi_type **out) {
         t = parse_type(t + 1, &bt);
         *out = a2x_repeat(start, (size_t)(t - start), bt, 2);
         return t; }
-    /* An empty type is A VECTOR (a2x_lane has the measurements). Exactly two positions can hold an
+    /* 10-26 AN EMPTY TYPE IS A VECTOR (a2x_lane has the measurements). Exactly two positions can hold an
           empty type and still be unambiguous:
-            · the element of an array, where the cursor sits on the `]` closing a count that must have an
+ the element of an array, where the cursor sits on the `]` closing a count that MUST have an
               element — Chess's {?=[4]}16@0:8;
-            · a whole argument or return in a method encoding, where the cursor sits on the byte offset that
+ a whole argument or return in a method encoding, where the cursor sits on the byte offset that
               follows every type — Chess's -[MBCBoardView lightPosition] is typed exactly "16@0:8", a frame
               size and two arguments with no return type in front of them.
-       Nothing is consumed here, deliberately. The `]` belongs to the array branch that called us and the
+        NOTHING IS CONSUMED HERE, deliberately. The `]` belongs to the array branch that called us and the
           digits belong to the caller's offset skip, so both callers still advance and neither can spin.
-       A member position is not in this set. A zero-length member in the middle of a member list cannot be
-          told apart from no member at all, and returning without consuming there would spin the member loop
-          for ever. The one member case that is detectable is a member list that is empty, and that is handled
+        A MEMBER POSITION IS NOT IN THIS SET. A zero-length member in the middle of a member list cannot be
+          told apart from no member at all, and returning without consuming there WOULD spin the member loop
+          for ever. The one member case that is detectable is a member list that is EMPTY, and that is handled
           at the end of the struct branch below. */
     case ']': *out = a2x_lane(); return t;
     case '0': case '1': case '2': case '3': case '4':
     case '5': case '6': case '7': case '8': case '9': *out = a2x_lane(); return t;
     case 'D': die2("long double argument (arm64 double, x86 80-bit — not bridged)", t);
     }
-    /* Measure at the failure, whatever path it came from. Guarding add_methods only caught two of these;
-          the next one arrived through a protocol method description instead. Dumping the bytes around the
+    /* MEASURE AT THE FAILURE, WHATEVER PATH IT CAME FROM. Guarding add_methods only caught two of these;
+          the next one arrived through a protocol method description instead. Dumping the bytes AROUND the
           pointer shows where the real string starts, which turns "unknown type encoding" into an offset. */
     {
         const char *q = t - 64;
@@ -479,11 +476,11 @@ static int hfa(ffi_type *t, int *isd) {
     int n = 0; for (ffi_type **e = t->elements; *e; e++) n += hfa(*e, isd);
     return n;
 }
-/* AAPCS64's HFA is CAPPED AT 4 leaves, and hfa() returns the RAW leaf count — so a wider all-float struct came
+/* 10-20 AAPCS64's HFA is CAPPED AT 4 leaves, and hfa() returns the RAW leaf count — so a wider all-float struct came
       back as 5, 6, 8 … and every caller's `nh >= 1 && nh <= 4` test sent it down a path meant for something else; make_imp
       simply died. Dock's `previewRect` returns {?={CGRect={CGPoint=dd}{CGSize=dd}}{CGPoint=dd}} = SIX doubles / 48 bytes
       and aborted the whole process at class registration, so macOS 27 came up with no Dock.
-   Past 4 leaves it is not an HFA: > 16 bytes goes indirect (x8 on arm64, sret on x86) and <= 16 bytes rides x0:x1 —
+    Past 4 leaves it is NOT an HFA: > 16 bytes goes indirect (x8 on arm64, sret on x86) and <= 16 bytes rides x0:x1 —
       both already implemented below. clang's isHomogeneousAggregate also demands no padding, hence the size check. */
 static int hfa4(ffi_type *t, int *isd) {
     int n = hfa(t, isd);
@@ -508,7 +505,7 @@ static void make_writable(void *p, size_t n) {
     unsigned long ps = (unsigned long)sysconf(_SC_PAGESIZE), a = (unsigned long)p & ~(ps - 1);
     mprotect((void *)a, ((unsigned long)p + n - a + ps - 1) & ~(ps - 1), PROT_READ | PROT_WRITE);
 }
-/* The trampoline is also understood by __arm2x86_lookup (shim_comp.c), so arm64 code that calls the same block later
+/* The trampoline is also understood by __arm2x86_lookup (shim_comp.c), so arm64 code that calls the SAME block later
  *    still lands in translated code: one pointer serves both worlds. */
 #include "block_signature.h"
 static IMP make_imp(unsigned long armimp, const char *types, const char *selname);
@@ -548,8 +545,8 @@ void *__arm2x86_blk(void *b0) {
     if (!b) return b0;
     unsigned long invoke = __atomic_load_n(&b->invoke, __ATOMIC_ACQUIRE);
     if (!in_text(invoke)) return b0;
-    /* DIAGNOSTIC: the block we wrapped and the invoke we replaced. Compare against the a0 the door
-       reports (ARM2X86_TRACE_CB): if native code later invokes with a different pointer, it copied the block
+    /* 10-11 DIAGNOSTIC: the block we wrapped and the invoke we replaced. Compare against the a0 the door
+       reports (ARM2X86_TRACE_CB): if native code later invokes with a DIFFERENT pointer, it copied the block
        and the copy is what matters. */
     { static int tr = -1; if (tr < 0) tr = A2X_DBGENV("ARM2X86_TRACE_CB") ? 1 : 0;
       if (tr) fprintf(a2x_errf(), "[blk] wrap block=%p invoke=0x%lx flags=0x%x\n", b0, b->invoke, b->flags); }
@@ -620,12 +617,12 @@ void *_Block_copy(const void *block) {
     pthread_once(&a2x_block_runtime_once, a2x_resolve_block_runtime);
     return a2x_real_copy(__arm2x86_blk((void *)block));
 }
-/* A block that crosses as an object is still a block. With ARC,
-      `void (^b)(int) = ^...` becomes objc_retainBlock, libobjc calls _Block_copy in libsystem_blocks directly, and a call
-      between two system libraries never reaches the override above -- native code ran the arm64 copy function
-      (SIGBUS at ___copy_helper_block_e8_32r). So the wrap happens at our boundary: objc_retainBlock, and every '@'
+/* 10-17 A BLOCK THAT CROSSES AS AN OBJECT IS STILL A BLOCK. Measured (slice/objc1.m): ARC turns
+      `void (^b)(int) = ^...` into objc_retainBlock, libobjc calls _Block_copy in libsystem_blocks directly, and a call
+      between two system libraries never reaches the override above -- native code ran the arm64 copy helper
+      (SIGBUS at ___copy_helper_block_e8_32r). So the wrap happens at OUR boundary: objc_retainBlock, and every '@'
       argument whose isa is one of the three block classes.
-   isa is the test, never shape. Tagged pointers (low bit on x86) and small values are never dereferenced. */
+    isa is the test, never shape. Tagged pointers (low bit on x86) and small values are never dereferenced. */
 extern void *_NSConcreteStackBlock[], *_NSConcreteMallocBlock[], *_NSConcreteGlobalBlock[];
 const void *(*a2x_block_probe_view)(unsigned long);
 #include "safe_block_probe.h"
@@ -653,32 +650,32 @@ void _Block_object_dispose(const void *object, int flags) {
     a2x_real_dispose(object, flags);
 }
 
-/* translated code may hold an ARM class or metaclass address (a class in the same image is referenced
+/* rung 3b: translated code may hold an ARM class or metaclass ADDRESS (a class in the same image is referenced
    directly — adrp/add OBJC_CLASS_$_X — with no classref to patch). Every boundary into the native runtime maps it. */
 unsigned long __arm2x86_mapcls(unsigned long a);
 /* categories on Swift classes that are reached through an ObjC class stub (__objc_catlist2); defined beside add_methods */
 static unsigned long gNSCopen;
 static int a2x_stubcat_poll(id rcv);
-/* reverse of the twin map: which guest class address was this native twin built for, 0 if it is not
+/* 10-21 reverse of the twin map: which GUEST class address was this native twin built for, 0 if it is not
       one of ours. Diagnostics need identity by twin, not by name — two classes can share a name. Defined with
       the twin table far below. */
 static unsigned long a2x_twin_guest_addr(Class c);
 /* ---- the message send ------------------------------------------------------------------------------------------------------ */
-/* Variadic methods. A type encoding never marks a method variadic, and Apple arm64 puts every variadic argument
- *    on the stack — so stringWithFormat: through the generic path passes nothing for its tail (a report printed
- *    "device 925 ... status 7"). Each variadic Foundation method goes to its va_list counterpart over a SysV
- *    va_list whose overflow area is the arm64 stack (the printf bridge); nil-terminated lists are read to the nil. */
+/* rung 3c VARIADIC METHODS. A type encoding never marks a method variadic, and Apple arm64 puts every variadic argument
+ *    on the STACK — so stringWithFormat: through the generic path passes nothing for its tail (measured: the l3c report
+ *    printed "device 925 ... status 7"). Each variadic Foundation method goes to its va_list counterpart over a SysV
+ *    va_list whose overflow area IS the arm64 stack (the printf bridge, R34); nil-terminated lists are read to the nil. */
 #include <stdarg.h>
 #include "vtail.h"
 static void arm_va2(va_list ap) { ap[0].gp_offset = 48; ap[0].fp_offset = 176; ap[0].overflow_arg_area = (void *)__arm_sp; ap[0].reg_save_area = NULL; }
 static id msg(id r, const char *s) { return ((id (*)(id, SEL))objc_msgSend)(r, sel_registerName(s)); }
-/* The selector is checked by pointer, before anything else. This function runs on every non-super
-      send, and mapping the receiver's class, calling sel_getName and then walking up to 13 strcmp — all to
-      recognise 13 variadic selectors that are sent rarely — was a large part of the bridge for nothing
-      (a send costs ~65 ns in total). Selectors are interned, so a pointer compare is not an
+/* 10-24 THE SELECTOR IS CHECKED BY POINTER, BEFORE ANYTHING ELSE. This function runs on every non-super
+      send, and it used to map the receiver's class, call sel_getName and then walk up to 13 strcmp — all to
+      recognise 13 variadic selectors that a game sends rarely. A send costs ~65 ns in total (ops/objcbench),
+      so that was a large part of the bridge for nothing. Selectors are interned, so a pointer compare is not an
       approximation of the name compare: it is exact. Everything below is unchanged.
-   The table is published with a release store after it is filled, and read with an acquire load. Two threads
-      racing both write the same interned pointers, but a reader must never see a half-filled table: a miss here
+    The table is published with a release store AFTER it is filled, and read with an acquire load. Two threads
+      racing both write the same interned pointers, but a reader must never see a half-filled table: a MISS here
       does not fall back, it sends the variadic selector down the fixed-argument path and loses its arguments. */
 static const char *const A2X_VARSELS[] = {
     "stringWithFormat:", "initWithFormat:", "localizedStringWithFormat:", "stringByAppendingFormat:",
@@ -703,7 +700,7 @@ __attribute__((noinline)) static int var_send(void) {
       if (i == A2X_NVARSEL) return 0; }        /* the overwhelmingly common case: not a variadic selector */
     id self = (id)__arm2x86_mapcls(RX(0)); const char *sn = sel_getName((SEL)RX(1)); id r = nil; va_list ap;
     if (!self) return 0;
-    /* A class-method selector sent to an instance is some other method that shares the name (Calendar sends an
+    /* A class-method selector sent to an INSTANCE is some other method that shares the name (Calendar sends an
        NSDate -localizedStringWithFormat:). Rebuilding it as +[NSString ...] sent `alloc` to the instance. */
     { int inst_sel = !strcmp(sn, "initWithFormat:") || !strcmp(sn, "stringByAppendingFormat:") || !strcmp(sn, "appendFormat:") ||
                      !strcmp(sn, "initWithObjects:") || !strcmp(sn, "initWithObjectsAndKeys:") ||
@@ -742,15 +739,8 @@ __attribute__((noinline)) static int var_send(void) {
                                                            sel_registerName("initWithFormat:arguments:"), (id)RX(3), ap);
         ((void (*)(id, SEL, id, struct a2x_codeloc))objc_msgSend)(self, ms, msg(t, "autorelease"), *(struct a2x_codeloc *)RX(2)); }
     else if (!strcmp(sn, "propertyMapWithPropertiesAndValues:")) {
-        /* A native variadic method outside the table above gets its tail. Apple arm64 left every variadic argument
-      in 8-byte stack slots at __arm_sp; x86-64 SysV wants them in the integer registers after the fixed ones, then on
-      the stack — which is exactly where a `...` call puts trailing arguments. Without this, revisiond's
-      -[PQLConnection execute:@"... %@", x] reached -[PQLStatement translate:hasInjections:arguments:] with x3 = 0 and
-      faulted at 0x18. Twelve slots are passed; a fixed-argument callee ignores them by the ABI.
-   Integer-class only. A double in the tail (a %f) arrives in a stack slot here but x86 reads it from xmm — the same
-      wrong value as without this, never a new failure. Named, not fixed: no known caller yet.
-   The read is bounded by the mapped region that holds the arm stack, cached per thread, so a send from the very
-      top of a thread's stack can never read off its end. */
+        /* a property number first, then value and property in turn, ended by a zero property: the class's own
+           constructor with an argument list does the reading */
         if (!class_respondsToSelector(object_getClass(msg(self, "alloc")), sel_registerName("initWithFirstKey:andArgumentList:"))) return 0;
         arm_va2(ap);
         r = ((id (*)(id, SEL, int, va_list))objc_msgSend)(msg(self, "alloc"), sel_registerName("initWithFirstKey:andArgumentList:"), (int)RX(2), ap);
@@ -784,10 +774,15 @@ __attribute__((noinline)) static int var_send(void) {
     RX(0) = (uint64_t)r; return 1;
 }
 
-/* Bring-up only, opt-in: ARM2X86_GPU_AS_M4=1 answers -[MTLDevice supportsFamily:] the way an Apple M4 GPU does
-      (Apple1-9, Common1-3, Mac2, Metal3, Metal4 YES; Apple10 no), inside this process only. Nothing system-wide,
-      nothing in the driver: it lets an app pass its GPU checks so a comparison shows which Metal features it uses next.
-      The driver claims a family only when those features are implemented and proven. */
+/* 10-28 A NATIVE VARIADIC METHOD OUTSIDE THE TABLE ABOVE GETS ITS TAIL. Apple arm64 left every variadic argument
+      in 8-byte stack slots at __arm_sp; x86-64 SysV wants them in the integer registers after the fixed ones, then on
+      the stack — which is exactly where a `...` call puts trailing arguments. Measured: revisiond's
+      -[PQLConnection execute:@"... %@", x] reached -[PQLStatement translate:hasInjections:arguments:] with x3 = 0 and
+      faulted at 0x18. Twelve slots are passed; a fixed-argument callee ignores them by the ABI.
+    Integer-class only. A double in the tail (a %f) arrives in a stack slot here but x86 reads it from xmm — the same
+      wrong value as before this change, never a new failure. Named, not fixed: no measured caller yet.
+    The read is bounded by the mapped region that holds the arm stack, cached per thread, so a send from the very
+      top of a thread's stack can never read off its end. */
 static __thread uint64_t a2x_vt_lo, a2x_vt_hi;
 static uint64_t a2x_vtail_call(void (*f)(void), const uint64_t *a, int na, uint64_t sp) {
     uint64_t t[12] = {0};
@@ -813,31 +808,29 @@ static uint64_t a2x_vtail_call(void (*f)(void), const uint64_t *a, int na, uint6
     return 0;
 }
 
-/* Bring-up only, opt-in: ARM2X86_GPU_AS_M4=1 answers -[MTLDevice supportsFamily:] the way the M4 did for this
-      game (captured: Apple1-9, Common1-3, Mac2, Metal3, Metal4 YES; Apple10 NO), inside this process only. Nothing system-wide,
-      nothing in the driver: it lets the game pass its GPU checks so the M4 diff shows which Metal features it uses next.
+/* 10-03 BRING-UP ONLY, OPT-IN: ARM2X86_GPU_AS_M4=1 answers -[MTLDevice supportsFamily:] the way the M4 did for this
+      game (captured: Apple1-9, Common1-3, Mac2, Metal3, Metal4 YES; Apple10 NO), inside THIS process only. Nothing system-wide,
+      nothing in the driver: it lets the game pass its GPU checks so the M4 diff shows which Metal features it USES next.
       The driver claims a family only when those features are implemented and proven (the north-star rule). */
 static int gpu_as_m4(SEL sel, uint64_t fam, uint64_t *out) {
     static int on = -1; static SEL sf;
     if (on < 0) { on = A2X_DBGENV("ARM2X86_GPU_AS_M4") != 0; sf = sel_registerName("supportsFamily:");
-                  if (on) fprintf(a2x_errf(), "[xlat2] GPU families answered AS THE M4 (ARM2X86_GPU_AS_M4, bring-up only)\n"); }
+                  if (on) fprintf(a2x_errf(), "[xlat2]  GPU families answered AS THE M4 (ARM2X86_GPU_AS_M4, bring-up only)\n"); }
     if (!on || sel != sf) return 0;
     *out = (fam >= 1001 && fam <= 1009) || fam == 2001 || fam == 2002 || (fam >= 3001 && fam <= 3003) || fam == 5001 || fam == 5002;
     return 1;
 }
-/* The last messages sent, so a runaway can be read off instead of guessed at. A translated ObjC method that
+/* 10-20 THE LAST MESSAGES SENT, so a runaway can be read off instead of guessed at. A translated ObjC method that
       re-enters itself through the bridge eats the stack and dies in whatever frame happened to be entering — the crash
       site names the victim, never the loop. (Chasing that cost a day: the repeating frames were msg_send, imp_handler
-      and __arm2x86_call_rf, i.e. the bridge round-trip, which says a message recurses but not which one.)
+      and __arm2x86_call_rf, i.e. the bridge round-trip, which says a message recurses but not WHICH one.)
       A ring of the last 64 selectors costs two stores per message and names the cycle outright. */
-/* NAMING A receiver's class can itself crash. A diagnostic that called class_getName() on whatever the
-      guest passed died inside objc_class::demangledName on fault address 0x3 — the receiver was a tagged pointer
+/* 10-20 NAMING A RECEIVER'S CLASS CAN ITSELF CRASH. A diagnostic that called class_getName() on whatever the
+      guest passed died inside objc_class::demangledName on fault address 0x3 — the receiver was a TAGGED pointer
       (arm64 marks tagged in bit 63, x86_64 in bit 0), so object_getClass() handed back something that is not a class.
       A diagnostic must never be the thing that kills the process: refuse to dereference anything that is not a plain,
       aligned, canonical pointer and say what it looks like instead. */
-static const char *a2x_cname(Class c);   /* Pointers, not names: running sel_getName + a2x_clsname + class_getName on every send to fill a
-   ring that is only ever read at a crash costs most of a ~65 ns send. A SEL and a Class are permanent,
-   so resolving them in the dump is both cheaper and safer than reading a receiver that may be gone by then. */
+static const char *a2x_cname(Class c);   /* registry-checked name, defined below */
 static const char *a2x_clsname(const void *p) {
     uintptr_t v = (uintptr_t)p;
     if (!v) return "(nil)";
@@ -850,7 +843,7 @@ static const char *a2x_clsname(const void *p) {
     return a2x_cname(c);
 }
 #define A2X_MSGRING 64
-/* POINTERS, not names: sel_getName + a2x_clsname + class_getName used to run on every send to fill a
+/* 10-24 POINTERS, not names: sel_getName + a2x_clsname + class_getName used to run on EVERY send to fill a
    ring that is only ever read at a crash (~65 ns a send in total, ops/objcbench). A SEL and a Class are permanent,
    so resolving them in the dump is both cheaper and safer than reading a receiver that may be gone by then. */
 static struct { SEL sel; Class rcls; Class start; const void *rcv; int super; } g_msgring[A2X_MSGRING];
@@ -861,7 +854,7 @@ void a2x_dump_msgring(void) {
     fprintf(a2x_errf(), "[xlat2]   last %u ObjC messages (newest first):\n", n);
     for (unsigned i = 0; i < n; i++) {
         unsigned k = (g_msgring_n - 1 - i) % A2X_MSGRING;
-        /* the receiver distinguishes one object recursing from a fresh object built on every pass (a once/
+        /* the RECEIVER distinguishes one object recursing from a fresh object built on every pass (a once/
               singleton that never latches) — two very different bugs that produce an identical selector sequence. */
         /* a Class that was nil at send time falls back to reading the receiver, exactly as this line used to */
         const char *cname = g_msgring[k].rcls ? a2x_cname(g_msgring[k].rcls) : a2x_clsname(g_msgring[k].rcv);
@@ -872,47 +865,36 @@ void a2x_dump_msgring(void) {
                 start ? "  lookup starts at " : "", start ? start : "");
     }
 }
-/* imp_handler's sret verdict, carried back to msg_send. The native->guest direction knows
-      that a struct return of <= 16 bytes can still be a memory return (a C++ class with a copy
+/* 10-05 was `send`: <curl/curl.h> brings <sys/socket.h>, whose send(2) conflicted */
+/* 10-21 imp_handler's SRET VERDICT, CARRIED BACK TO msg_send. The 10-20 fix taught the NATIVE->GUEST
+      direction that a struct return of <= 16 bytes can still be a memory return (a C++ class with a copy
       constructor or a destructor is returned in memory at any size, and the type encoding cannot tell us:
-      {Trivial=^v} and {NonTrivial=^v} encode identically). Without this verdict the guest->native
-      direction wrote every <= 16-byte struct into x0/x1, so the arm64 caller's x8 buffer was never filled.
-   In Finder: `-[TNodeViewSettings isAllMyFilesTarget]` does `add x8, sp, #8` and sends
+      {Trivial=^v} and {NonTrivial=^v} encode identically). The GUEST->NATIVE direction still wrote every
+      <= 16-byte struct into x0/x1, so the arm64 caller's x8 buffer was never filled.
+    MEASURED IN Finder: `-[TNodeViewSettings isAllMyFilesTarget]` does `add x8, sp, #8` and sends
       `node`; `-[TNodeViewSettings node]` is `add x1, x0, #0x20 / mov x0, x8 / b <copy ctor>`, i.e. an
-      8-byte TNodeRef copy-constructed into x8. With the slot left unwritten, the next instruction
-      (`ldr x0, [x0]` in the shared function at 0x100014b90) read a stale stack word -- a
+      8-byte TNodeRef copy-constructed INTO x8. With the slot left unwritten, the next instruction
+      (`ldr x0, [x0]` in the shared helper at 0x100014b90) read a stale stack word -- a
       Browser::TListBrowserSettings* -- and handed it to DesktopServicesPriv's _NodeGetCustomNode, which
       objc_msgSends it: SIGSEGV in objc_lookUpImpOrForward with the C++ vtable 0x100adb4f0 as the class.
-   No new heuristic: imp_handler already asks the callee with a poisoned buffer. This only reports what it
+    No new heuristic: imp_handler already ASKS the callee with a poisoned buffer. This only reports what it
       found, so the two directions cannot disagree. Nesting is safe because each imp_handler stores its verdict
-      after its own guest call returns and each msg_send reads it immediately after ffi_call. */
-/* ==== the per-(class, selector) call plan ==================================================================================
- * Profiled on a Metal game's busiest thread (93% running): msg_send's own work was 12.1% of that thread and libffi
- *    another 13%, because every send re-derived what
- *    depends only on the receiver's class and the selector — class_getInstanceMethod, method_getTypeEncoding, a copy of
- *    the encoding, the argument parse, and a full ffi_prep_cif (examine_argument and classify_argument were leaves in the
- *    profile). A plan is built once per (class, selector) and read without a lock.
- * Only a non-super send whose Method was found is cached. forwardingTargetForSelector: and methodSignatureForSelector:
- *    answer per call — caching a plan there would freeze one call's forwarding target for every later send.
- * The IMP is not cached. The call still goes through objc_msgSend, so method_setImplementation, KVO and
- *    class_addMethod keep working; only the type signature is remembered, and that does not change for a (class, selector).
- * Entries are never freed: a Class that is unloaded would leave a stale key, and objc class unloading does not happen
- *    in a translated process (no dlclose of an image whose classes we registered). */
+      AFTER its own guest call returns and each msg_send reads it immediately after ffi_call. */
 static __thread int a2x_sret_via_x8;
 unsigned long __arm2x86_objc_imp_target(unsigned long t);
 extern void __arm2x86_call_rf(unsigned long imp);
 
-/* ==== the per-(class, selector) call plan ==================================================================================
- * MEASURED on Cyberpunk 2077, 1080p, ray tracing off (29.1 fps; `sample` of the game's busiest thread, 93%
- *    running): msg_send's own work was 12.1% of that thread and libffi another 13%, because every send re-derived what
+/* ==== THE PER-(CLASS, SELECTOR) CALL PLAN ==================================================================================
+ *  10-24 MEASURED on Cyberpunk 2077, 1080p, ray tracing off (29.1 fps; `sample` of the game's busiest thread, 93%
+ *    running): msg_send's own work was 12.1% of that thread and libffi another 13%, because EVERY send re-derived what
  *    depends only on the receiver's class and the selector — class_getInstanceMethod, method_getTypeEncoding, a copy of
  *    the encoding, the argument parse, and a full ffi_prep_cif (examine_argument and classify_argument were leaves in the
  *    profile). A plan is built once per (class, selector) and read without a lock.
- * Only a non-super send whose Method was found is cached. forwardingTargetForSelector: and methodSignatureForSelector:
- *    answer per call — caching a plan there would freeze one call's forwarding target for every later send.
- * The IMP is not cached. The call still goes through objc_msgSend, so method_setImplementation, KVO and
- *    class_addMethod keep working; only the type signature is remembered, and that does not change for a (class, selector).
- * Entries are never freed: a Class that is unloaded would leave a stale key, and objc class unloading does not happen
+ *  ONLY a non-super send whose Method was found is cached. forwardingTargetForSelector: and methodSignatureForSelector:
+ *    answer PER CALL — caching a plan there would freeze one call's forwarding target for every later send.
+ *  The IMP is NOT cached. The call still goes through objc_msgSend, so method_setImplementation, KVO and
+ *    class_addMethod keep working; only the TYPE SIGNATURE is remembered, and that does not change for a (class, selector).
+ *  Entries are never freed: a Class that is unloaded would leave a stale key, and objc class unloading does not happen
  *    in a translated process (no dlclose of an image whose classes we registered). */
 #define A2X_PLANS 4096                 /* a power of two: the index is a mask of the hash */
 #define A2X_PLAN_PROBE 8               /* linear probes before giving up and taking the uncached path */
@@ -920,21 +902,21 @@ struct a2x_plan {
     Class cls; SEL sel;
     char *types;                       /* owned copy: aenc[] points into it */
     ffi_type *rt; int na; int simple;
-    int vtail;                         /* the native IMP is variadic (vtail.h): pass the arm stack tail */
-/* How many arguments one OBJC send can carry. WAS A BARE 24 in nine places, and macOS 27 apps
+    int vtail;                         /* 10-28 the native IMP is variadic (vtail.h): pass the arm stack tail */
+/* HOW MANY ARGUMENTS ONE OBJC SEND CAN CARRY.  WAS A BARE 24 IN NINE PLACES, and macOS 27 apps
       exceed it: Books aborts on -initWithItemType:identifier:... and Freeform on
       -initWithValueType:format:..., both "> 24 args", after their class graphs register cleanly.
-   It stays a hard refusal rather than a truncation: silently dropping arguments past the limit
+    It stays a HARD REFUSAL rather than a truncation: silently dropping arguments past the limit
       would call a real method with garbage, which is worse than a named stop. The arrays below are
       all sized from this one constant so they can never disagree again. */
 #define A2X_MAXARG 64
 
     ffi_type *at[A2X_MAXARG]; const char *aenc[A2X_MAXARG];
-    /* per argument, for the simple path: its width in bytes, and which transform the encoding asks for.
+    /* per argument, for the simple path: its width in bytes, and WHICH transform the encoding asks for.
        Deriving these per call meant re-reading the encoding text on every send. */
     unsigned char abytes[A2X_MAXARG];
-    unsigned char xform[A2X_MAXARG];           /* prepared on this call plan's at[], which ffi keeps a pointer to */
-    ffi_cif cif;                       /* prepared on this plan's at[], which ffi keeps a pointer to */
+    unsigned char xform[A2X_MAXARG];           /* 0 none 1 '@?' block 2 '@' i<2 3 '@' i>=2 4 '#' i>=2 */
+    ffi_cif cif;                       /* prepared on THIS plan's at[], which ffi keeps a pointer to */
 };
 static struct a2x_plan *g_plans[A2X_PLANS];
 static pthread_mutex_t g_planm = PTHREAD_MUTEX_INITIALIZER;
@@ -954,10 +936,8 @@ static struct a2x_plan *a2x_plan_find(Class cls, SEL sel) {
     return 0;
 }
 
-/* One classification for every plan, cached or direct: simple (integer-only), per-argument widths and
-      transforms, and whether the native IMP is variadic. A direct IMP plan (a2x_record_native_imp) that skipped this
-      would never see vtail: a guest that cached the IMP of -[IMLogger logFile:lineNumber:format:] called it through
-      ffi with five fixed arguments, and the first tail slot (r9) held a stale host return address. */
+/* The direct call below places every argument as one 8-byte general register or stack slot. A float, a double, an HFA
+      or a struct needs libffi's own classification, and a struct return needs the _stret entry — none of those is simple. */
 static int a2x_int_class(ffi_type *t) {
     switch (t->type) {
     case FFI_TYPE_INT: case FFI_TYPE_SINT8: case FFI_TYPE_UINT8: case FFI_TYPE_SINT16: case FFI_TYPE_UINT16:
@@ -967,7 +947,7 @@ static int a2x_int_class(ffi_type *t) {
     }
 }
 
-/* ONE classification for every plan, cached or direct: simple (integer-only), per-argument widths and
+/* 10-30 ONE classification for every plan, cached or direct: simple (integer-only), per-argument widths and
       transforms, and whether the native IMP is variadic. A direct IMP plan (a2x_record_native_imp) used to skip this
       and so never saw vtail: a guest that cached the IMP of -[IMLogger logFile:lineNumber:format:] called it through
       ffi with five fixed arguments, and the first tail slot (r9) held a stale host return address. */
@@ -1029,10 +1009,9 @@ static struct a2x_plan *a2x_plan_add(Class cls, SEL sel, const char *types) {
 }
 
 static int is_arm(unsigned long a);
-/* rcls can be neither tagged nor an arm64 address, yet class_getName faulted in demangledName
-   (name pointer 0x228000000, an arm64-layout class_ro_t read by x86 libobjc). The only test that never dereferences the
-   suspect is membership in the registered class list. Diagnostic paths only: it is O(classes). */
-/* b32h still died here: rcls was neither tagged nor an arm64 address, yet class_getName faulted in demangledName
+/* a class name that cannot fault: a raw guest class (an object allocated without going through the twin map keeps the
+   guest isa) has an arm64 class_ro_t that x86 libobjc misreads (App Store, name pointer 0x228000000 in demangledName) */
+/* 10-30 b32h still died here: rcls was neither tagged nor an arm64 address, yet class_getName faulted in demangledName
    (name pointer 0x228000000, an arm64-layout class_ro_t read by x86 libobjc). The only test that never dereferences the
    suspect is membership in the registered class list. Diagnostic paths only: it is O(classes). */
 static int a2x_cls_registered(Class c) {
@@ -1063,15 +1042,6 @@ static void a2x_dump_words(const char *tag, const void *p) {
 static Class a2x_super_of(Class k) { return a2x_cls_registered(k) ? class_getSuperclass(k) : Nil; }
 static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long direct_target) {
     uint64_t x0 = RX(0); SEL sel = (SEL)RX(1); struct objc_super sup_copy;
-#if !A2X_SHIP
-    { static int tr = -1; if (tr < 0) tr = A2X_DBGENV("ARM2X86_TRACE_SENDS") ? 1 : 0;
-      if (tr && sel) { const char *cn = "?"; if (!super && x0 && !(x0 & 1) && !(x0 >> 47)) { Class c_ = object_getClass((id)x0); if (c_) cn = class_getName(c_); }
-          fprintf(a2x_errf(), "[send] %s%s %s\n", super ? "super " : "", cn, sel_getName(sel)); 
-          { const char *sn_ = sel_getName(sel); uint64_t a2 = RX(2);
-            if ((strstr(sn_, "Text:") || strstr(sn_, "Title:")) && a2 && !(a2 & 1) && !(a2 >> 47) &&
-                class_respondsToSelector(object_getClass((id)a2), sel_registerName("UTF8String")))
-                fprintf(a2x_errf(), "[send]   = \"%s\"\n", ((const char *(*)(id, SEL))objc_msgSend)((id)a2, sel_registerName("UTF8String"))); } } }
-#endif
     Class cls = Nil; Method m = NULL; struct a2x_plan *pl = direct_plan;
     if (!direct_plan) {
     { uint64_t r_; if (!super && RX(0) && gpu_as_m4((SEL)RX(1), RX(2), &r_)) { RX(0) = r_; return; } }
@@ -1081,7 +1051,7 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
                  sup_copy.receiver = (id)__arm2x86_mapcls((unsigned long)sp->receiver);
                  sup_copy.super_class = (Class)__arm2x86_mapcls((unsigned long)sp->super_class);
                  RX(0) = (uint64_t)&sup_copy;
-                 /* a NIL super_class is not dispatchable: libobjc would restart the lookup at the receiver and
+                 /* 10-20 a NIL super_class is not dispatchable: libobjc would restart the lookup at the receiver and
                        find the very method that sent `super`, which is an unbounded recursion that ends as a stack
                        overflow in whatever frame happens to be next (Dock's SystemAppearanceMonitor init). It is also
                        what crashed objc_lookUpImpOrForward here, because class_getInstanceMethod(nil, …) faults.
@@ -1089,32 +1059,24 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
                  if (!sup_copy.super_class) die2("super send with a NULL super_class (its __objc_superrefs slot was "
                                                  "never filled) — super would restart at the receiver", sel_getName(sel));
                  cls = class_getSuperclass(sup_copy.super_class);
-                 /* Root cause: a Swift `super.init` does not read __objc_superrefs. It calls
-                       swift_getObjectType(self) and puts the result in objc_super.super_class (arm64:
+                 /* 10-20 a class that is ITS OWN superclass makes `super` an infinite loop. Name it once: this is
+                       cheap and the failure it catches costs the whole stack and names the wrong function. */
+                 /* 10-20 ROOT CAUSE, MEASURED: a Swift `super.init` does NOT read __objc_superrefs. It calls
+                       swift_getObjectType(self) and puts the RESULT in objc_super.super_class (arm64:
                        `bl _swift_getObjectType; mov x19,x0; ... stp x20,x19,[sp]; bl _objc_msgSendSuper2`).
                        swift_getObjectType returns real Swift metadata only when the class carries the "is Swift
                        stable" bit in class->bits; objc_allocateClassPair() — which is how this bridge registers every
-                       guest class — cannot set it. So the Swift runtime falls through to swift_getObjCClassMetadata
+                       guest class — CANNOT set it. So the Swift runtime falls through to swift_getObjCClassMetadata
                        and hands back an **ObjCClassWrapper** record {kind=0x305, Class} carved out of libswiftCore's
-                       static arena `_ZL21InitialAllocationPool`. On the target: two such classes 0x20 apart
+                       static arena `_ZL21InitialAllocationPool`. Measured on the target: two such classes 0x20 apart
                        (0x7ff84383e758 / 0x7ff84383e778), wrapper[1] == the class, and
-                       class_getSuperclass(wrapper) reads word 1 and returns the class itself — so objc_msgSendSuper2
+                       class_getSuperclass(wrapper) reads word 1 and returns THE CLASS ITSELF — so objc_msgSendSuper2
                        restarts the lookup on the sending class, finds its own init, and recurses until the stack is
                        gone. class_getName(wrapper) reads wrapper+32, i.e. arena garbage: the fault at 0x3 inside
                        objc_class::demangledName.
-                    Unwrap it: an ObjCClassWrapper is {MetadataKind kind; Class cls}, kind 0x305. Taking word 1 gives
+                     Unwrap it: an ObjCClassWrapper is {MetadataKind kind; Class cls}, kind 0x305. Taking word 1 gives
                        the class Swift meant, which is exactly what Super2 needs. This is the precise fix; the
                        reachability check below stays as a backstop for anything else that is not a class. */
-                 /* The __objc_superrefs slot cannot be trusted, and a bad one is an infinite loop.
-                       In the Dock, the slot for `[super init]` in DockCore.SystemAppearanceMonitor held
-                       0x7ff84383e758 = libswiftCore's `_ZL21InitialAllocationPool+0x2360` — not a class at all.
-                       objc_msgSendSuper2 starts at class_getSuperclass(super_class), so from that value it landed back
-                       on the class's own init: init -> NSUserDefaults -> init -> ... until 60 MB of stack was gone, and
-                       the crash then named whatever frame happened to be entering. class_getName() on it faults too.
-                    Validate it: a real class answers class_getName() with a readable name and is reachable from the
-                       receiver's own chain. When it is not, start from the receiver's class's superclass, which is the
-                       right answer whenever the sending method belongs to the receiver's class — the common case — and
-                       is always better than looping. Say so every time; this is a bind defect, not something to absorb. */
                  if (sup_copy.super_class) {
                      const uintptr_t *w = (const uintptr_t *)sup_copy.super_class;
                      if (!((uintptr_t)w & 7) && w[0] == 0x305 && w[1] && !(w[1] & 7)) {
@@ -1128,38 +1090,31 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
                          m = cls ? class_getInstanceMethod(cls, sel) : 0;
                      }
                  }
-                 /* THE __objc_superrefs slot cannot be trusted, and A bad one is an infinite loop.
+                 /* 10-20 THE __objc_superrefs SLOT CANNOT BE TRUSTED, AND A BAD ONE IS AN INFINITE LOOP.
                        Measured on Dock: the slot for `[super init]` in DockCore.SystemAppearanceMonitor held
                        0x7ff84383e758 = libswiftCore's `_ZL21InitialAllocationPool+0x2360` — not a class at all.
                        objc_msgSendSuper2 starts at class_getSuperclass(super_class), so from that value it landed back
-                       on the class's own init: init -> NSUserDefaults -> init -> ... until 60 MB of stack was gone, and
+                       on the class's OWN init: init -> NSUserDefaults -> init -> ... until 60 MB of stack was gone, and
                        the crash then named whatever frame happened to be entering. class_getName() on it faults too.
-                    Validate it: a real class answers class_getName() with a readable name and is reachable from the
+                     Validate it: a real class answers class_getName() with a readable name and is reachable from the
                        receiver's own chain. When it is not, start from the receiver's class's superclass, which is the
                        right answer whenever the sending method belongs to the receiver's class — the common case — and
                        is always better than looping. Say so every time; this is a bind defect, not something to absorb. */
                  {
                      Class rcls = sup_copy.receiver ? object_getClass((id)sup_copy.receiver) : Nil;
-                     /* the receiver isa can be the raw guest class; its twin is what the chain walk, the
+                     /* 10-30 the receiver isa can be the raw GUEST class; its twin is what the chain walk, the
                         reachability test and every name below must see */
                      if (rcls) rcls = (Class)__arm2x86_mapcls((unsigned long)rcls);
-                     /* Compare by twin identity, not by pointer — one guest class has two
-                          representations. In pkd, the superrefs slot was right (the PKDServer twin
-                          0x6000019e8d20, twin_of_guest=0x200033a88) while the receiver's isa was the raw guest
+                     /* reachability is the test that needs no dereference of the suspect value: a legitimate Super2
+                        super_class is always the receiver's class or one of its ancestors. */
+                     /* 10-21 COMPARE BY TWIN IDENTITY, NOT BY POINTER — ONE GUEST CLASS HAS TWO
+                          REPRESENTATIONS. Measured in pkd: the superrefs slot was RIGHT (the PKDServer twin
+                          0x6000019e8d20, twin_of_guest=0x200033a88) while the RECEIVER's isa was the raw GUEST
                           class 0x200033a88, never mapped — the class of objects allocated through a path that
-                          does not go through __arm2x86_mapcls (see the objc_alloc family below).
+                          does not go through __arm2x86_mapcls ([[project_arm2x86_objc_alloc_guest_isa_1021]]).
                           A pointer comparison between a twin and a guest chain can never match, so a correct
                           slot was rejected on every super send and the fallback ran instead. Reducing both
-                          sides to the guest address makes the two representations compare equal. */
-                     /* What is actually in that slot. From the arm64 image: PKDServer is
-                                  instanceStart 8 / instanceSize 64 while PKDatabase is instanceSize 88, so PKDServer
-                                  cannot be a PKDatabase subclass — yet this fallback resolved its `super` to
-                                  PKDatabase. Either a twin was built with the wrong superclass, or two twins exist
-                                  for one guest class. Running the wrong class's init lays ivars out at the wrong
-                                  offsets, which gives a deterministic fault (objc_release on a pointer read
-                                  out of the middle of a "com.apple…" string, same address across two builds).
-                                  Identity is printed by twin as well as by name, because two classes can share a
-                                  name and still be different objects. */
+                          sides to the GUEST address makes the two representations compare equal. */
                      int bad = !cls, reachable = 0;
                      unsigned long sg = a2x_twin_guest_addr(sup_copy.super_class);
                      if (!sg) sg = (unsigned long)sup_copy.super_class;
@@ -1177,13 +1132,15 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
                                      sel_getName(sel), (void *)sup_copy.super_class, a2x_cname(rcls));
                              a2x_dump_words("receiver", (void *)sup_copy.receiver);
                              a2x_dump_words("rcls    ", (void *)rcls);
-                             /* Do not guess when the slot is a legitimate twin. Substituting the
-                              receiver's class is wrong whenever the receiver is a subclass of the class whose
-                              method is executing: `[super init]` must start at the sending class's superclass,
-                              and starting at the receiver's instead runs a different class's init, which lays
-                              ivars out at different offsets. The fallback exists only for a slot that is not a
-                              class at all (the Dock's libswiftCore garbage above) — so it is limited to
-                              that case and says so, instead of silently papering over a correct slot. */
+                             /* 10-21 WHAT IS ACTUALLY IN THAT SLOT. Measured from the arm64 image: PKDServer is
+                                  instanceStart 8 / instanceSize 64 while PKDatabase is instanceSize 88, so PKDServer
+                                  CANNOT be a PKDatabase subclass — yet this fallback resolved its `super` to
+                                  PKDatabase. Either a twin was built with the wrong superclass, or two twins exist
+                                  for one guest class. Running the wrong class's init lays ivars out at the wrong
+                                  offsets, which is the measured deterministic fault (objc_release on a pointer read
+                                  out of the middle of a "com.apple…" string, same address across two builds).
+                                  Identity is printed by TWIN as well as by name, because two classes can share a
+                                  name and still be different objects. */
                              Class sl = sup_copy.super_class;
                              const char *sn = a2x_cname(sl);
                              fprintf(a2x_errf(),
@@ -1199,9 +1156,9 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
                                          (void *)k, a2x_cname(k), (unsigned long)(a2x_cls_registered(k) ? class_getInstanceSize(k) : 0),
                                          a2x_twin_guest_addr(k), k == sl ? "   <== THE SLOT" : "");
                          }
-                         /* Do not guess when the slot is A legitimate twin. Substituting the
+                         /* 10-21 DO NOT GUESS WHEN THE SLOT IS A LEGITIMATE TWIN. Substituting the
                               RECEIVER's class is wrong whenever the receiver is a subclass of the class whose
-                              method is executing: `[super init]` must start at the sending class's superclass,
+                              method is executing: `[super init]` must start at the SENDING class's superclass,
                               and starting at the receiver's instead runs a different class's init, which lays
                               ivars out at different offsets. The fallback exists only for a slot that is not a
                               class at all (the Dock's libswiftCore garbage, 10-20) — so it is now limited to
@@ -1212,7 +1169,7 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
                                      a2x_twin_guest_addr(sup_copy.super_class));
                          } else if (rcls) {
                              fprintf(a2x_errf(), "  -> the slot is NOT a known class; falling back to %s's superclass %s. "
-                                     "If this receiver is a SUBCLASS of the sending class this runs the WRONG init.\n",
+                                     " If this receiver is a SUBCLASS of the sending class this runs the WRONG init.\n",
                                      a2x_cname(rcls),
                                      a2x_super_of(rcls) ? a2x_cname(a2x_super_of(rcls)) : "(nil)");
                              sup_copy.super_class = rcls; cls = class_getSuperclass(rcls);
@@ -1229,20 +1186,20 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
 
                  m = cls ? class_getInstanceMethod(cls, sel) : 0; }
     else { x0 = __arm2x86_mapcls(x0); RX(0) = x0; cls = object_getClass((id)x0);
-           /* an instance whose isa is the raw guest class (VoiceMemos: "(unmapped guest class)") has no Method on that
+           /* an instance whose isa is the raw GUEST class (VoiceMemos: "(unmapped guest class)") has no Method on that
               arm64-layout record; look the selector up on its twin / realized class, as the super path does above */
            if (is_arm((unsigned long)cls)) cls = (Class)__arm2x86_mapcls((unsigned long)cls);
            { static SEL sdec, senc; static Class ca, cu; static int init;
              if (!init) { sdec = sel_registerName("decodeValueOfObjCType:at:"); senc = sel_registerName("encodeValueOfObjCType:at:");
                           ca = objc_getClass("NSArchiver"); cu = objc_getClass("NSUnarchiver"); init = 1; }
-             /* a call-plan hit skips the Method lookup, the encoding copy and the parse below */
+             /* A typedstream (NSArchiver/NSUnarchiver) names a BOOL 'c'. arm64 @encode(BOOL) is 'B'; arm64 Foundation
+                accepts the two as one, x86 Foundation does not ("read 'c', expecting 'B'"). Both are one byte. */
              if ((sel == sdec || sel == senc) && RX(2) > 4096) {
                  const char *ty = (const char *)RX(2);
                  if (ty[0] == 'B' && ty[1] == 0) {
                      for (Class k = cls; k; k = class_getSuperclass(k))
                          if (k == ca || k == cu) { static const char c_ty[] = "c"; RX(2) = (uint64_t)c_ty; break; } } } }
-           /* A category in __objc_catlist2 waits until its Swift class exists. The first send that is not served by a call plan
-       checks the receiver's class chain once; when a category was attached just now, the lookup is repeated. */
+           /* a plan hit skips the Method lookup, the encoding copy AND the parse below */
            pl = a2x_plan_find(cls, sel); m = pl ? 0 : class_getInstanceMethod(cls, sel); }
     /* A category in __objc_catlist2 waits until its Swift class exists. The first send that is not served by a plan
        checks the receiver's class chain once; when a category was attached just now, the lookup is repeated. */
@@ -1250,19 +1207,8 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
         id rcv_s = super ? sup_copy.receiver : (id)x0;
         if (rcv_s && a2x_stubcat_poll(rcv_s) && !m && cls) m = class_getInstanceMethod(cls, sel);
     }
-#if !A2X_SHIP
-    { unsigned k = g_msgring_n++ % A2X_MSGRING;      /* record after the class is known, before the call is made */
-      /* for a super send `cls` is where the lookup starts, not the receiver's class — reporting it as the class
-            read as "SystemAppearanceMonitor sent super to itself" when it may be a subclass sending super correctly. */
-      const void *rcv = super ? (const void *)sup_copy.receiver : (const void *)x0;
-      /* direct calls already carry the saved authoritative type signature */
-      g_msgring[k].sel = sel; g_msgring[k].super = super;
-      g_msgring[k].rcls = super ? object_getClass((id)sup_copy.receiver) : cls;
-      g_msgring[k].start = super ? cls : (Class)0;
-      g_msgring[k].rcv = rcv; }
-#endif
     } /* direct calls already carry the saved authoritative type plan */
-    /* ONE thread-local resolve for the whole send. RX() and RV() each expand to __arm2x86_rf, and on
+    /* 10-24 ONE thread-local resolve for the whole send. RX() and RV() each expand to __arm2x86_rf, and on
        Darwin every textual use of a __thread variable is a call to _tlv_get_addr — 4.7% of the game's busiest
        thread, because the marshalling loop below touches a register per argument and clang cannot hoist the
        resolve across the calls inside that loop. The macros are restored right after this function. */
@@ -1272,7 +1218,10 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
 #undef RV
 #define RX(i) (a2x_rfx[i])
 #define RV(j) (a2x_rfv + 16 * (j))
-    /* the signature: a call plan carries it, otherwise it is derived here and a call plan is built from it */
+    /* 10-21 WAS `char types[512]` and a die2 past it: the macOS 27 Dock aborted
+          "method encoding exceeds bridge capacity dragEnter:" on the first click of a tile (a drag-capable mouse-down),
+          crash-looping the Dock. Encodings that embed structs by value run past 512 bytes. Sized per call with alloca,
+          like the argument arena below: no cap, and a nested send through a callback gets its own buffer. */
     /* the signature: a plan carries it, otherwise it is derived here and a plan is built from it */
     ffi_type *rt = 0; int na = 0; ffi_type *const *at = 0; const char *const *aenc = 0; ffi_cif *cif = 0;
     const char *sig = 0;               /* the encoding, for the diagnostics after this block */
@@ -1287,10 +1236,10 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
             memcpy(types, te, tl + 1);
         }
     }
-    /* Finder crash-looped "no method / type encoding for selector validateNewFinderWindow:": its
+    /* 10-21 Finder crash-looped "no method / type encoding for selector validateNewFinderWindow:": its
           TApplicationController answers respondsToSelector: YES for window selectors and hands them on through
           forwardingTargetForSelector: (to TGlobalWindowController), so the receiver has no Method AND no
-          methodSignatureForSelector: answer. That is the runtime's first forwarding step, and it runs before the
+          methodSignatureForSelector: answer. That is the runtime's FIRST forwarding step, and it runs before the
           NSMethodSignature path below: take the encoding from the target's own Method. The call still goes through
           objc_msgSend on the original receiver, so the runtime forwards it itself exactly as it would natively. */
     /* A super send that finds no method in the superclass chain enters the same forwarding path in libobjc, and that
@@ -1355,7 +1304,7 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
         }
     }
     if (!types[0]) {
-        /* Say who was asked. A guest class whose method list never registered is
+        /* 10-27 SAY WHO WAS ASKED. A guest class whose method list never registered is
               indistinguishable from a native class that genuinely does not implement the selector
               unless the receiver, its metaclass bit and its twin mapping are printed. */
         id rcv_d = super ? sup_copy.receiver : (id)x0;
@@ -1378,18 +1327,13 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
         a2x_stop_objc(sel_getName(sel), (rc && a2x_cls_registered(rc)) ? class_getName(rc) : "?");
         die2("no method / type encoding for selector", sel_getName(sel));
     }
-    /* every later send of this selector reads the call plan */
+    /* the encoding is "<ret><frame>@0:8<arg>16..." — offsets are interleaved digits; skip them */
     const char *t = types; t = parse_type(t, &rt); while (*t >= '0' && *t <= '9') t++;
     while (*t) { if (na == A2X_MAXARG) die2("too many arguments for the bridge", sel_getName(sel)); aenc_l[na] = skipq(t); t = parse_type(t, &at_l[na]);
                  while (*t >= '0' && *t <= '9') t++; na++; }
     if (na < 2) die2("encoding has no self/_cmd", types);
     sig = types;
-    if (m && !super) pl = a2x_plan_add(cls, sel, types);   /* An integer-only send never builds the argument arena. Every argument is one 64-bit general
-       register or stack slot and the return is void or an integer/pointer, all of which the call plan already
-       decided — so the size loop, the alloca, the memset, the store[]/av[] pass, the per-argument type
-       branching and the return buffer below are all skipped. On the shapes a Metal setter uses
-       this is the last large piece of the bridge's own cost.
-       The generic path's semantics are reproduced exactly, not approximated — see the notes on each step. */
+    if (m && !super) pl = a2x_plan_add(cls, sel, types);   /* every later send of this selector reads the plan */
     if (!pl) {
         if (ffi_prep_cif(&cif_l, FFI_DEFAULT_ABI, (unsigned)na, rt, at_l) != FFI_OK) die2("ffi_prep_cif refused", types);
         at = at_l; aenc = aenc_l; cif = &cif_l;
@@ -1397,12 +1341,12 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
     }
     if (pl) { rt = pl->rt; na = pl->na; at = pl->at; aenc = pl->aenc; cif = &pl->cif; sig = pl->types; }
 
-    /* An INTEGER-only send never builds the argument arena. Every argument is one 64-bit general
+    /* 10-24 AN INTEGER-ONLY SEND NEVER BUILDS THE ARGUMENT ARENA. Every argument is one 64-bit general
        register or stack slot and the return is void or an integer/pointer, all of which the plan already
        decided — so the size loop, the alloca, the memset, the store[]/av[] pass, the per-argument type
        branching and the return buffer below are all skipped. Measured on the shapes a Metal setter uses
        (ops/objcbench): this is the last large piece of the bridge's own cost.
-       The generic path's semantics are reproduced exactly, not approximated — see the notes on each step. */
+        The generic path's semantics are reproduced exactly, not approximated — see the notes on each step. */
     if (pl && pl->simple) {
         uint64_t a[8] = {0};
         int ngrn = 0; unsigned long nsaa = __arm_sp;
@@ -1414,13 +1358,13 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
                 nsaa = (nsaa + sz - 1) & ~(unsigned long)(sz - 1);
                 v = 0; memcpy(&v, (void *)nsaa, sz); nsaa += sz;
             }
-            /* narrower than a register arrives zero-extended: the generic path copied sz bytes into a
+            /* narrower than a register arrives ZERO-EXTENDED: the generic path copied sz bytes into a
                   zeroed slot and the callee read a whole register back out of it. */
             if (sz < 8) v &= (1ULL << (sz * 8)) - 1ULL;
             switch (pl->xform[i]) {
             case 1: v = (uint64_t)__arm2x86_blk((void *)v); break;                 /* a block native will call */
             case 2: if (a2x_is_block(v)) v = (uint64_t)__arm2x86_blk((void *)v); break;
-            case 3: if (a2x_is_block(v)) v = (uint64_t)__arm2x86_blk((void *)v);   /* no stret here: a simple call plan's return is void or an integer/pointer by construction */
+            case 3: if (a2x_is_block(v)) v = (uint64_t)__arm2x86_blk((void *)v);   /* [blk copy] in a collection */
                     else v = __arm2x86_mapcls(v); break;
             case 4: v = __arm2x86_mapcls(v); break;
             default: break;
@@ -1458,7 +1402,7 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
         return;
     }
     /* arguments, taken from where AAPCS64 (Apple) put them.
-       Was `store[24][64]` and `ret[64]`: avmediainfo died `return larger than 64 bytes` on a 96-byte pair of
+        10-20 WAS `store[24][64]` and `ret[64]`: avmediainfo died `return larger than 64 bytes` on a 96-byte pair of
           CMTimeRanges. Each argument gets its own 16-aligned slot of its real size (>= 8: ffi reads a full register) in one
           per-call alloca, plus 32 bytes for a rebuilt va_list; a total over 64 KiB is refused by name, never truncated. */
     size_t need = 0;
@@ -1493,30 +1437,20 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
             if (ngrn < 8) v = RX(ngrn++);
             else { nsaa = (nsaa + sz - 1) & ~(sz - 1); v = 0; memcpy(&v, (void *)nsaa, sz); nsaa += sz; }
             if (aenc[i][0] == '@' && aenc[i][1] == '?') v = (uint64_t)__arm2x86_blk((void *)v);   /* a block native will call */
-            else if (aenc[i][0] == '@' && a2x_is_block(v)) v = (uint64_t)__arm2x86_blk((void *)v);  /* A va_list parameter of a native method. qlmanage -h and mcxquery faulted at 0x0 in
+            else if (aenc[i][0] == '@' && a2x_is_block(v)) v = (uint64_t)__arm2x86_blk((void *)v);  /* [blk copy], a block in a collection */
+            else if (i >= 2 && (aenc[i][0] == '@' || aenc[i][0] == '#')) v = __arm2x86_mapcls(v);
+            /* 10-20 A va_list PARAMETER OF A NATIVE METHOD. qlmanage -h and mcxquery faulted at 0x0 in
                   __CFStringAppendFormatCore under -[NSPlaceholderString initWithFormat:locale:arguments:]: the arm64
                   caller's va_list (Apple arm64: a char * to 8-byte stack slots) went in as if it were x86's 24-byte
                   {gp_offset, fp_offset, overflow_arg_area, reg_save_area}, so CF read the slots' contents as offsets and
-                  pointers. Detected by the native encoding, which is the x86 one — on macOS 27:
+                  pointers.  Detected by the NATIVE encoding, which is the x86 one — measured on macOS 27:
                   `[1{__va_list_tag=II^v^v}]` for initWithFormat:arguments:, initWithFormat:locale:arguments:,
                   raise:format:arguments:, predicateWithFormat:arguments:. No selector-name fallback is needed: a
-                  native x86 method that takes a va_list always encodes the tag, and a translated method's arm64
+                  native x86 method that takes a va_list always encodes the tag, and a TRANSLATED method's arm64
                   encoding (`*`) means its imp is arm64 code that wants the char * unchanged. Rebuilt the way
                   arm2x86.py va_conv does for C (gp 48, fp 304: every register consumed, so x86 reads every argument
                   from overflow_arg_area in 8-byte slots — the arm64 layout). The struct lives in this call's arena,
                   which outlives the native callee. */
-            else if (i >= 2 && (aenc[i][0] == '@' || aenc[i][0] == '#')) v = __arm2x86_mapcls(v);
-            /* A weak reference cannot be memcpy'd. A guest method that returns a small C++ struct holding a
-          __weak (Finder's TNSWeakPtr<T>, returned through x8 at any size because it is not trivially copyable) was
-          run by imp_handler with x8 = a scratch buffer on imp_handler's x86 stack. The callee's objc_initWeak
-          registered that address in the referent's weak table; the bytes were then copied to the caller's buffer,
-          which the table never heard of. With Apple's thin Finder under the host: 15 x "Attempted to
-          unregister unknown __weak variable at 0x180cd4..." (the guest stack) and "__weak variable at 0x7ff7bfee...
-          holds 0x2 instead of ..." (imp_handler's dead frame), then a dangling weak was messaged after its object
-          died: SIGSEGV, rc 139, a launchd crash loop. Calculator and TextEdit: 0 such lines.
-       When the method is ours, the guest caller already laid out an AAPCS64 call, x8 included, so it is run as
-          that call: same registers, same sp, the callee writes its result (weak slot and all) at its final address.
-          No poison buffer, no copy. Only this return shape needs it; every other send keeps the ffi path. */
             if (!strncmp(aenc[i], "[1{__va_list_tag", 16) || !strncmp(aenc[i], "^{__va_list_tag", 15)) {
                 struct { uint32_t gp, fp; void *ovf, *reg; } *xv = (void *)(store[i] + 16);
                 xv->gp = 48; xv->fp = 304; xv->ovf = (void *)v; xv->reg = NULL; v = (uint64_t)xv;
@@ -1524,15 +1458,15 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
             memcpy(store[i], &v, sz);
         }
     }
-    /* A weak reference cannot be MEMCPY'D. A guest method that returns a small C++ struct holding a
+    /* 10-30 A WEAK REFERENCE CANNOT BE MEMCPY'D. A guest method that returns a small C++ struct holding a
           __weak (Finder's TNSWeakPtr<T>, returned through x8 at any size because it is not trivially copyable) was
           run by imp_handler with x8 = a scratch buffer on imp_handler's x86 stack. The callee's objc_initWeak
-          registered that address in the referent's weak table; the bytes were then copied to the caller's buffer,
+          registered THAT address in the referent's weak table; the bytes were then copied to the caller's buffer,
           which the table never heard of. MEASURED, Apple's thin Finder under the host: 15 x "Attempted to
           unregister unknown __weak variable at 0x180cd4..." (the guest stack) and "__weak variable at 0x7ff7bfee...
           holds 0x2 instead of ..." (imp_handler's dead frame), then a dangling weak was messaged after its object
           died: SIGSEGV, rc 139, a launchd crash loop. Calculator and TextEdit: 0 such lines.
-       When the method is ours, the guest caller already laid out an AAPCS64 call, x8 included, so it is run AS
+        When the method is ours, the guest caller already laid out an AAPCS64 call, x8 included, so it is run AS
           that call: same registers, same sp, the callee writes its result (weak slot and all) at its final address.
           No poison buffer, no copy. Only this return shape needs it; every other send keeps the ffi path. */
     if (rt->type == FFI_TYPE_STRUCT && rt->size <= 16) {
@@ -1559,7 +1493,7 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
     if (rsz > 65536) die2("return larger than 64 KiB", sig);
     unsigned char *ret = (unsigned char *)(((uintptr_t)__builtin_alloca(rsz + 15) + 15) & ~(uintptr_t)15);
     memset(ret, 0, rsz);
-    a2x_sret_via_x8 = 0;   /* only a callee that writes through x8 sets this (see the note above) */
+    a2x_sret_via_x8 = 0;   /* 10-21 only a callee that writes through x8 sets this (see the note above) */
     uint64_t caller_x8 = RX(8);
     /* the integer-only path returned long before here (see the simple path above), so every send that
        reaches this line needs libffi to place its arguments: a float, a struct, an HFA, a va_list, more
@@ -1574,7 +1508,7 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
         for (int j = 0; j < nh; j++) { memset(RV(j), 0, 16); memcpy(RV(j), leaf[j], isd ? 8 : 4); }
     } else if (rt->type == FFI_TYPE_STRUCT && rt->size > 16) memcpy((void *)RX(8), ret, rt->size);
     else if (rt->type == FFI_TYPE_STRUCT && a2x_sret_via_x8) {
-        /* the callee returned this through x8, so the arm64 caller reads its own buffer, not x0/x1.
+        /* 10-21 the callee returned this through x8, so the arm64 caller reads its own buffer, not x0/x1.
            x0/x1 are set as well: they are call-clobbered, so a caller that ignores them is unharmed, and at -O0
            AAPCS64's "the result block's address is returned in x0" still holds. */
         if (!caller_x8 || (caller_x8 & 7)) {
@@ -1597,15 +1531,7 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
         RX(0) = v;
     }
 }
-/* ==== classes the program defines, registered with the native runtime =====================================================
- * dyld never saw this image, so its classes (an app delegate, an NSView subclass ...) exist only as arm64 metadata.
- *    Each is rebuilt natively: objc_allocateClassPair + ivars + methods + protocols, registered in superclass order. Every
- *    method's IMP is a libffi closure built from its own type encoding: native code calls it with the SysV signature, the
- *    closure places each argument where AAPCS64 (Apple) puts it (x0..x7, v0..v7, HFAs, small structs, the arm64 stack),
- *    runs the translated method through the IR door __arm2x86_call_rf and converts the result back.
- * The lifter's internal ABI returns x0 and v0 only (abi_ret): a translated method returning a 16-byte struct (x0+x1) or
- *    an HFA wider than one register (v0..v3) is refused by name at registration, never returned half-filled.
- * The class's ivar offset variables (what arm64 code reads) are rewritten to the native layout after registration. */
+/* the register-file macros, back to resolving the thread-local themselves (msg_send hoisted it above) */
 #undef RX
 #undef RV
 #define RX(i) (((uint64_t *)__arm2x86_rf)[i])
@@ -1613,25 +1539,29 @@ static void msg_send(int super, struct a2x_plan *direct_plan, unsigned long dire
 void __arm2x86_objc_msgSend(void) { msg_send(0, NULL, 0); }
 void __arm2x86_objc_msgSendSuper2(void) { msg_send(1, NULL, 0); }
 
-/* The four native imports whose C signature the two ABIs pass differently (from all 17 struct/enum-typed
-      imports of a large game; the other 13 are register-identical). Full-register handlers: arm64 registers (and the arm64 stack
+/* ==== rung 3b CLASSES THE PROGRAM DEFINES, REGISTERED WITH THE NATIVE RUNTIME ============================================
+ *  dyld never saw this image, so its classes (an app delegate, an NSView subclass ...) exist only as arm64 metadata.
+ *    Each is rebuilt natively: objc_allocateClassPair + ivars + methods + protocols, registered in superclass order. Every
+ *    method's IMP is a libffi CLOSURE built from its own type encoding: native code calls it with the SysV signature, the
+ *    closure places each argument where AAPCS64 (Apple) puts it (x0..x7, v0..v7, HFAs, small structs, the arm64 stack),
+ *    runs the translated method through the IR door __arm2x86_call_rf and converts the result back.
+ *  The lifter's internal ABI returns x0 and v0 only (abi_ret): a translated METHOD returning a 16-byte struct (x0+x1) or
+ *    an HFA wider than one register (v0..v3) is refused by name at registration, never returned half-filled.
+ *  The class's ivar OFFSET VARIABLES (what arm64 code reads) are rewritten to the native layout after registration. */
+/* 10-03 THE FOUR NATIVE IMPORTS WHOSE C SIGNATURE THE TWO ABIs PASS DIFFERENTLY (measured over all 17 struct/enum-typed
+      imports of Cyberpunk; the other 13 are register-identical). Full-register handlers: arm64 registers (and the arm64 stack
       at __arm_sp) in, the C call with real types (clang lays out x86), the result written back the arm64 way.
-      CFStringGetBytes: the by-value CFRange takes x1+x2, so the 8th argument is on the arm64 stack — the generic adapter
-         dropped it and the native function wrote through garbage (fault at 0xffffffff).
+       CFStringGetBytes: the by-value CFRange takes x1+x2, so the 8th argument is on the ARM64 STACK — the generic adapter
+         dropped it and the native function wrote through garbage (Cyberpunk build31: fault at 0xffffffff).
       CGDisplayBounds / CAFrameRateRangeMake return an HFA (d0-d3 / s0-s2) that x86 returns in memory / packed xmm;
-      NSPointInRect's NSRect is d2-d5 on arm64 and the stack on x86. Resolved by dlsym, so every host still links. */
-/* An off-contract callee returns x1 and v1-v3 through @__arm_xr, not through the register file —
-   that is the same channel the ObjC bridge uses to carry an HFA back. Writing only the
-   register file returns a CGRect with its origin intact and its size zero: in the Dock, the
-   handler wrote v0..v3 = 1234 5678 11 22 and the program read 1234 5678 0 0, logged
-   "CGDisplayBounds(0xb41a2f3) returned 0.000000 ..." and aborted. Publish both channels. */
+      NSPointInRect's NSRect is d2-d5 on arm64 and the STACK on x86. Resolved by dlsym, so every host still links. */
 #include <dlfcn.h>
 typedef struct { double x, y; } a2x_p2; typedef struct { double x, y, w, h; } a2x_r4;
 typedef struct { float lo, hi, pref; } a2x_f3; typedef struct { long loc, len; } a2x_cfr;
 #define A2X_RX(i) (((uint64_t *)__arm2x86_rf)[i])
-/* An off-contract callee returns x1 and v1-v3 through @__arm_xr, not through the register file —
+/* 10-20 AN OFF-CONTRACT CALLEE RETURNS x1 AND v1-v3 THROUGH @__arm_xr, not through the register file —
    that is the same channel the ObjC bridge uses to carry an HFA back. These handlers only ever wrote the
-   register file, so a CGRect came back with its origin intact and its size zero: measured on the Dock, the
+   register file, so a CGRect came back with its origin intact and its SIZE ZERO: measured on the Dock, the
    handler wrote v0..v3 = 1234 5678 11 22 and the program read 1234 5678 0 0, logged
    "CGDisplayBounds(0xb41a2f3) returned 0.000000 ..." and aborted. Publish both channels. */
 extern __thread unsigned long __arm_xr[96];
@@ -1665,28 +1595,20 @@ void __arm2x86_abi_CGDisplayBounds(void) {
     a2x_r4 r = f((uint32_t)A2X_RX(0)); memset(__arm2x86_rf + 80, 0, 64);
     A2X_VD(0) = r.x; A2X_VD(1) = r.y; A2X_VD(2) = r.w; A2X_VD(3) = r.h;
     A2X_XRV(1) = r.y; A2X_XRV(2) = r.w; A2X_XRV(3) = r.h;
-    /* SkyLight's display/window iterator getters return a CGRect by value, and they are private SPI
-   with no header, so sigdb has no entry for them at all and they fell to the generic adapter, which carries
-   x0/v0 only. The Dock's `Displays init:` therefore read 0,0,0,0 for a 1920x1080 screen, logged
-   "CGDisplayBounds(0xb41a2f3) returned 0.000000 ..." and aborted — that abort held macOS 27 at the
-   login spinner with Finder and SystemUIServer already running.
-   Read from the native x86 code rather than assumed: all four begin
-       55 48 89 e5 41 56 53 48 89 f3 49 89 fe   push rbp / mov rbp,rsp / push r14 / push rbx
-                                                / mov rbx,RSI / mov r14,RDI
-   then copy 32 bytes with two movups into [r14] — so x86 takes the hidden sret pointer in rdi and the
-   iterator in rsi. macOS 27 also takes the explicit iterator index in x1 on arm64 and rdx on x86.
-   Both arguments must cross the bridge; dropping the index aborts in iterator_seek. The CGRect
-   result is an HFA returned in v0-v3 on arm64. */
+    /* 10-20 Dock printed `CGDisplayBounds(0xb41a2f3) returned 0 0 0 0` while a NATIVE probe in the same
+       session got 1920x1080 for that display, so say what this handler was handed and what it hands back:
+       a zero HERE means CoreGraphics really returned nothing, a correct rect here means the caller never
+       read v0-v3 and the fault is the call site, not the ABI. */
     if (A2X_DBGENV("ARM2X86_SHIM_VERBOSE"))
         fprintf(a2x_errf(), "[abi] CGDisplayBounds(0x%x) -> %g %g %g %g  x8=0x%llx caller=%p\n",
                 (uint32_t)A2X_RX(0), r.x, r.y, r.w, r.h, (unsigned long long)A2X_RX(8), __builtin_return_address(0));
 }
-/* SkyLight's display/window ITERATOR getters return a CGRect BY VALUE, and they are private SPI
-   with no header, so sigdb has no entry for them at all and they fell to the generic adapter, which carries
+/* 10-20 SkyLight's display/window ITERATOR getters return a CGRect BY VALUE, and they are private SPI
+   with no header, so sigdb has NO entry for them at all and they fell to the generic adapter, which carries
    x0/v0 only. The Dock's `Displays init:` therefore read 0,0,0,0 for a 1920x1080 screen, logged
    "CGDisplayBounds(0xb41a2f3) returned 0.000000 ..." and aborted — that abort is what held macOS 27 at the
    login spinner with Finder and SystemUIServer already running.
-   Measured in the native x86 code rather than assumed: all four begin
+    Measured in the native x86 code rather than assumed: all four begin
        55 48 89 e5 41 56 53 48 89 f3 49 89 fe   push rbp / mov rbp,rsp / push r14 / push rbx
                                                 / mov rbx,RSI / mov r14,RDI
    then copy 32 bytes with two movups into [r14] — so x86 takes the hidden sret pointer in rdi and the
@@ -1701,31 +1623,22 @@ void __arm2x86_abi_##name(void) {                                               
     A2X_VD(0) = r.x; A2X_VD(1) = r.y; A2X_VD(2) = r.w; A2X_VD(3) = r.h;         \
     A2X_XRV(1) = r.y; A2X_XRV(2) = r.w; A2X_XRV(3) = r.h;                       \
 }
-/* CFUUIDBytes is 16 BYTES BY VALUE, which AAPCS64 and SysV both pass/return in two INTEGER
+/* 10-20 CFUUIDBytes is 16 BYTES BY VALUE, which AAPCS64 and SysV both pass/return in two INTEGER
    registers (arm64 x0+x1, x86-64 rax+rdx) — but sigdb marks it `x` (untypeable), so these two went through
    the generic adapter, which carries x0 only. Half of every display UUID was therefore garbage: the Dock
    logged "uuid: %{uuid_t}.16P" as a compose failure and could not resolve a display, which is the abort in
    `Displays init:` that kept macOS 27 at the login spinner. {uint64,uint64} has the identical layout and
    register class, so clang places it exactly as the real CFUUIDBytes. */
-/* The objc_alloc family is the same hole, and it outlives the call. A plain ObjC guest class is
-      registered here through objc_allocateClassPair(), which builds a twin at a different address — so, unlike
-      a Swift guest class (realized in place, where the guest pointer is a valid Class), the guest record is not
-      dispatchable natively. Bound straight through, native objc_alloc(guest) allocates a real heap object and
-      writes the guest template into its isa. Nothing notices at first: __arm2x86_objc_msgSend maps every
-      receiver through __arm2x86_mapcls, so translated code keeps working on that object — the first native
-      objc_msgSend on it walks the fake isa and dies in someone else's frame. In Finder (macOS 27):
-      SIGSEGV at objc_lookUpImpOrForward+0x4c, fault address 0x0, through _objc_msgSend_uncached <-
-      objc_cast<FIDSNode, FINode*> <- TNode::NodeFromNodeRef <- _NodeGetCustomNode in DesktopServicesPriv, with
-      rdi = 0x6000034e4880 (a real object) whose isa read 0x100adb4f0 — a guest arm64 class pointer. Not a
-      Finder bug: _objc_alloc is undefined in 15 of 16 GUI programs examined, _objc_alloc_init in 13,
-      _objc_allocWithZone in 7.
-   All three are single-Class takers — `id objc_alloc(Class)`, `id objc_alloc_init(Class)`,
-      `id objc_allocWithZone(Class)` — so this is the same door and the same map as objc_opt_* above, and the
-      map is identity for anything that is not a guest class.
-   Not swift_allocObject / swift_initStackObject / swift_initStaticObject: a Swift guest class is realized in
-      place, so their metadata argument is already natively valid and the map would be identity. And not
-      object_getClass (2 programs) — that is the reverse direction, native twin -> guest constant, a separate
-      question that is unproven. */
+/* 10-21 THE objc_opt_* FAMILY WAS HANDED A GUEST CLASS. A non-generic Swift class's metadata
+      accessor is `adrp x0, <class> ; bl objc_opt_self ; mov x1, #0 ; ret`, so objc_opt_self's RESULT *is*
+      the type metadata. The record it names -- 0x1004058a0 in the Dock -- is one of the image's 341
+      __objc_classlist entries, i.e. a TEMPLATE this bridge rebuilt with objc_allocateClassPair, never a
+      class the native runtime registered. Bound straight through, native objc_opt_self returned 0x48, and
+      Swift used that as metadata: $sSqMa (Optional's accessor) took the payload layout from T-8 = 0x40 and
+      swift_initEnumMetadataSinglePayload faulted reading it (Dock, 5/5 runs, in DOCKGestures start-up).
+      msg_send already maps every receiver through __arm2x86_mapcls; these entry points are the same door
+      and need the same map. Mapping is identity for anything that is not a guest class, so an ordinary
+      object argument is untouched. */
 #define A2X_OPT1(nm)                                                                   \
     void __arm2x86_abi_##nm(void) {                                                    \
         static unsigned long (*f)(unsigned long); if (!f) f = a2x_need(#nm);           \
@@ -1734,24 +1647,24 @@ void __arm2x86_abi_##name(void) {                                               
 A2X_OPT1(objc_opt_self)
 A2X_OPT1(objc_opt_class)
 A2X_OPT1(objc_opt_new)
-/* THE objc_alloc family is the same hole, and it outlives the call. A plain ObjC guest class is
-      registered here through objc_allocateClassPair(), which builds a twin at a different address — so, unlike
-      a Swift guest class (realized IN PLACE, where the guest pointer is a valid Class), the guest record is not
+/* 10-21 THE objc_alloc FAMILY IS THE SAME HOLE, AND IT OUTLIVES THE CALL. A plain ObjC guest class is
+      registered here through objc_allocateClassPair(), which builds a TWIN at a different address — so, unlike
+      a Swift guest class (realized IN PLACE, where the guest pointer IS a valid Class), the guest record is not
       dispatchable natively. Bound straight through, native objc_alloc(guest) allocates a real heap object and
-      writes the guest template into its isa. Nothing notices at first: __arm2x86_objc_msgSend maps every
-      receiver through __arm2x86_mapcls, so translated code keeps working on that object — the first native
+      writes the GUEST TEMPLATE into its isa. Nothing notices at first: __arm2x86_objc_msgSend maps every
+      receiver through __arm2x86_mapcls, so translated code keeps working on that object — the first NATIVE
       objc_msgSend on it walks the fake isa and dies in someone else's frame. Measured on Finder (macOS 27):
       SIGSEGV at objc_lookUpImpOrForward+0x4c, fault address 0x0, through _objc_msgSend_uncached <-
       objc_cast<FIDSNode, FINode*> <- TNode::NodeFromNodeRef <- _NodeGetCustomNode in DesktopServicesPriv, with
       rdi = 0x6000034e4880 (a real object) whose isa read 0x100adb4f0 — a guest arm64 class pointer. Not a
       Finder bug: _objc_alloc is undefined in 15 of the 16 m27gui2 targets, _objc_alloc_init in 13,
       _objc_allocWithZone in 7.
-   All three are single-Class takers — `id objc_alloc(Class)`, `id objc_alloc_init(Class)`,
+    All three are single-Class takers — `id objc_alloc(Class)`, `id objc_alloc_init(Class)`,
       `id objc_allocWithZone(Class)` — so this is the same door and the same map as objc_opt_* above, and the
       map is identity for anything that is not a guest class.
-   Not swift_allocObject / swift_initStackObject / swift_initStaticObject: a Swift guest class is realized in
+    NOT swift_allocObject / swift_initStackObject / swift_initStaticObject: a Swift guest class is realized in
       place, so their metadata argument is already natively valid and the map would be identity. And NOT
-      object_getClass (2 targets) — that is the reverse direction, native twin -> guest constant, a separate
+      object_getClass (2 targets) — that is the REVERSE direction, native twin -> guest constant, a separate
       question that is unproven. */
 A2X_OPT1(objc_alloc)
 A2X_OPT1(objc_alloc_init)
@@ -1772,17 +1685,7 @@ void __arm2x86_abi_CFUUIDGetUUIDBytes(void) {
 }
 void __arm2x86_abi_CFUUIDCreateFromUUIDBytes(void) {
     static void *(*f)(const void *, a2x_b16); if (!f) f = a2x_need("CFUUIDCreateFromUUIDBytes");
-    a2x_b16 b = { A2X_RX(1), A2X_RX(2) };          /* The CGRect accessors take the rectangle by value, and sigdb types that argument `x`
-   (untypeable), so they went through the generic adapter, which passes scalars only. AAPCS64 hands a
-   CGRect to a callee in v0-v3; SysV puts those 32 bytes on the stack. The callee therefore read garbage
-   and returned 0.
-   In the Dock's own code at 0x1001d5e54: it logs the origin straight out of d8/d9 and then
-      asks for the size by calling CGRectGetWidth/CGRectGetHeight with the rect in v0-v3 — which is why
-      the log read "returned 0.000000 ..." with a correct origin and a zero size, and why the Dock
-      aborted and held the whole desktop at the login window.
-   Each handler rebuilds the arguments from the arm64 register file and calls the real function with real
-   C types, so clang lays the x86 side out; the result goes back the arm64 way (a double in d0, a bool in
-   x0, a rectangle as an HFA in v0-v3). */
+    a2x_b16 b = { A2X_RX(1), A2X_RX(2) };          /* the struct follows the allocator: x1+x2 */
     A2X_RX(0) = (uint64_t)f((const void *)A2X_RX(0), b);
 }
 A2X_RECT_OF_PTR(SLSManagedDisplayIteratorGetBounds)
@@ -1791,12 +1694,12 @@ A2X_RECT_OF_PTR(SLSWindowIteratorGetScreenRect)
 A2X_RECT_OF_PTR(SLSWindowIteratorGetFrameBounds)
 A2X_RECT_OF_PTR(SLSWindowIteratorGetLastNonEmptyFrameBounds)
 
-/* THE CGRect ACCESSORS take the rectangle by value, and sigdb types that argument `x`
+/* 10-20 THE CGRect ACCESSORS TAKE THE RECTANGLE BY VALUE, and sigdb types that argument `x`
    (untypeable), so they went through the generic adapter, which passes scalars only. AAPCS64 hands a
    CGRect to a callee in v0-v3; SysV puts those 32 bytes on the STACK. The callee therefore read garbage
    and returned 0.
-   Measured in the Dock's own code at 0x1001d5e54: it logs the origin straight out of d8/d9 and then
-      asks for the size by calling CGRectGetWidth/CGRectGetHeight with the rect in v0-v3 — which is why
+    Measured in the Dock's own code at 0x1001d5e54: it logs the ORIGIN straight out of d8/d9 and then
+      asks for the SIZE by calling CGRectGetWidth/CGRectGetHeight with the rect in v0-v3 — which is why
       the log read "returned 0.000000 ..." with a correct origin and a zero size, and why the Dock
       aborted and held the whole desktop at the login window.
    Each handler rebuilds the arguments from the arm64 register file and calls the real function with real
@@ -1855,10 +1758,7 @@ void __arm2x86_abi_CGRectContainsPoint(void) {
     a2x_p2 p = { A2X_VD(4), A2X_VD(5) };
     A2X_RX(0) = (uint64_t)(unsigned char)!!f(A2X_RECT(0), p);
 }
-/* the rest of the by-value struct class, generated from sigdb by abi_gen.py:
-   116 such imports across the seven translated macOS 27 GUI binaries, of which these are the ones
-   whose C type is known. Hand-written handlers above win — the generator never re-emits a name
-   that already has one. */
+/* CGRectEqualToRect already had a handler by this name; keep that one. */
 
 #define A2X_CTX_RECT(name)                                                                      \
 void __arm2x86_abi_##name(void) {                                                               \
@@ -1891,40 +1791,32 @@ void __arm2x86_abi_CGGetDisplaysWithPoint(void) {
     A2X_RX(0) = (uint64_t)(uint32_t)f(p, (uint32_t)A2X_RX(0), (uint32_t *)A2X_RX(1), (uint32_t *)A2X_RX(2));
 }
 
-/* swift_once is not in sigdb, and its second argument is a function pointer into translated code.
-   Untyped, the generic adapter hands libswiftCore the raw arm64 address; libswiftCore calls it and the CPU
-   executes the arm64 image, which is mapped read-only — the kernel logs
+/* 10-20 the rest of the by-value struct class, GENERATED from sigdb by ops/abigen/abi_gen.py:
+   116 such imports across the seven translated macOS 27 GUI binaries, of which these are the ones
+   whose C type is known.  Hand-written handlers above win — the generator never re-emits a name
+   that already has one. */
+#define A2X_XRX1(v) (__arm_xr[1] = (unsigned long)(v))
+/* 10-20 swift_once IS NOT IN SIGDB, AND ITS SECOND ARGUMENT IS A FUNCTION POINTER INTO TRANSLATED CODE.
+   Untyped, the generic adapter hands libswiftCore the raw arm64 address; libswiftCore CALLS it and the CPU
+   executes the arm64 image, which is mapped read-only — the kernel logged
       "Data/Stack execution not permitted: Dock[...] at virtual address 0x1001d5000, protections were read-only"
-   The initializer therefore never runs and the Swift global it was meant to fill stays zero. In the
+    The initializer therefore never runs and the Swift global it was meant to fill stays ZERO. Measured in the
       Dock: `swift_cvw_initWithCopy` on EyeCandySwift.WeakIdentitySet.Identity copied a weak slot holding
       0x100400ae0 — a zero-filled global in the translated image's __DATA, not a heap object — so objc_copyWeak
       -> objc_retain read isa 0 and faulted at 0x20.
    `__arm2x86_cb` is the engine's existing answer for exactly this (sigdb marks such an argument `fnp`, see
-   xlat.py); swift_once simply has no sigdb entry to be marked in. */
-#define A2X_XRX1(v) (__arm_xr[1] = (unsigned long)(v))
-/* audit_token_t by value outside sigdb (the menu bar) */
+   xlat.py rung 2); swift_once simply has no sigdb entry to be marked in. */
 extern unsigned long __arm2x86_cb(unsigned long fn);
 void __arm2x86_abi_swift_once(void) {
     static void (*f)(long *, void (*)(void *), void *); if (!f) f = a2x_need("swift_once");
     f((long *)A2X_RX(0), (void (*)(void *))__arm2x86_cb(A2X_RX(1)), (void *)A2X_RX(2));
 }
 #include "abi_structs_gen.c"
-#include "abi_audit.c"   /* transforms by value into SkyLight SPI (the window drag) */
-#include "abi_sls.c"     /* the rest of the stack-argument sweep */
-#include "abi_hfa_gen.c" /* SSLCipherSuite is uint16_t on arm64 and uint32_t on x86-64 (every pointer argument of every import sized on
-   both targets — these three are the only cipher-array imports, all called by an embedded curl/SecureTransport).
-   Bound natively, SSLGetSupportedCiphers wrote count*4 bytes into curl's count*2 buffer: a heap overflow on every TLS
-   connect (curl_global_init_mem routes curl's malloc to the app). SSLSetEnabledCiphers read pairs of suites as one;
-   SSLGetNegotiatedCipher wrote 4 bytes into a 2-byte variable. The arrays are widened / narrowed here, element by element. */
-#include "abi_sbx.c"    /* curl_easy_setopt / curl_easy_getinfo are variadic, and Apple arm64 passes every variadic argument on the stack
-   (every setopt site in a program examined does `str <value>, [sp]` and never sets x2). sigdb has no curl, so both went
-   through the untyped x0-x7 adapter and native libcurl took x2 — whatever the previous call left — as CURLOPT_URL,
-   CURLOPT_WRITEDATA and CURLOPT_WRITEFUNCTION. Every option
-   value is one 8-byte slot (long, pointer, curl_off_t, function); function options are arm64 code and are adapted. */
-#include "abi_rect2.c"  /* _availability_version_check returns bool, and x86 libsystem leaves the version in %eax's upper bytes
-   (`movl 12(%rsi),%eax; cmpl ..; setbe %al; retq`). It reaches the untyped adapter (no sigdb
-   entry), and the arm64 caller tests the whole register (`cbz w0` after __isPlatformVersionAtLeast): every @available
-   check read TRUE. The answer is narrowed to 0/1, the way an arm64 callee hands back a bool. */
+#include "abi_audit.c"   /* audit_token_t by value outside sigdb (10-29, the menu bar) */
+#include "abi_sls.c"     /* transforms by value into SkyLight SPI (11-09, the window drag) */
+#include "abi_hfa_gen.c" /* results of three or four doubles, layouts measured on both architectures */
+#include "abi_sbx.c"    /* sandbox_check: a daemon asking whether it entered its own sandbox */
+#include "abi_rect2.c"  /* structure results of calls that take pointers or large structures, read from the x86 code */
 #include "abi_cfdate.c"  /* Gregorian dates: an integer and a floating half in one 16-byte value */
 #include "abi_swiftrepl.c" /* a function address compared by the Swift runtime must arrive unchanged */
 #include "abi_spi.c"     /* the rest of the stack-argument sweep (11-09) */
@@ -1939,9 +1831,9 @@ void __arm2x86_abi_CAFrameRateRangeMake(void) {
     a2x_f3 r = f(A2X_VF(0), A2X_VF(1), A2X_VF(2)); memset(__arm2x86_rf + 80, 0, 48);
     A2X_VF(0) = r.lo; A2X_VF(1) = r.hi; A2X_VF(2) = r.pref;
 }
-/* SSLCipherSuite is uint16_t on arm64 and uint32_t on x86-64 (measured: ops structsz, every pointer arg of every
+/* 10-05 SSLCipherSuite is uint16_t on arm64 and uint32_t on x86-64 (measured: ops structsz, every pointer arg of every
    import sized on both targets — these three are the only cipher-array imports, all called by Galaxy's curl/SecureTransport).
-   Bound natively, SSLGetSupportedCiphers wrote count*4 bytes into curl's count*2 buffer: a heap overflow on every TLS
+   Bound natively, SSLGetSupportedCiphers wrote count*4 bytes into curl's count*2 buffer: a HEAP OVERFLOW on every TLS
    connect (curl_global_init_mem routes curl's malloc to the game). SSLSetEnabledCiphers read pairs of suites as one;
    SSLGetNegotiatedCipher wrote 4 bytes into a 2-byte variable. The arrays are widened / narrowed here, element by element. */
 #include <stdint.h>
@@ -1965,7 +1857,7 @@ void __arm2x86_abi_SSLGetNegotiatedCipher(void) {
     uint16_t *out = (uint16_t *)A2X_RX(1); uint32_t w = 0;
     int st = f((void *)A2X_RX(0), out ? &w : 0); if (out) *out = (uint16_t)w; A2X_RX(0) = (uint64_t)(int64_t)st;
 }
-/* curl_easy_setopt / curl_easy_getinfo are variadic, and Apple arm64 passes every variadic argument on the stack
+/* 10-05 curl_easy_setopt / curl_easy_getinfo are VARIADIC, and Apple arm64 passes EVERY variadic argument on the STACK
    (measured: all 26 setopt sites in Cyberpunk do `str <value>, [sp]` and never set x2). sigdb has no curl, so both went
    through the untyped x0-x7 adapter and native libcurl took x2 — whatever the previous call left — as CURLOPT_URL,
    CURLOPT_WRITEDATA and CURLOPT_WRITEFUNCTION (ops/boundary: the variadic-through-adapter census, 10-05). Every option
@@ -1981,18 +1873,18 @@ void __arm2x86_abi_curl_easy_getinfo(void) {
     static CURLcode (*f)(CURL *, CURLINFO, ...); if (!f) f = a2x_need("curl_easy_getinfo");
     A2X_RX(0) = (uint64_t)(uint32_t)f((CURL *)A2X_RX(0), (CURLINFO)(int32_t)A2X_RX(1), *(void **)__arm_sp);
 }
-/* _availability_version_check returns bool, and x86 libsystem leaves the version in %eax's upper bytes
-   (`movl 12(%rsi),%eax; cmpl ..; setbe %al; retq`, disassembled on an Apple-silicon Mac). It reaches the untyped adapter (no sigdb
+/* 10-05 _availability_version_check returns bool, and x86 libsystem leaves the VERSION in %eax's upper bytes
+   (`movl 12(%rsi),%eax; cmpl ..; setbe %al; retq`, disassembled on the mini). It reaches the untyped adapter (no sigdb
    entry), and the arm64 caller tests the whole register (`cbz w0` after __isPlatformVersionAtLeast): every @available
    check read TRUE. The answer is narrowed to 0/1, the way an arm64 callee hands back a bool. */
 void __arm2x86_abi_availability_version_check(void) {
     static _Bool (*f)(uint32_t, const void *); if (!f) f = a2x_need("_availability_version_check");
     A2X_RX(0) = f((uint32_t)A2X_RX(0), (const void *)A2X_RX(1)) ? 1 : 0;
 }
-/* avmediainfo on macOS 27 printed a track's `Duration: nan seconds` (native 0.768) and a `Movie matrix` line
+/* 10-20 avmediainfo on macOS 27 printed a track's `Duration: nan seconds` (native 0.768) and a `Movie matrix` line
       native never prints. Not the message send — the asset's own CMTime came back through msg_send's _stret path intact
       (`0.768 seconds (36887/48000)`). Both come from C imports sigdb marks 'x' (a struct by value), which reached the
-      untyped adapter: AAPCS64 passes a > 16-byte struct as a pointer in x0/x1, x86-64 passes the bytes on the stack, so
+      untyped adapter: AAPCS64 passes a > 16-byte struct as a POINTER in x0/x1, x86-64 passes the bytes ON THE STACK, so
       native CMTimeGetSeconds / CGAffineTransformEqualToTransform read whatever the stack held (a stale copy of the
       asset's CMTime made the first line look right). CGRect is an HFA (d0-d3, d4-d7) on arm64 and MEMORY on x86;
       CMTimeAdd also returns 24 bytes: x8 on arm64, the hidden pointer on x86. Full-register handlers, as above. */
@@ -2015,25 +1907,7 @@ void __arm2x86_abi_CGRectEqualToRect(void) {
     a2x_r4 a = { A2X_VD(0), A2X_VD(1), A2X_VD(2), A2X_VD(3) }, b = { A2X_VD(4), A2X_VD(5), A2X_VD(6), A2X_VD(7) };
     A2X_RX(0) = f(a, b) ? 1 : 0;
 }
-extern void __arm2x86_call_rf(unsigned long imp);   /* A small struct return can still be a memory return, and x8 must not arrive as 0. "struct larger than
-          16 bytes -> x8" is only half of AAPCS64: a Composite Type that is not
-          trivially copyable (a C++ class with a copy constructor or a destructor) is returned in memory at
-          any size. Finder's -[TRunAfterHelper postFunctor:delayInSec:onMainThread:] is encoded
-          `{TNSWeakPtr<TRunAfterHelper>=@}36@0:8^v16d24B32` — an eight byte struct — and its arm64 code saves
-          x8 on entry (`mov x20, x8`) and hands it to the next call, because TNSWeakPtr holds a weak
-          reference and has both. With x8 left 0, that callee's `str xzr, [x19]` wrote to address 0 and
-          Finder died with SIGSEGV in fn_10011b484+0x8b.
-       The type encoding cannot tell us. On a genuine macOS 27 Mac: a trivially copyable
-          {Trivial=^v} and a non-trivially-copyable {NonTrivial=^v} both encode as `{X=^v}16@0:8`, and the
-          first comes back in x0 while the second comes back through x8. Identical strings, opposite ABIs.
-       So the callee is asked instead: give every non-HFA struct return a buffer in x8 and see whether the
-          callee wrote through it. A buffer is cheap and a callee that ignores x8 is unharmed by one.
-       And the signal is the buffer, not x0. AAPCS64 describes the result block's address as being returned
-          in x0 and a test built at -O0 agrees, but at -O1, -O2 and -Oz the same method writes through x8 and
-          leaves x0 alone, so trusting x0 takes the wrong branch in optimized code — which is every real program.
-          A write to this buffer is sound: the callee runs on the arm64 stack, so the only way it can reach
-          imp_handler's own x86 stack is through the x8 we just handed it. x0 is kept only as a second
-          positive signal, since it does hold at -O0. */
+extern void __arm2x86_call_rf(unsigned long imp);   /* IR door (xlat.py): x0..x7,v0..v7 from rf -> fn -> x0,v0 back */
 void __arm2x86_ensure_stack(void);                    /* xlat main.c: give this thread an arm64 stack if it has none */
 struct imp_ctx { unsigned long imp; ffi_cif cif; ffi_type *at[A2X_MAXARG]; const char *aenc[A2X_MAXARG]; int na; ffi_type *rt; char *types; };
 
@@ -2079,24 +1953,24 @@ static void imp_handler(ffi_cif *cif, void *ret, void **args, void *ud) {
         if (ns > sizeof stk - 64) die2("more than 448 bytes of stack arguments", c->types);
     }
     if (ns) { unsigned long sp = (sp0 - ns) & ~15UL; memcpy((void *)sp, stk, ns); __arm_sp = sp; }
-    /* A small struct return can still be A MEMORY return, and x8 ARRIVED AS 0. The rule here was
-          "struct larger than 16 bytes -> x8", which is only half of AAPCS64: a Composite Type that is not
+    /* 10-20 A SMALL STRUCT RETURN CAN STILL BE A MEMORY RETURN, AND x8 ARRIVED AS 0. The rule here was
+          "struct larger than 16 bytes -> x8", which is only half of AAPCS64: a Composite Type that is NOT
           trivially copyable (a C++ class with a copy constructor or a destructor) is returned in memory at
           ANY size. Finder's -[TRunAfterHelper postFunctor:delayInSec:onMainThread:] is encoded
-          `{TNSWeakPtr<TRunAfterHelper>=@}36@0:8^v16d24B32` — an eight byte struct — and its arm64 code saves
+          `{TNSWeakPtr<TRunAfterHelper>=@}36@0:8^v16d24B32` — an EIGHT byte struct — and its arm64 code saves
           x8 on entry (`mov x20, x8`) and hands it to the next call, because TNSWeakPtr holds a weak
           reference and has both. With x8 left 0, that callee's `str xzr, [x19]` wrote to address 0 and
           Finder died with SIGSEGV in fn_10011b484+0x8b.
-       The type encoding cannot tell us. Measured on a genuine macOS 27 Mac: a trivially copyable
+        THE TYPE ENCODING CANNOT TELL US. Measured on a genuine macOS 27 Mac: a trivially copyable
           {Trivial=^v} and a non-trivially-copyable {NonTrivial=^v} both encode as `{X=^v}16@0:8`, and the
           first comes back in x0 while the second comes back through x8. Identical strings, opposite ABIs.
-       So the callee is asked instead: give every non-HFA struct return a buffer in x8 and see whether the
+        So the callee is ASKED instead: give every non-HFA struct return a buffer in x8 and see whether the
           callee wrote through it. A buffer is cheap and a callee that ignores x8 is unharmed by one.
-       And the signal is the buffer, not x0. The first version of this read x0, because AAPCS64 describes
+        AND THE SIGNAL IS THE BUFFER, NOT x0. The first version of this read x0, because AAPCS64 describes
           the result block's address as being returned there and an oracle built at -O0 agreed. ops/objcabi
           then measured all four levels: at -O1, -O2 and -Oz the same method writes through x8 and leaves x0
           alone, so trusting x0 takes the wrong branch in optimized code — which is every real program.
-          A write to this buffer is sound: the callee runs on the arm64 stack, so the only way it can reach
+          A write to this buffer IS sound: the callee runs on the arm64 stack, so the only way it can reach
           imp_handler's own x86 stack is through the x8 we just handed it. x0 is kept only as a second
           positive signal, since it does hold at -O0. */
     int sret = 0;
@@ -2116,33 +1990,15 @@ static void imp_handler(ffi_cif *cif, void *ret, void **args, void *ud) {
         if (rt->type == FFI_TYPE_FLOAT || rt->type == FFI_TYPE_DOUBLE) memcpy(ret, RV(0), rt->size);
         else if (rt->type == FFI_TYPE_STRUCT) {
             int isd = -1, nh = hfa4(rt, &isd);
-            if (nh >= 1 && nh <= 4) {   /* A native caller entering a raw guest IMP with a memory (sret) return would shift every argument by one.
-      A guest class that libobjc realized in place keeps the guest's own IMPs, so AppKit's objc_msgSend_stret lands on
-      guest code through the universal trampoline (host.c recover_guest_call), which maps rdi->x0. For a
-      method returning a struct > 16 bytes (NSRect from -splitView:effectiveRect:forDrawnRect:ofDividerAtIndex:) rdi is
-      the result buffer, so the guest got self = a native stack address, _cmd = self, arg2 = _cmd (in App Store:
-      x0 = rbx = 0x7ff7bfef9368 on the native stack, x2 = a SEL), and objc_retain(x0) faulted reading its isa.
-   No signature at the fault, so the IMP itself is the key: a table filled at registration from the guest class's
-      own method lists (see below). info: [0] 1 memory / 2 HFA-in-memory,
-      [1] size, [2] ffi_type*. Anything unproven returns 0 and the old register mapping stands. */
+            if (nh >= 1 && nh <= 4) {   /* HFA: element j is the low 4/8 bytes of vj */
                 unsigned char *leaf[4]; size_t off = 0; int k = 0; hfa_leaves(rt, ret, &off, leaf, &k);
                 for (int j = 0; j < nh; j++) memcpy(leaf[j], RV(j), isd ? 8 : 4);
             } else if (sret == 1) {
-                /* Do not ask the runtime (object_getClass + class_getInstanceMethod) from inside a
-      native->guest entry: a native caller can be libobjc itself mid-lookup, and Terminal and Console died in
-      objc_lookUpImpOrForward that way. The answer is read once,
-      at registration, off the guest class's own method lists, and the probe is a table lookup that calls nothing.
-   Only in-place classes keep raw guest IMPs (twins get make_imp wrappers), so they are the ones scanned. */
+                /* the callee wrote the result through x8 into ret already */
                 a2x_sret_via_x8 = 1;
             } else if (sret == 2 && (memcmp(sbuf, A2X_SRET_POISON, rt->size) != 0 || RX(0) == (uint64_t)sbuf)) {
-                memcpy(ret, sbuf, rt->size);   /* A native caller passing a struct wider than 16 bytes by value to a raw guest IMP. x86-64 puts it in memory on the
-      stack; arm64 puts an all-float struct of up to 4 leaves in v registers and anything else behind a pointer. Copying
-      xmm0-7 to v0-7 lets the guest read stale registers: MenuBarCore.DisplayItemAppKitWindow
-      -constrainFrameRect:toScreen: was asked for {0,1050,1920,30} and AppKit received {0,1920,0,0}, then {1920,nan}: uncaught
-      NSInternalInconsistencyException in _reallySetFrame:, no menu bar contents.
-      The layout is read from the method's own encoding at registration with no runtime call and no parse_type (which aborts on
-      types only a pointer carries). An encoding this reader does not fully understand gets no entry and keeps the old mapping. */
-                a2x_sret_via_x8 = 1;           /* and tell msg_send, so the CALLER's x8 gets it too */
+                memcpy(ret, sbuf, rt->size);   /* not trivially copyable: it came back through x8 */
+                a2x_sret_via_x8 = 1;           /* 10-21 and tell msg_send, so the CALLER's x8 gets it too */
             } else {   /* <= 16 bytes: x0 then x1 */
                 a2x_sret_via_x8 = 0;
                 memcpy(ret, &RX(0), rt->size > 8 ? 8 : rt->size);
@@ -2153,14 +2009,21 @@ static void imp_handler(ffi_cif *cif, void *ret, void **args, void *ud) {
     memcpy(__arm2x86_rf, saved, sizeof saved);
 }
 
-/* parse_type leaves a plain struct unlaid (size 0; libffi lays it at prep time), so `size <= 16` would refuse
-          every struct and leave the table empty (0 entries in Shortcuts with 9 struct returns in its lists). */
-/* 10-28 23:4x · the first probe asked the runtime (object_getClass + class_getInstanceMethod) from inside A
-      NATIVE->guest entry, and a native caller can be libobjc itself mid-lookup: Terminal and Console died in
-      objc_lookUpImpOrForward (A/B: without the probe alive 2/2, with it rc=139 2/2). The answer is now read once,
+/* 10-28 A NATIVE CALLER ENTERING A RAW GUEST IMP WITH A MEMORY (sret) RETURN SHIFTED EVERY ARGUMENT BY ONE.
+      A guest class that libobjc realized in place keeps the guest's own IMPs, so AppKit's objc_msgSend_stret lands on
+      guest code through the universal trampoline (host.c recover_guest_call), which mapped rdi->x0 blindly. For a
+      method returning a struct > 16 bytes (NSRect from -splitView:effectiveRect:forDrawnRect:ofDividerAtIndex:) rdi is
+      the RESULT BUFFER, so the guest got self = a native stack address, _cmd = self, arg2 = _cmd (measured in App Store:
+      x0 = rbx = 0x7ff7bfef9368 on the native stack, x2 = a SEL), and objc_retain(x0) faulted reading its isa.
+    No signature at the fault, so the IMP itself is the key: a table filled at registration from the guest class's
+      own method lists (see below). info: [0] 1 memory / 2 HFA-in-memory,
+      [1] size, [2] ffi_type*. Anything unproven returns 0 and the old register mapping stands. */
+/* 10-28 23:4x THE FIRST PROBE ASKED THE RUNTIME (object_getClass + class_getInstanceMethod) FROM INSIDE A
+      NATIVE->GUEST ENTRY, and a native caller can be libobjc itself mid-lookup: Terminal and Console died in
+      objc_lookUpImpOrForward (A/B: without the probe ALIVE 2/2, with it rc=139 2/2). The answer is now read once,
       at registration, off the guest class's own method lists, and the probe is a table lookup that calls nothing.
-   Only in-place classes keep raw guest IMPs (twins get make_imp wrappers), so they are the ones scanned. */
-/* 11-05 r14i: A native caller passing A struct WIDER than 16 BYTES BY VALUE TO A raw guest IMP. x86-64 puts it in memory on the
+    Only in-place classes keep raw guest IMPs (twins get make_imp wrappers), so they are the ones scanned. */
+/* 11-05 r14i: A NATIVE CALLER PASSING A STRUCT WIDER THAN 16 BYTES BY VALUE TO A RAW GUEST IMP. x86-64 puts it in memory on the
       stack; arm64 puts an all-float struct of up to 4 leaves in v registers and anything else behind a pointer. The trampoline
       copied xmm0-7 to v0-7, so the guest read stale registers. Measured: MenuBarCore.DisplayItemAppKitWindow
       -constrainFrameRect:toScreen: was asked for {0,1050,1920,30} and AppKit received {0,1920,0,0}, then {1920,nan}: uncaught
@@ -2293,14 +2156,13 @@ static int is_arm(unsigned long a);
 static void a2x_sret_put(unsigned long imp, const char *ty) {
     a2x_bv_put(imp, ty);
     ffi_type *rt = 0;
-    /* parse_type leaves a plain struct unlaid (size 0; libffi lays it at prep time), so `size <= 16` refused
-          every struct and the table stayed empty: measured 0 entries in Shortcuts with 9 struct returns in its lists. */
+    /* 10-29 parse_type leaves a plain struct UNLAID (size 0; libffi lays it at prep time), so `size <= 16` refused
+          EVERY struct and the table stayed empty: measured 0 entries in Shortcuts with 9 struct returns in its lists. */
     if (!imp || !ty || !*ty || !parse_type(ty, &rt) || !rt || rt->type != FFI_TYPE_STRUCT) return;
     lay(rt);
-    /* __cxa_atexit without the callback pool. A large C++ program can make 109,941 static-destructor registrations
- *    through at least 3,294 distinct functions; the 2,048-slot trampoline pool would abort
- *    before the first frame. Each registration becomes a heap record {fn, obj} under one native handler, which runs the
- *    arm64 destructor through the register-file door. dso passes through untouched (libSystem groups by it, __cxa_finalize). */
+    /* A C++ class that is not trivially copyable is returned through the hidden pointer whatever its size, on both
+       architectures: a shared_ptr is 16 bytes and still arrives as x8 on arm64 and rdi on x86-64. The encoding names
+       the class, so the ones the standard library defines are recognised by name. */
     int cxxmem = 0;
     if (rt->size <= 16 && ty[0] == '{') {
         const char *eq = strchr(ty, '='); size_t nl = eq ? (size_t)(eq - ty) : strlen(ty); char nm_[160];
@@ -2326,13 +2188,7 @@ static void a2x_sret_put(unsigned long imp, const char *ty) {
     a2x_sret_n++;
     if (A2X_DBGENV("ARM2X86_TRACE_SRET")) fprintf(stderr, "[sret] imp %#lx size %zu %s %s\n", imp, rt->size, nh >= 1 && nh <= 4 ? "hfa" : "x8", ty);
 }
-/* libffi's own ffi_closure_alloc asks for an anonymous W+X mapping, and macOS 27 refuses it in some
-      processes: the translated mbsystemadministration (Setup Assistant's daemon) died registering its first method
-      ("fatal: objc_bridge: ffi closure isInClamshellMode"), the springboard waited on it forever, and loginwindow never
-      got past 60%. This is a MAP_JIT allocator inside the bridge, so every translated program has it. On x86_64 a MAP_JIT
-      region is plainly RWX (the write-protect toggle is an arm64 rule), which is exactly what ffi_prep_closure_loc
-      needs: it writes the trampoline through the same pointer the trampoline is called at. Closures are never freed
-      (one per method, registered once), so a bump arena is the whole allocator. libffi stays the fallback. */
+/* same method_list_t reader as add_methods: relative lists (bit 31) hold int32 offsets {name, types, imp} */
 static void a2x_sret_scan_list(unsigned long ml) {
     if (!ml || !is_arm(ml)) return;
     uint32_t ef = *(uint32_t *)ml, n = *(uint32_t *)(ml + 4), es = ef & 0xFFFC;
@@ -2343,9 +2199,9 @@ static void a2x_sret_scan_list(unsigned long ml) {
         else a2x_sret_put(*(unsigned long *)(e + 16), *(const char **)(e + 8));
     }
 }
-/* EVERY class_ro_t the image owns, not only the classes the registration paths happen to touch.
+/* 10-30 EVERY class_ro_t THE IMAGE OWNS, NOT ONLY THE CLASSES THE REGISTRATION PATHS HAPPEN TO TOUCH.
       App Store ShelfPagingControlsView: ro 0x1005bbcf8 (flags 0x184, name _TtC9App_Store23ShelfPagingControlsView)
-      sits in __DATA,__objc_data beside its metadata, the class is not in __objc_classlist, no swift_updateClassMetadata
+      sits in __DATA,__objc_data beside its metadata, the class is NOT in __objc_classlist, no swift_updateClassMetadata
       ran for it, and its baseMethods list (0x1005bbba0, 14 entries, entsize 24) holds the -frame IMP 0x100017514
       {CGRect=..}16@0:8. The table is keyed on the IMP, so it does not matter when or where the class is instantiated:
       find the ro structures themselves. A class_ro_t is recognised by its name field (+0x18) pointing into the image's
@@ -2373,22 +2229,14 @@ void __arm2x86_objc_ro_sweep(unsigned long na, unsigned long nn, unsigned long c
     if (A2X_DBGENV("ARM2X86_TRACE_SRET"))
         fprintf(stderr, "[sret] ro sweep: %u class_ro_t method lists read, table %u -> %u\n", seen, before, a2x_sret_n);
 }
-/* an unrealized class: bits (+0x20, low flag bits masked) is its class_ro_t, and ro+0x20 is baseMethods */
+/* an UNREALIZED class: bits (+0x20, low flag bits masked) is its class_ro_t, and ro+0x20 is baseMethods */
 static int a2x_readable(const void *p);
-/* A translated indirect call can land on one of our own IMP closures. SystemUIServer does
-      `IMP imp = [obj methodForSelector:sel]; imp(obj, sel);` — in the genuine arm64 binary that is
-      fn_10000b2f8's `bl _objc_msgSend` / `mov x8, x0` / `blraaz x8` — so the real ObjC runtime hands
-      the translated program back the closure make_imp() registered for that method, and the translated
-      `blr` then asks __arm2x86_dispatch for an "arm64 address" that was never one.
-   The symptom: "__arm2x86_dispatch: no entry for 0x1018c0510 in a 3451-entry map", called from
-      fn_10000b2f8+8047, and SystemUIServer aborted inside -[NSApplication run]. The closure arena is
-      anonymous MAP_JIT memory, so __arm2x86_lookup's native-pointer lookup could not save it either:
-      dyld_image_header_containing_address() only knows about loaded images.
-   The answer is the arm64 IMP the closure wraps, not an ffi call into it: the translated caller has
-      already laid the arguments out per AAPCS64, which is exactly the contract that arm64 IMP expects,
-      so going through libffi would re-marshal registers that are already right.
-   ->fun is the proof of ownership: only our closures run imp_handler, so a stray pointer that merely
-      happens to sit in an arena slot cannot be mistaken for a method. */
+/* A Swift class whose metadata the runtime instantiates lives on the heap, not in the image: only its class_ro_t is in
+   the image. App Store ShelfPagingControlsView (slot 0x7fe5bc928088, twin_of_guest 0, size 1256): the guest -frame
+   override (IMP 0x100017514, a `[super frame]` thunk, encoding {CGRect=..}16@0:8) was never entered in a2x_sret_tab
+   although 62 other memory-return IMPs were, because this scan required the CLASS address itself to be inside the
+   arm64 image (is_arm(k)). AppKit -[NSView(NSSafeAreas) computedSafeAreaInsets] then reached it through
+   objc_msgSend_stret, the probe missed, nothing shifted, and the guest's self was the result buffer. */
 static int a2x_sret_class_ok(unsigned long k) {
     return k && !(k & 7) && (is_arm(k) || (a2x_readable((void *)k) && a2x_readable((char *)k + 0x28)));
 }
@@ -2422,9 +2270,10 @@ void a2x_tramp_sret_store(const unsigned long *info, void *buf, const unsigned c
     for (int j = 0; j < nh && j < k; j++) memcpy(leaf[j], vs + 16 * j, isd ? 8 : 4);
 }
 
-/* The frame size is read, not skipped. With the per-argument offsets below it is the only thing
-          in a method encoding that gives a width for a type clang wrote no width for, and a2x_lane's 16 bytes
-          has to be checkable. The last argument is checked against this. */
+/* rung 6 (10-03 review): __cxa_atexit WITHOUT the callback pool. Cyberpunk makes 109,941 static-destructor registrations
+ *    through at least 3,294 distinct functions (measured off its disassembly); the 2,048-slot trampoline pool would abort
+ *    before the first frame. Each registration becomes a heap record {fn, obj} under ONE native handler, which runs the
+ *    arm64 destructor through the register-file door. dso passes through untouched (libSystem groups by it, __cxa_finalize). */
 struct atx { unsigned long fn, obj; };
 extern int __cxa_atexit(void (*)(void *), void *, void *);
 static void atx_run(void *p) {
@@ -2444,7 +2293,14 @@ int __arm2x86_cxa_atexit(unsigned long fn, unsigned long obj, unsigned long dso)
     return __cxa_atexit(atx_run, r, (void *)dso);
 }
 
-/* a lane in the last argument is checked against the frame size, which is where the frame ends */
+/* 10-20 libffi's own ffi_closure_alloc asks for an anonymous W+X mapping, and macOS 27 refuses it in some
+      processes: the translated mbsystemadministration (Setup Assistant's daemon) died registering its first method
+      ("FATAL: objc_bridge: ffi closure isInClamshellMode"), the springboard waited on it forever, and loginwindow never
+      got past 60%. 10-13 fixed the same refusal for loginwindow/WindowServer alone with libffj.dylib's MAP_JIT
+      allocator; this is that allocator inside the bridge, so every translated program has it. On x86_64 a MAP_JIT
+      region is plainly RWX (the write-protect toggle is an arm64 rule), which is exactly what ffi_prep_closure_loc
+      needs: it writes the trampoline through the same pointer the trampoline is called at. Closures are never freed
+      (one per method, registered once), so a bump arena is the whole allocator. libffi stays the fallback. */
 #include <errno.h>
 /* The arenas stay on a list so __arm2x86_objc_imp_target() below can recognise one of our own
       closures by address. `used` only ever grows and `base` never moves, so an unlocked reader can
@@ -2472,41 +2328,26 @@ static ffi_closure *a2x_closure_alloc(void **code) {
                                  "code will not be recognised\n", A2X_ARENAS);
     }
     ffi_closure *c = (ffi_closure *)(arena + used); used += sz;
-    /* The C++ ivars of a translated class must be constructed. 996 of Finder's 1,742 classes
-      carry RO_HAS_CXX_STRUCTORS, and the runtime decides whether to run .cxx_construct from that flag in
-      the class_ro_t — not from the method list. objc_allocateClassPair() builds a fresh class_ro_t without
-      it and no API can set it, so for every class this bridge rebuilds, the runtime installs our
-      .cxx_construct and then never calls it, leaving every C++ ivar zeroed.
-   Finder died with SIGSEGV at address 0 in fn_100145ad8+0x80, which is
-      std::__tree::__insert_node_at doing `ldr x8,[x0]; ldr x8,[x8]` — reading __begin_node_ out of a
-      std::map held in an ivar at object+0x10 of TPrefsObserverBridge, while it set up global pref
-      observation. An unconstructed std::map has __begin_node_ == 0; a constructed empty one never does.
-      A test on a genuine macOS 27 Mac confirms both halves: a normally compiled class's C++ ivar is
-      constructed, and a class built this bridge's way misses it, with .cxx_construct demonstrably installed.
-   So the chain is run here instead, from a +allocWithZone: of our own (a2x_alloc_with_zone below).
-   And the two selectors are deliberately not registered as methods. objc4 propagates hasCxxCtor from
-      the superclass, so a translated class under a native class that has C++ structors does get its
-      .cxx_construct called by the runtime (confirmed by test) — and with it in the method list every
-      such ivar would be constructed twice. Keeping it out of the list leaves exactly one caller: ours. */
+    /* the record for THIS arena is the last one appended while `arena` has not changed */
     if (gNArena && gArena[gNArena - 1].base == arena) gArena[gNArena - 1].used = used;
     pthread_mutex_unlock(&mu);
     *code = c;
     return c;
 }
 
-/* A translated indirect call can land on one of our own IMP closures. SystemUIServer does
+/* 10-20 A TRANSLATED INDIRECT CALL CAN LAND ON ONE OF OUR OWN IMP CLOSURES. SystemUIServer does
       `IMP imp = [obj methodForSelector:sel]; imp(obj, sel);` — in the genuine arm64 binary that is
       fn_10000b2f8's `bl _objc_msgSend` / `mov x8, x0` / `blraaz x8` — so the real ObjC runtime hands
       the translated program back the closure make_imp() registered for that method, and the translated
       `blr` then asks __arm2x86_dispatch for an "arm64 address" that was never one.
-   Measured: "__arm2x86_dispatch: no entry for 0x1018c0510 in a 3451-entry map", called from
+    MEASURED: "__arm2x86_dispatch: no entry for 0x1018c0510 in a 3451-entry map", called from
       fn_10000b2f8+8047, and SystemUIServer aborted inside -[NSApplication run]. The closure arena is
       anonymous MAP_JIT memory, so __arm2x86_lookup's native-pointer rung could not save it either:
       dyld_image_header_containing_address() only knows about loaded images.
-   The answer is the arm64 IMP the closure wraps, not an ffi call into it: the translated caller has
+    The answer is the arm64 IMP the closure wraps, NOT an ffi call into it: the translated caller has
       already laid the arguments out per AAPCS64, which is exactly the contract that arm64 IMP expects,
       so going through libffi would re-marshal registers that are already right.
-   ->fun is the proof of ownership: only our closures run imp_handler, so a stray pointer that merely
+    ->fun is the proof of ownership: only our closures run imp_handler, so a stray pointer that merely
       happens to sit in an arena slot cannot be mistaken for a method. */
 unsigned long __arm2x86_objc_imp_target(unsigned long t) {
     if (!t || (t & 15)) return 0;                                   /* every arena slot is 16-byte aligned */
@@ -2523,10 +2364,10 @@ unsigned long __arm2x86_objc_imp_target(unsigned long t) {
 
 static IMP make_imp(unsigned long armimp, const char *types, const char *selname) {
     struct imp_ctx *c = calloc(1, sizeof *c); c->imp = armimp;
-    /* WAS strncpy into char[256]: a longer encoding was cut mid-type and parsed as a different signature */
+    /* 10-20 WAS strncpy into char[256]: a longer encoding was cut mid-type and parsed as a different signature */
     c->types = strdup(types);
     const char *t = parse_type(c->types, &c->rt);
-    /* The frame size is read, not skipped. With the per-argument offsets below it is the only thing
+    /* 10-26 THE FRAME SIZE IS READ, NOT SKIPPED. With the per-argument offsets below it is the only thing
           in a method encoding that measures a type clang wrote no width for, and a2x_lane's 16 bytes is a
           measurement that has to be checkable. The last argument is measured against this. */
     unsigned long frame = 0;
@@ -2540,47 +2381,40 @@ static IMP make_imp(unsigned long armimp, const char *types, const char *selname
         int haveoff = (*t >= '0' && *t <= '9');
         unsigned long off = 0;
         while (*t >= '0' && *t <= '9') off = off * 10 + (unsigned long)(*t++ - '0');
-        /* this argument's offset closes the measurement the previous lane argument opened */
+        /* this argument's offset closes the measurement the PREVIOUS lane argument opened */
         if (lane_sz && haveoff && off > lane_off) { ffi_type *fx = a2x_lane_check(selname, c->types, lane_arg, lane_sz, off - lane_off); if (fx) c->at[lane_arg] = fx; }
         lane_sz = 0;
         if (a2x_lane_used && haveoff) { lane_arg = c->na; lane_off = off; lane_sz = c->at[c->na]->size; }
         c->na++;
     }
-    /* a lane in the last argument is measured against the frame size, which is where the frame ends */
+    /* a lane in the LAST argument is measured against the frame size, which is where the frame ends */
     if (lane_sz && frame > lane_off) { ffi_type *fx = a2x_lane_check(selname, c->types, lane_arg, lane_sz, frame - lane_off); if (fx) c->at[lane_arg] = fx; }
-    /* Do not skip every method that takes or returns a vector. Refusing any encoding starting with a
-              digit or a closing bracket on the grounds that "the types pointer lands inside a longer string"
-              is wrong: the pointer is correct, and so
-              is the relative-method-list reader above. What those strings are is a parse cursor — Chess's
-              -[MBCBoardView lightPosition] really is typed "16@0:8", because clang writes no characters at
-              all for a vector return, and "]}16@0:8" is the cursor inside {?=[4]}16@0:8 where the array's
-              element should be. Both are read properly (see a2x_lane), so skipping them here would take
-              the implementation off a method the bridge can build.
-           What is left is the one thing that is genuinely unusable: no encoding at all. A method with no
-              type string cannot be given an IMP whatever we do, so it is named and skipped, and the window
-              of bytes around the pointer is printed — it is how the next surprise gets diagnosed instead of
-              guessed at. */
+    /* 10-03 every AAPCS64 struct return is carried now (@__arm_xr brings x1 and v1-v3 back, takes x8 in):
+       HFA of 1-4 in v0-v3, any other struct of <= 16 bytes in x0:x1, a larger one through the x8 buffer.
+        WAS: only nh == 1 or <= 8 bytes — Cyberpunk's -windowResolution (a size) stopped the first launch.
+        10-20 a `nh > 4` die2 stood here and killed Dock on `previewRect` (6 doubles). hfa4() now calls that
+          NOT an HFA, which is what AAPCS64 says, and the x8 path above already carries it — nothing left to refuse. */
     if (ffi_prep_cif(&c->cif, FFI_DEFAULT_ABI, (unsigned)c->na, c->rt, c->at) != FFI_OK) die2("ffi_prep_cif (closure)", selname);
     void *code = NULL; ffi_closure *cl = a2x_closure_alloc(&code);
     if (!cl || ffi_prep_closure_loc(cl, &c->cif, imp_handler, c, code) != FFI_OK) die2("ffi closure", selname);
     return (IMP)code;
 }
 
-/* THE C++ IVARS OF A translated class were never constructed. 996 of Finder's 1,742 classes
-      carry RO_HAS_CXX_STRUCTORS, and the runtime decides whether to run .cxx_construct from that flag in
+/* 10-20 THE C++ IVARS OF A TRANSLATED CLASS WERE NEVER CONSTRUCTED. 996 of Finder's 1,742 classes
+      carry RO_HAS_CXX_STRUCTORS, and the runtime decides whether to run .cxx_construct from THAT flag in
       the class_ro_t — not from the method list. objc_allocateClassPair() builds a fresh class_ro_t without
       it and no API can set it, so for every class this bridge rebuilds, the runtime installed our
       .cxx_construct and then never called it, leaving every C++ ivar zeroed.
-   MEASURED: Finder died with SIGSEGV at address 0 in fn_100145ad8+0x80, which is
+    MEASURED: Finder died with SIGSEGV at address 0 in fn_100145ad8+0x80, which is
       std::__tree::__insert_node_at doing `ldr x8,[x0]; ldr x8,[x8]` — reading __begin_node_ out of a
       std::map held in an ivar at object+0x10 of TPrefsObserverBridge, while it set up global pref
       observation. An unconstructed std::map has __begin_node_ == 0; a constructed empty one never does.
-      An oracle on a genuine macOS 27 Mac confirmed both halves: a normally compiled class's C++ ivar is
+      An oracle on a genuine macOS 27 Mac confirmed both halves: a normally compiled class's C++ ivar IS
       constructed, and a class built this bridge's way misses it, with .cxx_construct demonstrably installed.
-   So the chain is run here instead, from a +allocWithZone: of our own (a2x_alloc_with_zone below).
-   And the two selectors are deliberately not registered as methods. objc4 propagates hasCxxCtor from
-      the superclass, so a translated class under a native class that has C++ structors does get its
-      .cxx_construct called by the runtime — measured, "hazard real" — and with it in the method list every
+    So the chain is run here instead, from a +allocWithZone: of our own (a2x_alloc_with_zone below).
+    AND THE TWO SELECTORS ARE DELIBERATELY NOT REGISTERED AS METHODS. objc4 propagates hasCxxCtor from
+      the superclass, so a translated class under a NATIVE class that has C++ structors DOES get its
+      .cxx_construct called by the runtime — measured, "HAZARD REAL" — and with it in the method list every
       such ivar would be constructed TWICE. Keeping it out of the list leaves exactly one caller: ours. */
 static int a2x_is_cxx_structor(const char *sel, int *is_ctor) {
     if (!sel || sel[0] != '.') return 0;
@@ -2589,7 +2423,7 @@ static int a2x_is_cxx_structor(const char *sel, int *is_ctor) {
     return 0;
 }
 
-/* Class -> its own .cxx_construct closure. A linear scan would be thousands of compares per allocation
+/* Class -> its OWN .cxx_construct closure. A linear scan would be thousands of compares per allocation
    (Finder registers 1,742 classes), so this is an open-addressed table keyed by the class pointer. */
 struct a2x_ctor_ent { Class c; IMP f; char warned; };
 static struct a2x_ctor_ent *gCtor; static unsigned long gCtorCap, gCtorN;
@@ -2630,16 +2464,16 @@ static void a2x_cxx_construct_chain(id obj, Class c) {
     IMP f = ctor_get(c);
     if (f) ((id (*)(id, SEL))f)(obj, sel_registerName(".cxx_construct"));
 }
-/* This must not allocate the object itself. It did (class_createInstance), and a guard was then
+/* 10-20 THIS MUST NOT ALLOCATE THE OBJECT ITSELF. It did (class_createInstance), and a guard was then
       added that refused to install the override wherever the inherited +allocWithZone: was not NSObject's —
       which took 4 REAL Finder classes out (TBrowserWindow, TCA3PartLayer, TShrinkToFitTextView,
       TShrinkToFitWindow) and left their C++ ivars zeroed again, because NSWindow, CALayer and NSTextView all
       override +allocWithZone: WITHOUT being placeholder clusters. Allocating through the nearest inherited
       implementation covers both: a class with a native allocator is still allocated its way.
-   The cluster case (NSString, NSNumber) is then caught by the object itself rather than guessed at from
-      the class: a cluster hands back a placeholder of a private class, so the ivars of self_ are only
+    The cluster case (NSString, NSNumber) is then caught by the object itself rather than guessed at from
+      the class: a cluster hands back a PLACEHOLDER of a private class, so the ivars of self_ are only
       constructed when the object really is one of self_'s instances.
-   Skipping this override while looking up the inherited one is what keeps a chain of translated classes
+    Skipping this override while looking up the inherited one is what keeps a chain of translated classes
       from calling back into itself forever. */
 static id a2x_alloc_with_zone(Class self_, SEL _cmd, void *zone) {
     IMP sup = 0;
@@ -2663,8 +2497,8 @@ static id a2x_alloc_with_zone(Class self_, SEL _cmd, void *zone) {
     return o;
 }
 
-/* method_list_t: u32 entsizeAndFlags, u32 count; relative lists (bit 31) hold int32 offsets {name->selref, types, imp} */
-/* class_ro_t.baseProperties (+64) -> the twin. objc_allocateClassPair builds a class with no property list, so a
+/* method_list_t: u32 entsizeAndFlags, u32 count; RELATIVE lists (bit 31) hold int32 offsets {name->selref, types, imp} */
+/* class_ro_t.baseProperties (+64) -> the twin. objc_allocateClassPair builds a class with NO property list, so a
    property the guest declares @dynamic (D) was invisible to the runtime: QuartzCore's +resolveInstanceMethod: and
    Core Data both find a dynamic accessor by looking the property up on the class, and found nothing
    (AirPort Utility: BubbleTextLayer `fillColor` T^{CGColor=},&,D,N -> "no method / type encoding for setFillColor:").
@@ -2709,15 +2543,15 @@ static void add_methods(Class cls, unsigned long ml, int replace, IMP *cxx_ctor_
             sel = sel_registerName(*(const char **)e); types = *(const char **)(e + 8); imp = *(unsigned long *)(e + 16);
         }
         const char *sn = sel_getName(sel);
-        /* This guard skipped every method that takes or returns A vector, and its reasoning was
-              Wrong. It refused any encoding starting with a digit or a closing bracket on the grounds that
+        /* 10-26 THIS GUARD SKIPPED EVERY METHOD THAT TAKES OR RETURNS A VECTOR, AND ITS REASONING WAS
+              WRONG. It refused any encoding starting with a digit or a closing bracket on the grounds that
               "the types pointer lands inside a longer string". It does not: the pointer is correct, and so
-              is the relative-method-list reader above. What those strings are is a parse cursor — Chess's
-              -[MBCBoardView lightPosition] really is typed "16@0:8", because clang writes no characters at
+              is the relative-method-list reader above. What those strings are is a PARSE CURSOR — Chess's
+              -[MBCBoardView lightPosition] really is typed "16@0:8", because clang writes NO characters at
               all for a vector return, and "]}16@0:8" is the cursor inside {?=[4]}16@0:8 where the array's
               element should be. Both are read properly now (see a2x_lane), so skipping them here would take
               the implementation off a method the bridge can build.
-           What is left is the one thing that is genuinely unusable: no encoding at all. A method with no
+            What is left is the one thing that is genuinely unusable: no encoding at all. A method with no
               type string cannot be given an IMP whatever we do, so it is named and skipped, and the window
               of bytes around the pointer stays — it is how the next surprise gets measured instead of
               guessed at. */
@@ -2740,8 +2574,8 @@ static void add_methods(Class cls, unsigned long ml, int replace, IMP *cxx_ctor_
     }
 }
 
-struct armcls { unsigned long a; Class n; int pending; unsigned long bits0; };   /* pending = a Swift class not yet realized; bits0 = its class word at +0x20 before realization (the class_ro_t) */
-/* CATEGORIES on swift classes with an OBJC class stub (__objc_catlist2).
+struct armcls { unsigned long a; Class n; int pending; unsigned long bits0; };   /* pending = a Swift class not yet realized; bits0 = its class word at +0x20 BEFORE realization (the class_ro_t) */
+/* CATEGORIES ON SWIFT CLASSES WITH AN OBJC CLASS STUB (__objc_catlist2).
    A Swift class whose superclass is resilient or generic (a UIHostingController subclass, for one) has no fixed class
    object in the image. The image carries a two-word stub {1, initializer} instead, the stubs are listed in
    __objc_stublist, and a category on such a class (every @objc member of a Swift extension) is emitted into
@@ -2788,19 +2622,7 @@ void __arm2x86_objc_register_stubcats(unsigned long cat, unsigned long ncat) {
    Checked offline against every __objc_catlist2 category of Voice Memos, Journal, Books and Reminders (10 of 10). */
 static unsigned long a2x_stub_of_class(Class k) {
     const unsigned long *w = (const unsigned long *)k;
-    if (!(w[4] & 3)) return 0;                               /* Realize a Swift class late, not at registration — the order is the whole bug.
-      `_swift_updateClassMetadataImpl` finds a class's ivars with libobjc's own fast-data trick:
-          movabsq $0x7FFFFFFFFFF8, %rcx ; andq 32(%rax), %rcx   ; rcx = self->bits & FAST_DATA_MASK
-          movq 48(%rcx), %r14                                   ; r14 = ro->ivars   (class_ro_t + 0x30)
-          shlq $5, %rbx ; movq 8(%r14,%rbx), %rcx               ; &ivars[i].offset  (ivar_t is 32 bytes)
-      That masked word is a **class_ro_t** only while the class is unrealized. `_objc_realizeClassFromSwift`
-      swaps `bits` to a **class_rw_t**, which has no `ivars` at +0x30 — it is only 0x20 bytes — so r14 came
-      back 0x80080000 and the read of `ivars[0].offset` faulted at 0x80080008. Identical in the
-      Dock, WindowManager and ControlCenter (r14 = 0x80080000 / 0x88080000), with every other candidate
-      proven clean first: field layouts complete, descriptor right (NumFields 6, FieldOffsetVectorOffset 10),
-      fieldOffsets = self+0x50 as the descriptor says, superclass a correct native root class.
-   Apple's order is Swift metadata completion first, objc realization later (lazily, on first use), so do
-      the same: register the class in the map now and realize it the first time anything asks for it. */
+    if (!(w[4] & 3)) return 0;                               /* not a Swift class: it has no descriptor word */
     unsigned long d = w[8];
     if (!d || (d & 3) || !is_arm(d)) return 0;                /* the descriptor must be the guest image's own */
     uint32_t fl = *(const uint32_t *)d, ks = fl >> 16;
@@ -2852,22 +2674,22 @@ static int a2x_stubcat_poll(id rcv) {
     return hit;
 }
 static struct armcls *gCls; static unsigned long gNCls;
-/* classes whose superclass has not arrived yet, carried from one image's registration call to the
+/* 10-26 classes whose superclass has not arrived yet, carried from one image's registration call to the
       next. See __arm2x86_objc_register: waiting inside a single call cannot work, because the superclass may
       live in an image that is registered later. */
 static unsigned long *gOwed; static unsigned long gNOwed;
-/* REALIZE A swift class late, not at registration — the order is the whole bug.
+/* 10-21 REALIZE A SWIFT CLASS LATE, NOT AT REGISTRATION — THE ORDER IS THE WHOLE BUG.
       `_swift_updateClassMetadataImpl` finds a class's ivars with libobjc's own fast-data trick:
           movabsq $0x7FFFFFFFFFF8, %rcx ; andq 32(%rax), %rcx   ; rcx = self->bits & FAST_DATA_MASK
           movq 48(%rcx), %r14                                   ; r14 = ro->ivars   (class_ro_t + 0x30)
           shlq $5, %rbx ; movq 8(%r14,%rbx), %rcx               ; &ivars[i].offset  (ivar_t is 32 bytes)
-      That masked word is a **class_ro_t** only while the class is unrealized. `_objc_realizeClassFromSwift`
+      That masked word is a **class_ro_t** only while the class is UNREALIZED. `_objc_realizeClassFromSwift`
       swaps `bits` to a **class_rw_t**, which has no `ivars` at +0x30 — it is only 0x20 bytes — so r14 came
       back 0x80080000 and the read of `ivars[0].offset` faulted at 0x80080008. Measured identically in the
       Dock, WindowManager and ControlCenter (r14 = 0x80080000 / 0x88080000), with every other candidate
       proven clean first: field layouts complete, descriptor right (NumFields 6, FieldOffsetVectorOffset 10),
       fieldOffsets = self+0x50 as the descriptor says, superclass a correct native root class.
-   Apple's order is Swift metadata completion first, objc realization later (lazily, on first use), so do
+    Apple's order is Swift metadata completion FIRST, objc realization later (lazily, on first use), so do
       the same: register the class in the map now and realize it the first time anything asks for it. */
 static void a2x_realize_now(struct armcls *e) {
     static Class (*rfs)(Class, void *); static int looked;
@@ -2877,7 +2699,7 @@ static void a2x_realize_now(struct armcls *e) {
     if (!rfs) { e->pending = 0; return; }
     e->pending = 0; busy = 1;
     /* libobjc's own order for a Swift class is: run the class's Swift metadata initializer (ro->swiftMetadataInitializer,
-       present when RO_HAS_SWIFT_INITIALIZER, flags bit 6), then realize. _objc_realizeClassFromSwift is only the second
+       present when RO_HAS_SWIFT_INITIALIZER, flags bit 6), THEN realize. _objc_realizeClassFromSwift is only the second
        half, so a class first reached from native ObjC (+alloc, NSClassFromString) never had its metadata completed and
        every field-offset variable stayed 0: the first store in its init landed on the isa. */
     if (e->bits0) {
@@ -2894,9 +2716,9 @@ static void a2x_realize_now(struct armcls *e) {
     rfs(e->n, 0);
     busy = 0;
 }
-/* A CATEGORY ON A swift class the image never listed is parked, not dropped. Such a class (Reminders'
+/* 10-27 A CATEGORY ON A SWIFT CLASS THE IMAGE NEVER LISTED IS PARKED, NOT DROPPED. Such a class (Reminders'
       TTRMTemplatesListCellView, Shortcuts, FindMy) is absent from __objc_classlist and its static record is a metadata
-      template — superclass word 0, no bind — which the Swift runtime completes IN PLACE the first time a metadata
+      TEMPLATE — superclass word 0, no bind — which the Swift runtime completes IN PLACE the first time a metadata
       accessor runs (swift_updateClassMetadata{,2}). Calling class_replaceMethod on the template died in libobjc's
       prepareMethodLists at 0x20. libobjc parks the category on an unrealized class and attaches it when the class
       appears; this table does the same: {template, category} waits here and a2x_pc_poll attaches it the moment the
@@ -2952,14 +2774,14 @@ static void a2x_pc_poll(unsigned long a) {
     }
     gPCbusy = 0;
 }
-/* The name has to be in libobjc's table when native code asks for it, and realization is what publishes it.
+/* 10-21 THE NAME HAS TO BE IN libobjc's TABLE WHEN NATIVE CODE ASKS FOR IT, AND REALIZATION IS WHAT PUBLISHES IT.
       Lazy realization (above) kept Swift happy and hid every Swift class from `NSClassFromString`: native AppKit's
       NSApplicationMain looks up the NSPrincipalClass BY NAME before any guest code touches the class, got nil, and
       exited ("Unable to find class: Application"). A guest-side hook cannot help — the caller is native.
-   libobjc has a hook for exactly this: `objc_setHook_getClass`, called when a by-name lookup MISSES. Install one
-      and realize the named class just in time, from inside the native lookup, then answer with it. A class nobody asks
+    libobjc has a hook for exactly this: `objc_setHook_getClass`, called when a by-name lookup MISSES. Install one
+      and realize the named class JUST IN TIME, from inside the native lookup, then answer with it. A class nobody asks
       for by name stays lazy; a class somebody does ask for is realized at the moment of the question.
-   A class realized this way may not have had its Swift metadata completed yet, and `swift_updateClassMetadata` reads
+    A class realized this way may not have had its Swift metadata completed yet, and `swift_updateClassMetadata` reads
       `bits` as a class_ro_t (see the order note above). a2x_ucm puts the pre-realization word back for the duration of
       that one call, so the two orders — name lookup first, metadata completion first — are both safe. */
 static const char *a2x_cls_name_unrealized(unsigned long c) {
@@ -3008,19 +2830,19 @@ static unsigned long a2x_twin_guest_addr(Class c) {
 /* the guest class record a registered class stands for, for callers outside this file (host.c: bundleForClass:) */
 unsigned long __arm2x86_twin_guest_addr(void *cls) { return a2x_twin_guest_addr((Class)cls); }
 
-/* One class, two IDENTITIES — `Could not cast value of type 'Application' (0x60000070de00)
+/* 10-21 ONE CLASS, TWO IDENTITIES — `Could not cast value of type 'Application' (0x60000070de00)
       to 'Application' (0x7ff8496e4658)`, then swift_dynamicCastFailure -> abort. That is ControlCenter's SIGABRT,
       19 times in ten minutes of a live session.
       WHY: `swift_getObjCClassMetadata(cls)` returns `cls` itself when `cls->isTypeMetadata()` — a real Swift
-      class is its own metadata — and otherwise mints an ObjCClassWrapper {kind=0x305, Class}. isTypeMetadata()
+      class IS its own metadata — and otherwise mints an ObjCClassWrapper {kind=0x305, Class}. isTypeMetadata()
       reads the "is Swift stable ABI" bit in class->bits, and `objc_allocateClassPair`, which is how this bridge
-      registers every guest class, cannot set it (the same mechanism the [super init] unwrap above documents).
-      So every guest Swift class got a wrapper as its metadata. `swift_getObjCClassFromMetadata` unwraps that
+      registers every guest class, CANNOT set it (the same mechanism the [super init] unwrap above documents).
+      So every guest Swift class got a WRAPPER as its metadata. `swift_getObjCClassFromMetadata` unwraps that
       correctly, which is why `[super sharedApplication]` dispatched fine — but
       `swift_dynamicCastClassUnconditional` compares raw class pointers up the isa chain
       (0x60000070de00 -> NSApplication -> NSResponder -> NSObject) and never meets the wrapper, so an
-      unconditional cast of an object to its own type fails.
-      The fix: for a class this bridge rebuilt FROM A guest swift class, answer the way a real Mac does and
+      unconditional cast of an object to its OWN type fails.
+       THE FIX: for a class this bridge rebuilt FROM A GUEST SWIFT CLASS, answer the way a real Mac does and
       return the class itself. A genuine Objective-C class still gets its wrapper from the native runtime, which
       is correct — for those, metadata really is not the class. The guest record's is-Swift bit is bits 0/1 of
       its `data` word at +0x20, the same test the class-tail copy uses. */
@@ -3037,17 +2859,25 @@ void __arm2x86_abi_swift_getObjCClassMetadata(void) {
     static unsigned long (*f)(unsigned long); if (!f) f = a2x_need("swift_getObjCClassMetadata");
     A2X_RX(0) = f(c);
 }
-/* the matched pair: with the above, metadata for one of our Swift classes is the class, so hand it straight
+/* the matched pair: with the above, metadata for one of our Swift classes IS the class, so hand it straight
       back rather than letting the native unwrapper assert on a class without the stable-ABI bit. */
-/* Both producers of A type must agree, or the fix becomes the bug. `swift_getObjCClassMetadata`
+/* 10-21 BOTH PRODUCERS OF A TYPE MUST AGREE, OR THE FIX BECOMES THE BUG. `swift_getObjCClassMetadata`
       and `swift_getObjectType` are two doors to the same answer; ControlCenter calls the first 31 times and the
-      second 355 times, 8 of those feeding objc_msgSendSuper2 directly. Overriding only the first would leave
+      SECOND 355 times, 8 of those feeding objc_msgSendSuper2 directly. Overriding only the first would leave
       `swift_getObjectType(anInstance)` still handing back the ObjCClassWrapper, so `type(of: x) == T.self` and
-      `swift_dynamicCast` (which takes both source and target metadata) would mismatch — the same defect inverted.
+      `swift_dynamicCast` (which takes BOTH source and target metadata) would mismatch — the same defect inverted.
       With the guest record realized, native would answer correctly on its own; this keeps the two doors in step
       on the fallback path too, where the class was rebuilt and carries no stable-ABI bit. */
-/* Not an unconditional calloc — called once per image, that drops the earlier images' classes while gNCls keeps
-          counting, so the next image writes past the new array. Allocate once; the realloc after each add grows it. */
+/* 10-21 DIAGNOSTIC: swift_updateClassMetadata faults identically in the Dock AND WindowManager —
+      `_swift_updateClassMetadataImpl+0x1a7`, fault address 0x80080008, r14 = 0x80080000, i.e. it read [r14+8]
+      with r14 a field TYPE LAYOUT pointer of 0x80080000. That path only exists now that realization made our
+      guest classes genuine Swift classes, so the runtime completes them and asks for their field layouts.
+      Print what the GUEST actually hands over before delegating, so the next run names the bad field instead
+      of leaving a bare register value. Signature:
+        swift_updateClassMetadata(ClassMetadata *self, ClassLayoutFlags flags, size_t numFields,
+                                  const TypeLayout * const *fieldTypes, size_t *fieldOffsets)
+       Returned as a two-word pair: the real entry point hands back a MetadataResponse/MetadataDependency in
+      x0:x1 on arm64 and rax:rdx here, which is what the generic adapter would have carried. */
 typedef struct { unsigned long w0, w1; } a2x_w2;
 /* a page-resident test, so a diagnostic can never be the thing that crashes the process */
 static int a2x_readable(const void *p) {
@@ -3058,7 +2888,7 @@ static int a2x_readable(const void *p) {
 static void a2x_ucm(const char *nm, void *fp) {
     unsigned long self_ = A2X_RX(0), fl = A2X_RX(1), n = A2X_RX(2), fts = A2X_RX(3), fos = A2X_RX(4);
     static int said;
-    /* C2 this dump prints n+3 fieldTypes on purpose ("past the end") on every hosted Swift program, and the
+    /* C2 11-06 this dump prints n+3 fieldTypes on purpose ("PAST THE END") on EVERY hosted Swift program, and the
           kmutil report on the 27.2 box was read as a crash because of it. It is a diagnostic: ask for it. */
     static int want = -1;
     if (want < 0) want = A2X_DBGENV("ARM2X86_TRACE_UCM") ? 1 : 0;
@@ -3095,21 +2925,8 @@ static void a2x_ucm(const char *nm, void *fp) {
     }
     /* a Swift class the runtime completes here may never have passed the in-place registration scan */
     if (self_ > 0x1000 && !(self_ & 7) && a2x_sret_class_ok(self_)) a2x_sret_scan_class(self_);
-    /* A superclass in another guest image must not stall this loop (and the abort blamed the wrong thing).
-          Registration runs once per image (host.c walks g_img and calls this for each one), and the wait below
-          — "its superclass is ours and not built yet" — can only ever be satisfied from the same call's list.
-          So a class whose superclass lives in a different guest image never became built, no pass made
-          progress, and the run ended on fatal "a class's superclass never resolved" with an empty second
-          argument: no class named, no superclass named, no count.
-       Read statically from macOS 27 Books: its main binary lists 719 classes, and 18 of its 56 distinct
-          superclass binds name classes defined in Books.app's own embedded frameworks — BookCore's
-          IMAccessibilitySafeCategory has 36 subclasses in the main binary, BKLibrary's BKLibraryDataSource 3,
-          across 6 frameworks. The main binary therefore cannot be registered before those images, whatever
-          order they arrive in, and nothing guarantees an order.
-       So an unresolved class is owed to the next call instead of killing the process: the work list is this
-          image's classlist plus everything still owed from earlier calls, and a slot is zeroed as it is
-          settled. Ordering between images stops mattering, which is the property a real app's class graph
-          needs. */
+    /* a class the name hook realized BEFORE its metadata was completed: show the runtime its class_ro_t again for this
+       one call, then put the realized word back */
     unsigned long *bw = 0, saved = 0;
     for (unsigned long i = 0; i < gNCls; i++)
         if (gCls[i].a == self_ && gCls[i].bits0 && !gCls[i].pending && (unsigned long)gCls[i].n == self_) {
@@ -3149,7 +2966,7 @@ void __arm2x86_abi_swift_getObjCClassFromMetadata(void) {
 }
 #define RO(c) ((*(unsigned long *)((c) + 32)) & 0x00007ffffffffff8UL)
 
-/* Guest protocols were never given to the runtime. libobjc fixes up a loaded image's protocols itself (sets the isa,
+/* 10-22 GUEST PROTOCOLS WERE NEVER GIVEN TO THE RUNTIME. libobjc fixes up a loaded image's protocols itself (sets the isa,
       folds a duplicate into the canonical copy, rewrites __objc_protorefs); a guest image is mapped by the shim, so its
       protocol_t records kept isa 0 and every `@protocol(X)` handed native code a guest struct. MenuBarAgent: BoardServices
       `+[BSObjCProtocol protocolForProtocol:]` got 0x10043b120 (isa 0) and objc_retain faulted at 0x20. Map each one to the
@@ -3189,22 +3006,22 @@ static Protocol *a2x_map_protocol(unsigned long p, int depth) {
     a2x_proto_methods(pr, *(unsigned long *)(p + 40), NO, YES);
     a2x_proto_methods(pr, *(unsigned long *)(p + 48), NO, NO);
     objc_registerProtocol(pr);
-    /* The runtime API cannot express _extendedMethodTypes, so the rebuilt protocol had none.
+    /* 10-27 THE RUNTIME API CANNOT EXPRESS _extendedMethodTypes, SO THE REBUILT PROTOCOL HAD NONE.
           Maps died on `+[NSXPCInterface interfaceWithProtocol:]`: NSInvalidArgumentException, "Unable to get
           extended method signature from Protocol data (MapsConnectionBrokerEndpointConsumer /
-          listenerEndpointDidChange:forInterface:)". Foundation needs the extended encoding (the one that
+          listenerEndpointDidChange:forInterface:)". Foundation needs the EXTENDED encoding (the one that
           spells out block and object types, "@\"NSString\"" rather than "@") to build an NSXPCInterface, and
           it reads it through _protocol_getMethodTypeEncoding(), which returns nil the moment
           protocol_t->_extendedMethodTypes is NULL. objc_allocateProtocol +
           protocol_addMethodDescription fill the four method lists and nothing else; there is no
           protocol_addExtendedMethodTypes(), so the array is copied from the guest's own record.
-       WHY A straight pointer copy is correct. libobjc indexes that array positionally, by the method's
+        WHY A STRAIGHT POINTER COPY IS CORRECT. libobjc indexes that array positionally, by the method's
           position inside the concatenation of the four lists in the canonical order required-instance,
           required-class, optional-instance, optional-class. a2x_proto_methods above walks the guest's four
           lists in that same order and protocol_addMethodDescription appends without de-duplicating, so the
           native protocol's indices equal the guest's. The strings are plain C strings in the guest's mapped
           __TEXT, which lives as long as the process.
-       size (+64) gates the field: hasExtendedMethodTypes() is a size test, so a guest record too short
+        size (+64) GATES THE FIELD: hasExtendedMethodTypes() is a size test, so a guest record too short
           to contain the field must not be read at +72, and the native record must be long enough to hold it.
           Both are checked, and a record that fails the test is left exactly as it was — strictly additive. */
     {
@@ -3244,20 +3061,17 @@ void __arm2x86_objc_protocols(unsigned long pl, unsigned long npl, unsigned long
 }
 void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long cat, unsigned long ncat,
                              unsigned long refs, unsigned long nrefs, unsigned long srefs, unsigned long nsrefs) {
-    /* 10-03: WAS an unconditional calloc — called once per image, it dropped the earlier images' classes while gNCls kept
+    /* 10-03: WAS an unconditional calloc — called once per IMAGE, it dropped the earlier images' classes while gNCls kept
           counting, so the next image wrote past the new array. Allocate once; the realloc after each add grows it. */
     if (!gCls) gCls = calloc(2, sizeof *gCls);
     const unsigned long first = gNCls;   /* this image's classes start here */
-    /* A Swift class is wider than an ObjC one, and the extra words are load-bearing.
-                  objc's class object ends at 0x28 (isa, superclass, cache, bits); a Swift class metadata continues
-                  with flags, instance/class sizes and — at +0x40 — its context descriptor. Rebuilt with
-                  objc_allocateClassPair(…, 0) those words do not exist, so the descriptor reads 0.
-               swift::TargetMetadata::isCanonicalStaticallySpecializedGenericMetadata does
-                     movq 0x40(%rdi), %rax ; testb $-0x80, (%rax)
-                  with no null check, so instantiating any generic over such a class faults at 0. A five-line repro
-                  (`struct Box<T> { var v: T?; let id: Int }`) died 10/10, and that is what kept the Dock — and with
-                  it every AppKit app, because they all register with the Dock — off the macOS 27 desktop.
-               So ask for the guest class's own tail as extraBytes and copy it below, after registration. */
+    /* 10-30 THE MEMORY-RETURN (sret) TABLE WAS FILLED ONLY ON TWO REGISTRATION PATHS, AND NEVER FOR CATEGORIES.
+          App Store: a native caller (objc_msgSend_stret from AppKit) entered a guest -frame override, rdi was the
+          NSRect result buffer, recover_guest_call did not shift (the IMP was not in a2x_sret_tab) and [super frame]
+          ran with self = a native stack address. The table is keyed by IMP and is read by the trampoline, so it must
+          hold EVERY guest method whose encoding returns a >16-byte struct, whichever way its class is registered:
+          scan the image's whole class list (instance and class methods) and category list here, once per image,
+          before any class is built. Re-scanning a class later is harmless (a2x_sret_put dedupes on the IMP). */
     for (unsigned long i = 0; i < ncl; i++) {
         unsigned long c = ((unsigned long *)cl)[i];
         if (c && is_arm(c)) a2x_sret_scan_class(c);
@@ -3269,18 +3083,18 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
         a2x_sret_scan_list(*(unsigned long *)(ct + 24));
     }
     if (A2X_DBGENV("ARM2X86_TRACE_SRET")) fprintf(stderr, "[sret] image scan done: %u memory-return IMPs in the table\n", a2x_sret_n);
-    /* A superclass in another guest image stalled this loop, and the abort blamed the wrong thing.
-          Registration runs once per image (host.c walks g_img and calls this for each one), and the wait below
-          — "its superclass is ours and not built yet" — can only ever be satisfied from the same call's list.
+    /* 10-26 A SUPERCLASS IN ANOTHER GUEST IMAGE STALLED THIS LOOP, AND THE ABORT BLAMED THE WRONG THING.
+          Registration runs once per IMAGE (host.c walks g_img and calls this for each one), and the wait below
+          — "its superclass is ours and not built yet" — can only ever be satisfied from the SAME call's list.
           So a class whose superclass lives in a different guest image never became built, no pass made
-          progress, and the run ended on fatal "a class's superclass never resolved" with an empty second
+          progress, and the run ended on FATAL "a class's superclass never resolved" with an EMPTY second
           argument: no class named, no superclass named, no count.
-       Measured statically on macOS 27 Books: its main binary lists 719 classes, and 18 of its 56 distinct
-          superclass binds name classes defined in Books.app's own embedded frameworks — BookCore's
+        MEASURED STATICALLY on macOS 27 Books: its main binary lists 719 classes, and 18 of its 56 distinct
+          superclass binds name classes defined in Books.app's OWN embedded frameworks — BookCore's
           IMAccessibilitySafeCategory has 36 subclasses in the main binary, BKLibrary's BKLibraryDataSource 3,
           across 6 frameworks. The main binary therefore cannot be registered before those images, whatever
           order they arrive in, and nothing guarantees an order.
-       So an unresolved class is owed to the next call instead of killing the process: the work list is this
+        So an unresolved class is OWED to the next call instead of killing the process: the work list is this
           image's classlist plus everything still owed from earlier calls, and a slot is zeroed as it is
           settled. Ordering between images stops mattering, which is the property a real app's class graph
           needs. */
@@ -3290,44 +3104,22 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
     for (unsigned long i = 0; i < gNOwed; i++) work[i] = gOwed[i];
     for (unsigned long i = 0; i < ncl; i++) work[gNOwed + i] = ((unsigned long *)cl)[i];
     int progress = 1; unsigned long done = 0;
-    while (done < nwork && progress) {   /* A Swift class is its own metadata — realize the guest record, do not rebuild it.
-                  Rebuilding with objc_allocateClassPair cannot reproduce two things the Swift runtime requires, and
-                  each breaks a desktop app:
-                  • the full-metadata prefix at cls-8. `Metadata::getTypeLayout()` is
-                    `*(this-8) + offsetof(ValueWitnessTable, size)`, and that offset is 8 function pointers = 0x40, so a
-                    rebuilt class used as metadata yields a payload TypeLayout of exactly 0x40.
-                    swift_initEnumMetadataSinglePayload then dereferences 0x40 — the Dock's SIGSEGV, 5/5 runs, in
-                    DOCKGestures start-up (rdx=0x40, fault address 0x40).
-                  • the "is Swift stable ABI" bit in bits, so swift_getObjCClassMetadata minted an ObjCClassWrapper
-                    {kind=0x305} instead of returning the class, and swift_dynamicCastClassUnconditional — which walks
-                    raw class pointers up the isa chain — never met it: `Could not cast value of type 'Application'
-                    (0x60000070de00) to 'Application' (0x7ff8496e4658)`, swift_dynamicCastFailure, abort. That is
-                    ControlCenter's SIGABRT, 19 times in ten minutes of a live session.
-               The guest record already has all of it, and Apple's own fixups prove the record is meant to be the
-                  metadata: in the Dock, the class template 0x1004058a0 has `__DATA,__data 0x100405898 auth-bind
-                  libswiftCore/_$sBoWV` — the value-witness table for Builtin.NativeObject — bound at exactly cls-8.
-                  The descriptor at +0x40, the field offsets, the instance size and the stable-ABI bit are all there too.
-                  So hand the record to the runtime the way the Swift runtime itself does, with libobjc's
-                  `_objc_realizeClassFromSwift`, and the class, its metadata and its identity become one pointer.
-                  Its method IMPs are arm64 addresses; a native dispatch to one faults on the instruction fetch and the
-                  lazy trampoline resumes it at that function's callback door — the mechanism callbacks already use.
-               A guest class with no Swift metadata (a plain ObjC class) still takes the rebuild path below: it has
-                  no prefix to realize, and for those metadata genuinely is not the class. */
+    while (done < nwork && progress) {   /* superclasses first */
         progress = 0;
         for (unsigned long i = 0; i < nwork; i++) {
             unsigned long c = work[i]; int seen = 0;
             if (!c) continue;                        /* settled on an earlier pass of this call */
             for (unsigned long k = 0; k < gNCls; k++) if (gCls[k].a == c) seen = 1;
-            /* A class already registered is settled, not pending. `done` counted registrations, so
+            /* 10-26 A CLASS ALREADY REGISTERED IS SETTLED, NOT PENDING. `done` counted REGISTRATIONS, so
                   a class some earlier call had already built — which the owed list above hands straight back,
                   and which two images listing the same record also produces — left done < ncl for ever and
                   the loop died on its own success. */
             if (seen) { work[i] = 0; done++; progress = 1; continue; }
             unsigned long sup = *(unsigned long *)(c + 8);
-            /* Ask the map, not mapcls()'s fallback. mapcls() returns (Class)a when it holds no entry,
-                  so `mapcls(sup) == sup` used to mean "ours and not built yet". A REALIZED Swift class maps to its own
-                  guest record, so that test now means both "not built" and "built" — the loop skipped every class on
-                  every pass, made no progress, and died with fatal "a class's superclass never resolved" (Dock, 5/5
+            /* 10-21 ASK THE MAP, NOT mapcls()'s FALLBACK. mapcls() returns (Class)a when it holds no entry,
+                  so `mapcls(sup) == sup` used to mean "ours and not built yet". A REALIZED Swift class maps to its OWN
+                  guest record, so that test now means BOTH "not built" and "built" — the loop skipped every class on
+                  every pass, made no progress, and died with FATAL "a class's superclass never resolved" (Dock, 5/5
                   runs, SIGABRT). The map is the only honest answer to "is it built". */
             if (sup && is_arm(sup)) {
                 int built = 0;
@@ -3336,43 +3128,33 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
             }
             unsigned long ro = RO(c), mro = RO(*(unsigned long *)c);
             const char *name = *(const char **)(ro + 24);
-            /* A zero superclass slot is almost never A root class. In the image the slot reads 0 and carries a
-                  bind to a native class (Dock's DockCore.SystemAppearanceMonitor: `superclass 0x0 _OBJC_CLASS_$_NSObject`),
+            /* 10-20 A ZERO SUPERCLASS SLOT IS ALMOST NEVER A ROOT CLASS. In the image the slot reads 0 and carries a
+                  BIND to a native class (Dock's DockCore.SystemAppearanceMonitor: `superclass 0x0 _OBJC_CLASS_$_NSObject`),
                   so if the superclass bind has not landed before this runs we hand allocateClassPair Nil and silently
-                  create a root class. Its `super` then resolves nowhere — and -[SystemAppearanceMonitor init] was
+                  create a ROOT class. Its `super` then resolves nowhere — and -[SystemAppearanceMonitor init] was
                   re-entering itself through the bridge until the stack was gone. Genuine root classes are a handful
                   (NSObject, NSProxy); a translated program normally defines none, so say it every time. */
             if (A2X_DBGENV("ARM2X86_TRACE_REGCLS")) { fprintf(a2x_errf(), "[regcls] %s rec=%#lx sup=%#lx supmap=%p\n", name, c, sup, sup ? (void *)mapcls(sup) : 0); fflush(a2x_errf()); }
             if (!sup) fprintf(a2x_errf(), "objc_bridge: %s has a NULL superclass slot — registering it as a ROOT class. If it"
                               " is not genuinely a root class, its superclass bind had not been applied yet.\n", name);
-            /* An exported class must be registered at its guest address, or native consumers get an
-                  unregistered struct. xlat2 emits every data export as an absolute symbol equal to the guest
-                  address (`_OBJC_CLASS_$_X = 0x2000xxxxx`, see xlat2.py), so a native binary that links this
-                  dylib binds `_OBJC_CLASS_$_X` to the guest class record. Build a twin elsewhere and that symbol
-                  still points at a struct the runtime never registered — readable and entirely plausible
-                  (class_getName, class_getSuperclass and class_getInstanceSize all answer correctly) but absent
-                  from objc_copyClassList.
-               End to end: Apple's own untranslated `/usr/libexec/pkd` imports exactly one class,
-                  `_OBJC_CLASS_$_PKDServer`, and does `[PKDServer new]`. dtrace caught
-                  `objc_opt_new(guest class 0x200033a88) <- pkd`; the instance came back with a packed isa of
-                  0x11d800200033a8d (& 0x00007ffffffffff8 = 0x200033a88, the guest class); and native
-                  objc_release later walked that struct and faulted at 0x70612e6d6f80 — a pointer read out of the
-                  middle of a "com.apple…" string inside the guest class data. Deterministic across builds.
-               So if this class is one the image exports, register the guest record in place with
-                  objc_readClassPair, the way the Swift path above realizes its own record. The exported absolute
-                  symbol is then the live class and nothing downstream needs to know. Scoped strictly to exported
-                  classes: every other class takes the unchanged twin path below, so a program with no exported
-                  classes (Dock, Finder, WindowManager) is bit-for-bit unaffected.
-               Fails safe: if the runtime refuses the record we fall through to the twin and say so loudly. A
-                  class that failed to register at all would be worse than a twin a native consumer cannot see. */
+            /* 10-20 A SWIFT CLASS IS WIDER THAN AN ObjC ONE, AND THE EXTRA WORDS ARE LOAD-BEARING.
+                  objc's class object ends at 0x28 (isa, superclass, cache, bits); a Swift class metadata continues
+                  with flags, instance/class sizes and — at +0x40 — its CONTEXT DESCRIPTOR. Rebuilt with
+                  objc_allocateClassPair(…, 0) those words do not exist, so the descriptor reads 0.
+                Measured: swift::TargetMetadata::isCanonicalStaticallySpecializedGenericMetadata does
+                     movq 0x40(%rdi), %rax ; testb $-0x80, (%rax)
+                  with NO null check, so instantiating ANY generic over such a class faults at 0. A five-line repro
+                  (`struct Box<T> { var v: T?; let id: Int }`) died 10/10, and that is what kept the Dock — and with
+                  it every AppKit app, because they all register with the Dock — off the macOS 27 desktop.
+                So ask for the guest class's own tail as extraBytes and copy it below, after registration. */
             uint32_t gclsz = 0;
             {   unsigned long dataw = *(unsigned long *)(c + 0x20);     /* bits 0/1 = is-Swift (legacy/stable) */
                 if (dataw & 3) { uint32_t sz = *(uint32_t *)(c + 0x38); /* classSize */
                     if (sz > 0x28 && sz < 0x4000) gclsz = sz; } }
-            /* A swift class is its own METADATA — realize the guest record, do not rebuild it.
+            /* 10-21 A SWIFT CLASS IS ITS OWN METADATA — REALIZE THE GUEST RECORD, DO NOT REBUILD IT.
                   Rebuilding with objc_allocateClassPair cannot reproduce two things the Swift runtime requires, and
                   both cost a desktop app tonight:
-                  • the full-METADATA prefix at cls-8. `Metadata::getTypeLayout()` is
+                  • the FULL-METADATA PREFIX at cls-8. `Metadata::getTypeLayout()` is
                     `*(this-8) + offsetof(ValueWitnessTable, size)`, and that offset is 8 function pointers = 0x40, so a
                     rebuilt class used as metadata yields a payload TypeLayout of exactly 0x40.
                     swift_initEnumMetadataSinglePayload then dereferences 0x40 — the Dock's SIGSEGV, 5/5 runs, in
@@ -3382,15 +3164,15 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
                     raw class pointers up the isa chain — never met it: `Could not cast value of type 'Application'
                     (0x60000070de00) to 'Application' (0x7ff8496e4658)`, swift_dynamicCastFailure, abort. That is
                     ControlCenter's SIGABRT, 19 times in ten minutes of a live session.
-               The guest record already has all of it, and Apple's own fixups prove the record is meant to be the
+                THE GUEST RECORD ALREADY HAS ALL OF IT, and Apple's own fixups prove the record is MEANT to be the
                   metadata: in the Dock, the class template 0x1004058a0 has `__DATA,__data 0x100405898 auth-bind
                   libswiftCore/_$sBoWV` — the value-witness table for Builtin.NativeObject — bound at exactly cls-8.
                   The descriptor at +0x40, the field offsets, the instance size and the stable-ABI bit are all there too.
                   So hand the record to the runtime the way the Swift runtime itself does, with libobjc's
-                  `_objc_realizeClassFromSwift`, and the class, its metadata and its identity become one pointer.
+                  `_objc_realizeClassFromSwift`, and the class, its metadata and its identity become ONE pointer.
                   Its method IMPs are arm64 addresses; a native dispatch to one faults on the instruction fetch and the
                   lazy trampoline resumes it at that function's callback door — the mechanism callbacks already use.
-               A guest class with NO Swift metadata (a plain ObjC class) still takes the rebuild path below: it has
+                A guest class with NO Swift metadata (a plain ObjC class) still takes the rebuild path below: it has
                   no prefix to realize, and for those metadata genuinely is not the class. */
             Class ns = Nil;
             int realized = 0;
@@ -3402,7 +3184,7 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
                 if (rfs) {
                     /* the superclass slot carries a bind; point it at the real class before the runtime reads it */
                     if (sup) { make_writable((void *)(c + 8), 8); *(unsigned long *)(c + 8) = (unsigned long)mapcls(sup); }
-                    /* the metaclass has its own superclass word, and for a same-image ObjC superclass it is a rebased guest
+                    /* the METACLASS has its own superclass word, and for a same-image ObjC superclass it is a rebased guest
                        address of that class's guest metaclass (Music: SMPreviewPlayer meta+8 = 0x1021c8130 = IntPreviewPlayer's),
                        not a bind. That metaclass was never registered (the superclass is a twin), so realization died with
                        "no class for metaclass". Map it the same way the class word is mapped: the map holds every guest
@@ -3420,28 +3202,28 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
                                 "rebuilt instead, so their metadata prefix and stable-ABI bit are missing\n"); }
                 }
             }
-            /* An exported class must be registered at its guest address, or native consumers get an
-                  Unregistered struct. xlat2 emits every data export as an absolute symbol equal to the guest
+            /* 10-21 AN EXPORTED CLASS MUST BE REGISTERED AT ITS GUEST ADDRESS, OR NATIVE CONSUMERS GET AN
+                  UNREGISTERED STRUCT. xlat2 emits every data export as an ABSOLUTE symbol equal to the guest
                   address (`_OBJC_CLASS_$_X = 0x2000xxxxx`, xlat2.py ~1609), so a native binary that links this
                   dylib binds `_OBJC_CLASS_$_X` to the guest class record. Build a twin elsewhere and that symbol
                   still points at a struct the runtime never registered — readable and entirely plausible
                   (class_getName, class_getSuperclass and class_getInstanceSize all answer correctly) but absent
                   from objc_copyClassList.
-               Measured end to end: Apple's own untranslated `/usr/libexec/pkd` imports exactly one class,
+                MEASURED END TO END: Apple's own untranslated `/usr/libexec/pkd` imports exactly one class,
                   `_OBJC_CLASS_$_PKDServer`, and does `[PKDServer new]`. dtrace caught
-                  `objc_opt_new(guest class 0x200033a88) <- pkd`; the instance came back with a packed isa of
+                  `objc_opt_new(GUEST class 0x200033a88) <- pkd`; the instance came back with a packed isa of
                   0x11d800200033a8d (& 0x00007ffffffffff8 = 0x200033a88, the guest class); and native
                   objc_release later walked that struct and faulted at 0x70612e6d6f80 — a pointer read out of the
                   middle of a "com.apple…" string inside the guest class data. Deterministic across builds.
-               So if this class is one the image exports, register the guest record IN PLACE with
+                So if THIS class is one the image exports, register the guest record IN PLACE with
                   objc_readClassPair, the way the Swift path above realizes its own record. The exported absolute
                   symbol is then the live class and nothing downstream needs to know. Scoped strictly to exported
                   classes: every other class takes the unchanged twin path below, so a program with no exported
                   classes (Dock, Finder, WindowManager) is bit-for-bit unaffected.
-               Fails safe: if the runtime refuses the record we fall through to the twin and say so loudly. A
+                FAILS SAFE: if the runtime refuses the record we fall through to the twin and say so loudly. A
                   class that failed to register at all would be worse than a twin a native consumer cannot see. */
             /* ARM2X86_NO_INPLACE=1 forces the old twin path, so one build gives a before/after A/B.
-                  The certifier wants both halves from the same binary; a toggle is cheaper than two builds. */
+                  The certifier wants both halves from the SAME binary; a toggle is cheaper than two builds. */
             if (!realized && name && !A2X_DBGENV("ARM2X86_NO_INPLACE")) {
                 static Class (*readpair)(Class, const void *); static int rp_looked;
                 if (!rp_looked) { rp_looked = 1;
@@ -3472,7 +3254,7 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
             }
             if (!realized) {
             ns = objc_allocateClassPair(sup ? mapcls(sup) : Nil, name, gclsz ? gclsz - 0x28 : 0);
-            /* A class name A native framework already registered. macOS 27's SetupAssistantSpringboard defines
+            /* 10-20 A CLASS NAME A NATIVE FRAMEWORK ALREADY REGISTERED. macOS 27's SetupAssistantSpringboard defines
                   SAFacelessConfiguration, which the native SetupAssistant framework also defines; allocateClassPair refused
                   the duplicate, the bridge died, the springboard aborted, and loginwindow waited forever at 60% for its
                   macbuddy.ready signal — the black screen. Apple's runtime keeps BOTH ("Class X is implemented in both"):
@@ -3500,7 +3282,7 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
             unsigned long pl = *(unsigned long *)(ro + 40);
             if (pl) { unsigned long n = *(unsigned long *)pl;
                 for (unsigned long k = 0; k < n; k++) { unsigned long p = ((unsigned long *)(pl + 8))[k];
-                    /* a null entry in the protocol list read through null; the list is image data, never trusted */
+                    /* 10-20 a null entry in the protocol list read through null; the list is image data, never trusted */
                     if (!p) continue;
                     const char *pn = *(const char **)(p + 8);
                     Protocol *pr = pn ? objc_getProtocol(pn) : 0; if (pr) class_addProtocol(ns, pr); } }
@@ -3522,19 +3304,14 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
                the ivar destroyer. Copied verbatim from the guest class, which already holds the right values; objc
                itself never reads past 0x28, so these bytes are ours. */
             if (gclsz) memcpy((char *)ns + 0x28, (const char *)(c + 0x28), gclsz - 0x28);
-            /* A NULL DEREF AT ADDRESS 0 killed finder here, three frames from main. class_addIvar() above is
-                  allowed to fail (the runtime refuses a duplicate name, and refuses everything once the pair is
+            /* 10-20 A NULL DEREF AT ADDRESS 0 KILLED FINDER HERE, three frames from main. class_addIvar() above is
+                  allowed to FAIL (the runtime refuses a duplicate name, and refuses everything once the pair is
                   registered), and this loop then called ivar_getOffset(NULL), which reads through null. The ivar's
-                  offset variable can also be absent, and *off = … then writes to null. Neither case said anything.
-               Both are now named and skipped: a missing ivar is a real defect in this class's layout, so it is
+                  offset variable can also be absent, and *off = … then WRITES to null. Neither case said anything.
+                Both are now named and skipped: a missing ivar is a real defect in this class's layout, so it is
                   reported every time rather than swallowed — translated code reading that offset gets the 0 already
                   there, which is wrong but diagnosable, instead of the process dying with no message. */
-            if (iv) { uint32_t es = *(uint32_t *)iv, n = *(uint32_t *)(iv + 4);   /* In Reminders (0x1005926f0): isa and the superclass word are both set by the Swift runtime later —
-                      the static record's superclass slot is 0 and so is its metaclass's, with no bind on either. It is a metadata
-                      template, not a class, and the runtime that eventually builds the live class builds it elsewhere, so no
-                      realization of this record can make class_replaceMethod valid. Registering it still died in
-                      prepareMethodLists at 0x20. Say so, name it, and skip the category: its methods do not exist and a send
-                      of one raises, which is the same trade the dropped branch below makes for an unresolved target. */
+            if (iv) { uint32_t es = *(uint32_t *)iv, n = *(uint32_t *)(iv + 4);   /* arm64 code reads these offset variables */
                 for (uint32_t k = 0; k < n; k++) { unsigned long e = iv + 8 + (unsigned long)k * es;
                     const char *ivn = *(const char **)(e + 8);
                     Ivar v = class_getInstanceVariable(ns, ivn);
@@ -3548,7 +3325,7 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
                     make_writable(off, 4); *off = (int32_t)ivar_getOffset(v); } }
             }   /* end of the rebuild path; a realized Swift class needed none of it */
             /* the C++ constructor chain: record this class's own, then give it a +allocWithZone: that runs
-                  the chain. Installed on every class that has one — a subclass without its own inherits this
+                  the chain. Installed on every class that HAS one — a subclass without its own inherits this
                   override, and `self` there is the subclass, so the walk still covers the whole chain.
                   a2x_alloc_with_zone allocates through the nearest INHERITED +allocWithZone:, so a class under
                   NSWindow or CALayer keeps its native allocator and only the placeholder case is skipped. */
@@ -3564,7 +3341,7 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
             work[i] = 0; done++; progress = 1;
         }
     }
-    /* Owed, not fatal — and it says which class and which superclass, which the empty die2 never
+    /* 10-26 OWED, NOT FATAL — and it says WHICH class and WHICH superclass, which the empty die2 never
           did. A class still unsettled here is waiting on a guest image that has not registered yet, and the
           next call retries the whole list. The cost of the trade is explicit: if no later image ever supplies
           the superclass, the program runs with those classes unregistered instead of aborting, and these
@@ -3577,11 +3354,8 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
             if (!work[i]) continue;
             unsigned long k = work[i], sup = *(unsigned long *)(k + 8);
             const char *nm = *(const char **)(RO(k) + 24);
-            /* A zero __objc_superrefs slot is a silent infinite recursion. objc_msgSendSuper2 starts its lookup at
-          class_getSuperclass(super_class); hand it nil and libobjc restarts from the receiver, so `super init` finds the
-          class's own init and the object initialises itself until the stack is gone — as in the Dock's
-          DockCore.SystemAppearanceMonitor, which looped init -> NSUserDefaults -> init through 60 MB of stack.
-          The loop below only ever rewrites slots that are already guest addresses, so a zero slot would pass through unsaid. */
+            /* the superclass record is NOT dereferenced for a name: it is the thing we could not resolve,
+                  so it may not be a class at all, and a diagnostic that faults is worse than no diagnostic. */
             fprintf(a2x_errf(), "objc_bridge: %s is NOT REGISTERED YET — its superclass is the guest record "
                     "%#lx, which no image has registered. It is owed to the next image's registration.\n",
                     nm ? nm : "(unnamed)", sup);
@@ -3590,29 +3364,18 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
         free(gOwed); gOwed = ow; gNOwed = n;
     } else { free(gOwed); gOwed = 0; gNOwed = 0; }
     free(work);
-    for (unsigned long i = 0; i < ncat; i++) {   /* One guest class, how many live classes? There are two registration paths — a Swift class is
-          realized in place (`ns = (Class)c`, so the guest address itself becomes a valid Class) and a plain
-          ObjC class gets an `objc_allocateClassPair` twin at a different address. If both ever happen for one
-          guest class the program holds two live classes with the same name: `objc_getClass(name)` returns one
-          while instances carry the other, and every identity comparison between them fails. Seen in pkd —
-          the PKDServer twin at 0x6000019e8d20 (twin_of_guest=0x200033a88) alongside instances whose isa is
-          0x200033a88, itself a walkable class with the right name, size 144 and the right superclass chain.
-          Count it; do not infer it from class_ro sizes. Static instanceStart/instanceSize are compile-time
-          snapshots and libobjc slides ivars at realization (PKDServer: static 8/64 over a superclass of 88,
-          live 144 = 88 + (64-8)), so a static-vs-live size comparison flags classes that are perfectly
-          correct. Registration identity is the fact; sizes are not. objc_copyClassList is the safe test — it
-          asks the runtime which addresses are really registered instead of dereferencing a suspect pointer. */
+    for (unsigned long i = 0; i < ncat; i++) {   /* categories: cat_t {name, cls, instanceMethods, classMethods, protocols ...} */
         unsigned long ct = ((unsigned long *)cat)[i]; Class tc = mapcls(*(unsigned long *)(ct + 8));
-        /* This skip was silent, and it is the only place a category on a class whose
+        /* 10-27 THIS SKIP WAS SILENT, and it is the only place a category on a class whose
               _OBJC_CLASS_$_ import never resolved could ever have been reported. Photos sends a category
-              class method to the NATIVE AVPlayer metaclass and the runtime has never heard of it
+              CLASS method to the NATIVE AVPlayer metaclass and the runtime has never heard of it
               ("NO ENCODING px_enableAutomaticContentAwareAudioRouting: class=AVPlayer meta=1 guestTwin=0x0
               respondsTo=0"), which is indistinguishable from a bad receiver until this line says which
               category it dropped and what it could not resolve. */
-        /* A CATEGORY ON A swift class the image never listed crashed libobjc (pc 0, fault 0x20, in
+        /* 10-27 A CATEGORY ON A SWIFT CLASS THE IMAGE NEVER LISTED CRASHED libobjc (pc 0, fault 0x20, in
               prepareMethodLists — Reminders `Reminders` on TTRMTemplatesListCellView 0x1005926f0; Shortcuts the same shape).
               That class is not in __objc_classlist (Swift registers it lazily through its metadata accessor), so nothing here
-              ever built it and mapcls() fell back to the raw guest record — which class_replaceMethod then walked as if it
+              ever built it and mapcls() fell back to the raw GUEST record — which class_replaceMethod then walked as if it
               were a registered class. libobjc itself parks a category on a not-yet-realized class until the class appears;
               we cannot wait for the accessor, so give the record the same pending entry a listed Swift class gets (it is
               realized on first use, and just below because the category needs it now). Scoped to a guest record whose
@@ -3620,15 +3383,12 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
         {   unsigned long tg = *(unsigned long *)(ct + 8);
             if (tc == (Class)tg && is_arm(tg) && (*(unsigned long *)(tg + 0x20) & 3)) {
                 unsigned long tsup = *(unsigned long *)(tg + 8);
-                /* Opt-in eager realization — off by default, a diagnostic for one known failure.
-          ControlCenter's Swift exclusivity trap fires two callback levels deep inside
-          swift::MetadataCacheEntryBase<SingletonMetadataCacheEntry>::doInitialization: metadata for a guest
-          class is being completed in the middle of unrelated work (a block copy function, via
-          _call_copy_helpers_excp) while a modify access on a DarwinNotification is still open. Realizing
-          this image's classes up front moves that completion out of there, which is the hypothesis to test.
-       Not the default, and do not make it one on a hunch: lazy realization exists because realizing
-          early hid every Swift class from NSClassFromString and NSApplicationMain exited with
-          "Unable to find class: Application" — the by-name hook above is what repaired that. */
+                /* MEASURED on Reminders (0x1005926f0): isa and the SUPERCLASS WORD ARE BOTH SET BY THE SWIFT RUNTIME LATER —
+                      the static record's superclass slot is 0 and so is its metaclass's, with no bind on either. It is a metadata
+                      TEMPLATE, not a class, and the runtime that eventually builds the live class builds it elsewhere, so no
+                      realization of this record can make class_replaceMethod valid. Registering it still died in
+                      prepareMethodLists at 0x20. Say so, name it, and skip the category: its methods do not exist and a send
+                      of one raises, which is the same trade the DROPPED branch below makes for an unresolved target. */
                 if (!tsup) {
                     if (A2X_DBGENV("ARM2X86_TRACE_REGCLS")) { unsigned long *t = (unsigned long *)tg; unsigned long d = t[8];
                         fprintf(a2x_errf(), "[regcat]   template words:"); for (int q = 0; q < 12; q++) fprintf(a2x_errf(), " %#lx", t[q]);
@@ -3661,7 +3421,10 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
                     cnm ? cnm : "(unnamed)", *(unsigned long *)(ct + 8));
             continue;
         }
-        /* not from 0 — once per image, every earlier image's +load would run again. Only this image's classes. */
+        /* 10-25 A CATEGORY ON A PENDING (UNREALIZED) SWIFT CLASS CRASHED libobjc. macOS 27 Shortcuts has a category
+              `Shortcuts` on its own Swift class 0x100137c48; class_replaceMethod(windowShouldClose:) on the unrealized
+              class died in prepareMethodLists (fault 0x20). Realize it at the moment something needs it to be a class,
+              the same just-in-time rule as the by-name hook — eager realization for everything stays off. */
         if (A2X_DBGENV("ARM2X86_TRACE_REGCLS")) { int fk = -1; for (unsigned long k = 0; k < gNCls; k++) if (gCls[k].n == tc) { fk = (int)k; break; }
             fprintf(a2x_errf(), "[regcat] %s target=%#lx tc=%p gcls_idx=%d pending=%d\n", *(const char **)(ct) ? *(const char **)(ct) : "?",
                     *(unsigned long *)(ct + 8), (void *)tc, fk, fk >= 0 ? gCls[fk].pending : -1); fflush(a2x_errf()); }
@@ -3675,7 +3438,7 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
         add_methods(tc, *(unsigned long *)(ct + 16), 1, 0);
         add_methods(object_getClass((id)tc), *(unsigned long *)(ct + 24), 1, 0);
     }
-    /* Test hook, off unless ARM2X86_TEST_COMPLETE_PARKED=1: ask the real Swift runtime to initialise every parked category
+    /* TEST HOOK, off unless ARM2X86_TEST_COMPLETE_PARKED=1: ask the real Swift runtime to initialise every parked category
           target now (swift_getInitializedObjCClass is what a guest metadata accessor calls), so the attach can be seen on an
           app that would not touch the class inside the test window. It exercises the same poll the live path uses. */
     if (gNPC && A2X_DBGENV("ARM2X86_TEST_COMPLETE_PARKED")) {
@@ -3691,24 +3454,26 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
     }
     for (unsigned long i = 0; i < nrefs; i++) { unsigned long *r = (unsigned long *)refs + i;
         if (is_arm(*r)) { make_writable(r, 8); *r = (unsigned long)mapcls(*r); } }
-    /* Keep the existing generic marshaller; no receiver lookup and no objc_msgSend dispatch.
-       Except for a variadic IMP: only then is the call plan classified, so it takes the simple path with the arm
-       stack tail (vtail). Every other direct IMP keeps exactly the ffi path it had. */
+    /* 10-20 A ZERO __objc_superrefs SLOT IS A SILENT INFINITE RECURSION. objc_msgSendSuper2 starts its lookup at
+          class_getSuperclass(super_class); hand it nil and libobjc restarts from the RECEIVER, so `super init` finds the
+          class's own init and the object initialises itself until the stack is gone — measured on Dock's
+          DockCore.SystemAppearanceMonitor, which looped init -> NSUserDefaults -> init through 60 MB of stack.
+          The loop below only ever rewrote slots that are already guest addresses, so a zero slot passed through unsaid. */
     { unsigned long zero = 0;
       for (unsigned long i = 0; i < nsrefs; i++) { unsigned long *r = (unsigned long *)srefs + i;
           if (!*r) { zero++; continue; }
           if (is_arm(*r)) { make_writable(r, 8); *r = (unsigned long)mapcls(*r); } }
       if (zero) fprintf(a2x_errf(), "objc_bridge: %lu of %lu __objc_superrefs slots are NULL — every `super` send through one"
                         " of them restarts at the receiver and recurses forever\n", zero, nsrefs); }
-    /* One guest class, how many live classes? There are two registration paths — a Swift class is
+    /* 10-21 ONE GUEST CLASS, HOW MANY LIVE CLASSES? There are two registration paths — a Swift class is
           realized IN PLACE (`ns = (Class)c`, so the guest address itself becomes a valid Class) and a plain
           ObjC class gets an `objc_allocateClassPair` TWIN at a different address. If both ever happen for one
           guest class the program holds two live classes with the same name: `objc_getClass(name)` returns one
           while instances carry the other, and every identity comparison between them fails. Measured in pkd —
           the PKDServer twin at 0x6000019e8d20 (twin_of_guest=0x200033a88) alongside instances whose isa is
           0x200033a88, itself a walkable class with the right name, size 144 and the right superclass chain.
-          COUNT IT; do not infer it from class_ro sizes. Static instanceStart/instanceSize are compile-time
-          snapshots and libobjc slides ivars at realization (PKDServer: static 8/64 over a superclass of 88,
+           COUNT IT; do not infer it from class_ro sizes. Static instanceStart/instanceSize are compile-time
+          snapshots and libobjc SLIDES ivars at realization (PKDServer: static 8/64 over a superclass of 88,
           live 144 = 88 + (64-8)), so a static-vs-live size comparison flags classes that are perfectly
           correct. Registration identity is the fact; sizes are not. objc_copyClassList is the safe test — it
           asks the runtime which addresses are really registered instead of dereferencing a suspect pointer. */
@@ -3721,10 +3486,10 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
             int is_inplace = (gCls[i].n == (Class)gCls[i].a), guest_registered = 0;
             for (unsigned int k = 0; k < nall; k++)
                 if (all[k] == (Class)gCls[i].a) { guest_registered = 1; break; }
-            /* an in-place class is only correct if the runtime really registered it at the guest address —
+            /* an in-place class is only correct if the runtime really REGISTERED it at the guest address —
                   that is the whole point of the exported-class fix, so count it rather than assume it. */
-            /* gCls holds a class and its metaclass alternately (the +load loop walks i += 2), and a
-                  metaclass is never in objc_copyClassList — so split the count, or a perfectly correct
+            /* gCls holds a CLASS and its METACLASS alternately (the +load loop walks i += 2), and a
+                  metaclass is NEVER in objc_copyClassList — so split the count, or a perfectly correct
                   result reads as half-failed. Any REAL class in place but unlisted is named. */
             if (is_inplace) {
                 inplace++;
@@ -3749,19 +3514,19 @@ void __arm2x86_objc_register(unsigned long cl, unsigned long ncl, unsigned long 
                 "**%lu DUPLICATE** (twin AND guest address both registered)\n", tot, inplace, inplace_cls, inplace_reg, inplace_meta, twinned, dup);
         free(all);
     }
-    /* Opt-in eager realization — off by default, a diagnostic for one measured failure.
+    /* 10-23 OPT-IN EAGER REALIZATION — OFF BY DEFAULT, a diagnostic for one measured failure.
           ControlCenter's Swift exclusivity trap fires two callback levels deep inside
           swift::MetadataCacheEntryBase<SingletonMetadataCacheEntry>::doInitialization: metadata for a guest
           class is being completed in the middle of unrelated work (a block copy helper, via
           _call_copy_helpers_excp) while a modify access on a DarwinNotification is still open. Realizing
           this image's classes up front moves that completion out of there, which is the hypothesis to test.
-       Not the default, and do not make it one on a hunch: lazy realization exists because realizing
+        NOT the default, and do not make it one on a hunch: lazy realization exists BECAUSE realizing
           early hid every Swift class from NSClassFromString and NSApplicationMain exited with
           "Unable to find class: Application" — the by-name hook above is what repaired that. */
     if (A2X_DBGENV("ARM2X86_EAGER_REALIZE"))
         for (unsigned long i = first; i < gNCls; i++)
             if (gCls[i].pending) a2x_realize_now(&gCls[i]);
-    /* 10-03: WAS from 0 — once per image, every earlier image's +load ran again. Only this image's classes. */
+    /* 10-03: WAS from 0 — once per IMAGE, every earlier image's +load ran again. Only this image's classes. */
     for (unsigned long i = first; i < gNCls; i += 2) {   /* +load, as the runtime would for an image it loaded */
         Class c = gCls[i].n; unsigned int n = 0; Method *ms = class_copyMethodList(object_getClass((id)c), &n);
         for (unsigned int k = 0; k < n; k++) if (method_getName(ms[k]) == sel_registerName("load")) {
@@ -3810,7 +3575,7 @@ static void a2x_record_native_imp(IMP imp, SEL sel, const char *types) {
     if (p->na < 2 || ffi_prep_cif(&p->cif, FFI_DEFAULT_ABI, p->na, p->rt, p->at) != FFI_OK)
         die2("native IMP signature", types);
     /* Keep the existing generic marshaller; no receiver lookup and no objc_msgSend dispatch.
-       Except for a variadic IMP: only then is the plan classified, so it takes the simple path with the arm
+        10-30 EXCEPT for a variadic IMP: only then is the plan classified, so it takes the simple path with the arm
        stack tail (vtail). Every other direct IMP keeps exactly the ffi path it had. */
     { a2x_plan_classify(p, (const void *)imp); if (!p->vtail) { p->simple = 0; p->vtail = 0; } }
     e->target = (unsigned long)imp; e->sel = sel; e->plan = p; e->next = a2x_native_imps[bucket];

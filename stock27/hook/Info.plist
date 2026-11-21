@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+   UNTESTED. This bundle has never been built or loaded.
+   The kext must land in the auxiliary collection (/Library/Extensions),
+  never in the boot collection: a boot-collection kext that panics takes the
+  machine's ability to boot with it, while a bad AuxKC is skipped by Safe Mode.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleIdentifier</key>
+	<string>net.arm2x86.exechook</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>arm2x86 exec hook</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>0.1</string>
+	<key>CFBundleExecutable</key>
+	<string>a2x_exec_hook</string>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<!-- bsd: vn_rdwr (the slide anchor), sysctl, printf -->
+		<key>com.apple.kpi.bsd</key>
+		<string>25.6.0</string>
+		<!-- libkern: printf; mach: kmod types -->
+		<key>com.apple.kpi.libkern</key>
+		<string>25.6.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>25.6.0</string>
+		<!--  unsupported: thread_call_*, clock_interval_to_deadline.
+		     If the build cannot resolve these, the dead-man has to be
+		     rebuilt on IOTimerEventSource instead - and the hook must
+		     not be armable without one. -->
+		<key>com.apple.kpi.dsep</key>
+		<string>25.6.0</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>25.6.0</string>
+		<key>com.apple.kpi.unsupported</key>
+		<string>25.6.0</string>
+	</dict>
+	<!--  NO OSBundleRequired KEY, DELIBERATELY. Declaring "Safe Boot" or
+	     "Root" would make this load in Safe Mode, and Safe Mode not loading
+	     it is the documented recovery path in install_os_exec_hook.sh.
+	     Adding that key removes the escape hatch. -->
+	<key>IOKitPersonalities</key>
+	<dict/>
+</dict>
+</plist>

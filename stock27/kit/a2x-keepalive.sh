@@ -26,7 +26,7 @@ if [ "$v" != "1" ]; then
     exit 1
 fi
 
-for host in /usr/libexec/a2x/a2xhost /usr/libexec/a2x/a2xhost-cat /usr/libexec/a2x/a2xhost-mac; do
+for host in /usr/libexec/a2x/a2xhost /usr/libexec/a2x/a2xlaunch /usr/libexec/a2x/a2xhost-cat /usr/libexec/a2x/a2xhost-mac; do
     if [ ! -f "$host" ] || [ ! -x "$host" ]; then
         say "REFUSE: required runtime executable unavailable: $host"
         exit 1
@@ -70,6 +70,21 @@ if ! sysctl -w a2x.exec_hook_keepalive=1 >/dev/null 2>&1; then
     exit 1
 fi
 say "runtime prerequisites ready; armed, heartbeat every ${EVERY}s against a ${DEADMAN}s dead-man"
+
+# The Apple board name Software Update reports. It is set here, after start-up, so the drivers that took their
+# settings from the firmware's board name keep them. No file or no switch in the kext: nothing is changed.
+BOARD=$(head -c 16 /Library/NullMoth/a2x/board 2>/dev/null | tr -cd 'A-Za-z0-9-')
+if [ -n "$BOARD" ] && sysctl -n a2x.board_id >/dev/null 2>&1; then
+    if sysctl -w a2x.board_id="$BOARD" >/dev/null 2>&1 && [ "$(sysctl -n a2x.board_id 2>/dev/null)" = "$BOARD" ]; then
+        say "board name for Software Update: $BOARD"
+        # The update services read the name once, when they start, and they start before this runs.
+        for svc in com.apple.mobileassetd com.apple.softwareupdated; do
+            /bin/launchctl kickstart -k system/$svc >/dev/null 2>&1 || say "could not restart $svc; Software Update may show nothing until the next start"
+        done
+    else
+        say "board name $BOARD was not accepted"
+    fi
+fi
 
 if [ "$(sysctl -n a2xa.adopt_enable 2>/dev/null)" = "1" ]; then
     if /usr/bin/notifyutil -p com.apple.oah.did-install; then

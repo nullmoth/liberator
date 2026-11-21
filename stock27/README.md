@@ -7,7 +7,8 @@ Our own files are added beside Apple's; none of Apple's is replaced.
 
 | piece | file | what it does |
 |---|---|---|
-| boot-arm hook | `hook/patch_bootarm.py` (applied to the exec hook source) | with boot-arg `a2xbootarm=1` the exec hook arms itself inside the kernel as soon as AMFI's sandbox sysctl exists, before launchd. Apple's arm64-only boot tasks (cc_fips_test and others) then start under the hook. Sysctl `a2x.exec_hook_bootarm_result`: -1 not tried, 0 armed. |
+| exec hook | `hook/` (full source + `Makefile`) | the kernel extension that hands an arm64 program to the interpreter at exec time. `make selftest` builds the decision logic in userspace (`-DA2X_SELFTEST`, plain clang, no VM) and runs its arms; `make kext` builds the extension for x86_64. With boot-arg `a2xbootarm=1` it arms itself inside the kernel as soon as AMFI's sandbox sysctl exists, before launchd, so Apple's arm64-only boot tasks (cc_fips_test and others) start under it. Sysctl `a2x.exec_hook_bootarm_result`: -1 not tried, 0 armed. Two entry programs: `/usr/libexec/xpcproxy` runs in the interpreter itself; everything else goes to the small launcher at `/usr/libexec/a2x/a2xlaunch`. `a2x.board_id` sets the board name Software Update reads. |
+| boot-arm patch | `hook/patch_bootarm.py` | superseded: the boot-arm feature it added is now part of the full `hook/` source above. Kept for reference; it is not applied when the full source is built. |
 | keepalive stock mode | `patch_keepalive.py`, `kit/a2x-keepalive.sh` | when the kernel armed the hook (result 0), the exec-storm guard only logs and the dead-man window is 3600 s. Disarming on a stock system stops shutdown and every arm64-only Apple program. |
 | update payload | `vm/syspatch.sh`, `vm/sys_added.txt` | the 403 files we add to the system volume (x86_64 dyld shared cache, kernel collections, boot.efi, `/usr/libexec/a2x/*`, auxkcload, AMD bundles, DefaultLocalDB, …). |
 

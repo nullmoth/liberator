@@ -14,7 +14,15 @@ These wrappers take no arguments and return nothing: they read and write the reg
 import os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-X = os.path.join(HERE, '..', 'xlat2.py')
+
+def _translator(name):
+    # the translator sits in translator/ beside interp/ in this tree; a flat build copy keeps it one level up
+    for cand in (os.path.join(HERE, '..', 'translator', name), os.path.join(HERE, '..', name)):
+        if os.path.exists(cand):
+            return cand
+    return os.path.join(HERE, '..', 'translator', name)
+
+X = _translator('xlat2.py')
 src = open(X).read()
 
 # '<symbol>': '<wrapper>' pairs, exactly as xlat2 writes them
@@ -24,7 +32,7 @@ pairs = dict(re.findall(r"'(_[A-Za-z0-9_$]+)':\s*'(__arm2x86[A-Za-z0-9_]*)'", sr
 #    and objc_msgSendSuper2 — and reading only xlat2.py left those bound natively: the native runtime then
 #    could not find a guest method and the message went to forwarding, which raises
 #    "unrecognized selector" from somewhere that looks nothing like the cause.
-XL = os.path.join(HERE, '..', 'xlat.py')
+XL = _translator('xlat.py')
 xsrc = open(XL).read()
 m = re.search(r"RF = \{([^}]*)\}", xsrc)
 if not m:

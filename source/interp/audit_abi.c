@@ -2,11 +2,10 @@
    reuses: host.c a2x_late_wrapper (the name -> host function table every bind consults first; gss_abi.c answers its
      misses first, this file answers what gss leaves); vararg.c's VFIX table moves the variadic tail of
      sandbox_check_by_audit_token off the arm stack into x3..x5 before the C door calls the wrapper below.
-   new-because: native x86 sandbox_check_by_audit_token("mach-lookup", 2|3)
-     = 0 and audit_token_to_pid = our pid; the same probe built arm64e and run under the host gives -1, -1 and pid 0.
-     audit_token_t is 32 bytes: Apple arm64 passes a >16-byte struct as a pointer in an x register, x86_64 passes it
-     as 32 bytes on the stack. The generic adapter handed native code the pointer in rdi, so native read the token
-     from the arm stack.
+   new-because: 11-01 offline ruler (studio, probe sbp.c): native x86 sandbox_check_by_audit_token("mach-lookup", 2|3)
+     = 0 and audit_token_to_pid = our pid; the same arm64e probe under host 1101ai = -1, -1 and pid 0. audit_token_t is
+     32 bytes: Apple arm64 passes a >16-byte struct as a POINTER in an x register, x86_64 passes it as 32 bytes on the
+     stack. The generic adapter handed native code the pointer in rdi, so native read the token from the arm stack.
      In the guest: launchd's privileged mach-lookup check failed for every caller -> "denied lookup ... error = 159:
      Sandbox restriction" -> configd's SCDynamicStoreCreate NULL -> configd crash -> en0 no address -> no ssh.
      sigdb (header-based) has neither libbsm nor the private libsandbox prototypes, so abi_gen never generated these.
@@ -15,10 +14,10 @@
      sandbox_check_by_audit_token(token, op, type, ...)   variadic: up to 3 tail words, from x3..x5 (VFIX)
      audit_token_to_{pid,euid,egid,ruid,rgid,auid,asid,pidversion}(token)
      audit_token_to_au32(token, 8 out pointers)            9 args: the door hands x6, x7, sp[0] as stack args 7..9
-   Not covered — named so nobody assumes they are: sandbox_extension_issue_*_to_process* and any other private API
-      taking audit_token_t by value; add them here with a test when an import list shows one.
+    NOT covered — named so nobody assumes they are: sandbox_extension_issue_*_to_process* and any other private API
+      taking audit_token_t by value; add them here with a ruler line when an import list shows one.
    ARM2X86_NO_AUDITABI=1 turns the layer off (binds go native exactly as before); ARM2X86_TRACE_AUDIT=1 traces it.
-   Selftest (x86_64 macOS, real libraries): clang -arch x86_64 -DAUDIT_ABI_SELFTEST audit_abi.c -o aut && ./aut
+   Selftest (studio, real x86 libraries): clang -arch x86_64 -DAUDIT_ABI_SELFTEST audit_abi.c -o aut && ./aut
 */
 #include <dlfcn.h>
 #include <errno.h>
@@ -89,16 +88,16 @@ static void w_audit_token_to_au32(const a_tok *t, void *auid, void *euid, void *
     if (atr()) fprintf(stderr, "[host] audit_abi: audit_token_to_au32(pid %u)\n", t->v[5]);
 }
 
-/* The by-value token class, read from the binaries, not guessed. A name is here only when both halves agree:
-      x86_64 (lldb): the non-variadic function reads its caller's stack at 0x10..0x2f(%rbp) — a 32-byte
-        memory-class argument (pid at 0x24, pidversion at 0x2c);
-      arm64e (real macOS 27, lldb): incoming x<k> is dereferenced at token offsets (+0x14/+0x1c) — the pointer
+/* 11-01 THE BY-VALUE TOKEN CLASS, measured, not guessed. A name is here only when BOTH halves agree:
+      x86_64 (studio, lldb): the non-variadic function reads its CALLER'S stack at 0x10..0x2f(%rbp) — a 32-byte
+        MEMORY-class argument (pid at 0x24, pidversion at 0x2c);
+      arm64e (laptop = real 27, lldb): incoming x<k> is dereferenced at token offsets (+0x14/+0x1c) — the pointer
         Apple arm64 passes for a >16-byte struct.
    k = the token's argument index(es). Every other argument keeps its order and goes to the x86 integer registers;
    the token(s) go to the stack, in order. Controls: audit_token_to_* (known by value) and SecTaskCreateWithAuditToken
    (abi_gen's header-typed wrapper, k=1) were classified the same way by the same scan.
-   Without its entry, sandbox_check_network kills launchd at boot (native reads guest x3 as the sockaddr).
-   Not here: names already wrapped above (sandbox_check_by_audit_token is variadic, VFIX owns its tail),
+    sandbox_check_network killed launchd on the 11-01 proof boot (native read guest x3 as the sockaddr).
+    NOT here: names already wrapped above (sandbox_check_by_audit_token is variadic, VFIX owns its tail),
       SecTaskCreateWithAuditToken (rf_table binds it first), and anything taking `const audit_token_t *`
       (csops_audittoken, proc_*_audittoken, SecCodeCreateWithAuditToken: x86 reads them from a register). */
 struct tokgen { const char *n; signed char k0, k1; char ret; };   /* ret 'b' = bool in al only: narrow */
@@ -108,7 +107,7 @@ static const struct tokgen g_tok[] = {
     { "sandbox_check_message_filter_integer", 0, -1, 'l' },
     { "sandbox_check_message_filter_string", 0, -1, 'l' },
     { "sandbox_enable_state_flag", 1, -1, 'l' },
-    { "sandbox_check_process_signal_target", 0, 2, 'l' },   /* two tokens: x86 reads 0x24/0x2c and 0x44/0x4c(%rbp) */
+    { "sandbox_check_process_signal_target", 0, 2, 'l' },   /* two tokens: x86 reads 0x24/0x2c AND 0x44/0x4c(%rbp) */
     { "sandbox_check_self_signal_target", 1, -1, 'l' },
     { "sandbox_container_path_for_audit_token", 0, -1, 'l' },
     { "sandbox_extension_issue_file_to_process", 3, -1, 'l' },
@@ -204,16 +203,16 @@ int main(void) {
     unsigned (*pidf)(const a_tok *) = a2x_audit_wrapper("audit_token_to_pid");
     unsigned (*euidf)(const a_tok *) = a2x_audit_wrapper("audit_token_to_euid");
     snprintf(b, sizeof b, "wrapper pid %u, getpid %d", pidf ? pidf(&t) : 0, getpid());
-    arm(pidf && pidf(&t) == (unsigned)getpid(), "audit_token_to_pid through the wrapper is this process's pid", b);
+    arm(pidf && pidf(&t) == (unsigned)getpid(), " audit_token_to_pid through the wrapper is this process's pid", b);
     snprintf(b, sizeof b, "wrapper euid %u, geteuid %u", euidf ? euidf(&t) : 0, geteuid());
-    arm(euidf && euidf(&t) == geteuid(), "audit_token_to_euid through the wrapper is geteuid()", b);
+    arm(euidf && euidf(&t) == geteuid(), " audit_token_to_euid through the wrapper is geteuid()", b);
     unsigned au[8] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u}; unsigned tid[2];
     void (*au32)(const a_tok *, void *, void *, void *, void *, void *, void *, void *, void *) =
         a2x_audit_wrapper("audit_token_to_au32");
     if (au32) au32(&t, &au[0], &au[1], &au[2], &au[3], &au[4], &au[5], &au[6], tid);
     snprintf(b, sizeof b, "euid %u egid %u pid %u (getpid %d)", au[1], au[2], au[5], getpid());
     arm(au32 && au[5] == (unsigned)getpid() && au[1] == geteuid() && au[2] == getegid(),
-        "audit_token_to_au32 fills all 8 outs (the 9th argument rides the stack)", b);
+        " audit_token_to_au32 fills all 8 outs (the 9th argument rides the stack)", b);
     int (*sbw)(const a_tok *, const char *, int, unsigned long, unsigned long, unsigned long) =
         a2x_audit_wrapper("sandbox_check_by_audit_token");
     sbcheck_fn sbn = (sbcheck_fn)dlsym(RTLD_DEFAULT, "sandbox_check_by_audit_token");
@@ -222,47 +221,47 @@ int main(void) {
         int w = sbw ? sbw(&t, "mach-lookup", ty, (unsigned long)svc, 0, 0) : -9;
         int nv = sbn ? sbn(t, "mach-lookup", ty, svc) : -9;
         snprintf(b, sizeof b, "type %d: wrapper %d, native %d", ty, w, nv);
-        arm(sbn && w == nv && w == 0, "sandbox_check_by_audit_token wrapper == native == 0 (unsandboxed)", b);
+        arm(sbn && w == nv && w == 0, " sandbox_check_by_audit_token wrapper == native == 0 (unsandboxed)", b);
     }
-    /* the by-value table, against native called BY VALUE through its real x86 prototype */
+    /* 11-01 the by-value table, against native called BY VALUE through its real x86 prototype */
     {
         int pid = getpid();
         long (*gp)(const a_tok *) = a2x_audit_wrapper("container_audit_token_get_pid");
         snprintf(b, sizeof b, "wrapper %ld getpid %d", gp ? gp(&t) : -9, pid);
-        arm(gp && gp(&t) == pid, "container_audit_token_get_pid(token BY VALUE, k=0) through the table == getpid", b);
+        arm(gp && gp(&t) == pid, " container_audit_token_get_pid(token BY VALUE, k=0) through the table == getpid", b);
         long (*iv)(const a_tok *) = a2x_audit_wrapper("container_audit_token_is_valid");
         snprintf(b, sizeof b, "wrapper %ld", iv ? iv(&t) : -9);
-        arm(iv && iv(&t) == 1, "container_audit_token_is_valid(self) == 1, narrowed to the bool in al", b);
+        arm(iv && iv(&t) == 1, " container_audit_token_is_valid(self) == 1, narrowed to the bool in al", b);
         struct { unsigned char len, fam; unsigned short port; unsigned int addr; char z[8]; } sa = {16, 2, 0x5000, 0x0100007f, {0}};
         long (*nw)(const a_tok *, long, const char *, long, void *) = a2x_audit_wrapper("sandbox_check_network");
         long (*nn)(a_tok, long, const char *, int, void *) = dlsym(RTLD_DEFAULT, "sandbox_check_network");
         errno = 0; long w = nw ? (int)nw(&t, 0, "network-outbound", 0, &sa) : -9; int we = errno;
         errno = 0; long v = nn ? (int)nn(t, 0, "network-outbound", 0, &sa) : -9; int ve = errno;
         snprintf(b, sizeof b, "wrapper %ld/errno %d, native-by-value %ld/errno %d", w, we, v, ve);
-        arm(nw && nn && w == v && we == ve, "sandbox_check_network (launchd's crash, 11-01) wrapper == native, same errno", b);
+        arm(nw && nn && w == v && we == ve, " sandbox_check_network (launchd's crash, 11-01) wrapper == native, same errno", b);
         long (*st)(const a_tok *, int, const a_tok *) = a2x_audit_wrapper("sandbox_check_process_signal_target");
         long (*sn)(a_tok, int, a_tok) = dlsym(RTLD_DEFAULT, "sandbox_check_process_signal_target");
         long w2 = st ? st(&t, 15, &t) : -9, v2 = sn ? sn(t, 15, t) : -9;
         snprintf(b, sizeof b, "wrapper %ld native %ld", w2, v2);
-        arm(st && sn && w2 == v2, "TWO tokens (k=0,2): sandbox_check_process_signal_target wrapper == native", b);
-        /* the failure direction: the old path (the guest pointer handed straight to native) must not equal native */
+        arm(st && sn && w2 == v2, " TWO tokens (k=0,2): sandbox_check_process_signal_target wrapper == native", b);
+        /* the failure direction: the old path (the guest pointer handed straight to native) must NOT equal native */
         pid_t c = fork();
         if (c == 0) { long (*raw)(long, long, long, long, long) = (void *)nn;
                       long r = raw((long)&t, (long)"network-outbound", (long)"network-outbound", 0x19, (long)&sa); _exit(r == v ? 0 : 3); }
         int stt = 0; waitpid(c, &stt, 0);
         snprintf(b, sizeof b, "old path: %s %d", WIFSIGNALED(stt) ? "signal" : "exit", WIFSIGNALED(stt) ? WTERMSIG(stt) : WEXITSTATUS(stt));
-        arm(WIFSIGNALED(stt) && WTERMSIG(stt) == SIGSEGV, "the OLD path (launchd's x0..x4 straight to native: x3=0x19 read as the sockaddr) faults", b);
+        arm(WIFSIGNALED(stt) && WTERMSIG(stt) == SIGSEGV, " the OLD path (launchd's x0..x4 straight to native: x3=0x19 read as the sockaddr) faults", b);
         long (*nul)(const a_tok *, long, const char *, long, void *) = nw;
         errno = 0; long z = nul ? nul(0, 0, "network-outbound", 0, &sa) : -9;
         snprintf(b, sizeof b, "ret %ld errno %d", z, errno);
-        arm(z == -1 && errno == EINVAL, "a NULL token pointer returns -1/EINVAL instead of faulting", b);
+        arm(z == -1 && errno == EINVAL, " a NULL token pointer returns -1/EINVAL instead of faulting", b);
     }
     snprintf(b, sizeof b, "malloc %p, open %p", a2x_audit_wrapper("malloc"), a2x_audit_wrapper("open"));
-    arm(!a2x_audit_wrapper("malloc") && !a2x_audit_wrapper("open"), "an unrelated name is NOT wrapped", b);
+    arm(!a2x_audit_wrapper("malloc") && !a2x_audit_wrapper("open"), " an unrelated name is NOT wrapped", b);
     setenv("ARM2X86_NO_AUDITABI", "1", 1);
     void *off = a2x_audit_wrapper("audit_token_to_pid");
     unsetenv("ARM2X86_NO_AUDITABI");
-    arm(!off && a2x_audit_wrapper("audit_token_to_pid"), "ARM2X86_NO_AUDITABI=1 turns the layer off, only while set",
+    arm(!off && a2x_audit_wrapper("audit_token_to_pid"), " ARM2X86_NO_AUDITABI=1 turns the layer off, only while set",
         off ? "still wrapped" : "off, then back");
     printf("%d failed\n", fails);
     return fails != 0;

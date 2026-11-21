@@ -1,0 +1,612 @@
+{
+  "provenance": "macOS 27.0 26A5425a LaunchServices runtime encodes LSVersionNumber as {LSVersionNumber=[32C]}; native provider writes 32-byte indirect result from one CFStringRef. SDK exports both symbols without public declarations. Native x86 provider reads by-value LSVersionNumber stack blocks, 32-byte stride for Compare; native 27 ARM and native x86 agree on 64-bit component/hash/Compare results and 32-bit DYLDVersion result. SIOpenIndex: genuine 27 ARM provider 0x1a1385dc4 preserves x6 and 0x1a1385f40 copies 24 bytes through it; x86 provider 0x7ff903b04d9f reads inline rbp+0x10, then arg7/+0x28, arg8/+0x30,arg9/+0x38. ARM mds 0x100072d64..0x100072d90 passes callback triple via x6, arg7/x7, arg8/SP,arg9/SP+8; return tested as w0. Three fixup targets are guest function starts. SICreateNewIndex genuine27 ARM copies24B from x5 at0x1a1713c94, x86 copies inline rbp+0x10 at0x7ff903ee201d, trailing args +0x28/+0x30. TCCAccessCheckAuditToken ARM x1 indirect32B token and x2 options, x86 token inline rbp+0x10 and options RSI; mds0x100014d40 copies32B and passes x1 address. Both providers return zero-extended byte result for TCC. SIUserCtxCreate (11-02 r13s): genuine27 ARM mds 0x10007cfb0..cff8 memcpy 0x450 B to sp+0x90 -> x2, 32 B pair to sp+0x50 -> x3, x4..x7, stack +0/+8/+0x10 8 B, +0x18 strb (1 B), +0x20 8 B; native x86 provider copies 138 qwords from rbp+16, 32 B at rbp+1120/1136, args8-9 rbp+1152, arg10 +1168, byte +1176, arg12 +1184, args4-7 rdx/rcx/r8/r9. Result x0 -> pointer. SIUserCtxGetAuditToken (11-02 r13t): genuine27 ARM mds 0x1000810c4..cc zeroes 32 B at sp+0x60, x8=&result, x0=ctx; native x86 provider: rdi=sret result, rsi=ctx, copies ctx+0x10..0x2f (32 B), NULL ctx -> zeroes. Generic door passed ctx as the sret pointer (mds SIGSEGV 0x100172380, CFRelease 0x100171070 downstream). r13u: CMTimeRange {CMTime start, duration} 48 B and CMTimeMapping {CMTimeRange source, target} 96 B (CoreMedia public headers); both > 16 B = memory class on x86, indirect on arm64. | MDPlistObject24 = {void*base; ulong len; uint off; uchar type; pad[3]} (24 bytes, MEMORY class on x86-64, by pointer on arm64): x86 MetadataUtilities readers take it on the stack at 0x10(%rbp) (offset u32 at 0x20, type u8 at 0x24), arm64 readers take x0 = pointer to it (offset ldr w,[x0,#0x10], type ldrb [x0,#0x14]); producers write 24 bytes through x8 / rdi. MDQueryBatchingParams = 6 x CFIndex (48 bytes) by value to MDQuerySetBatchingParameters (arm x1 = pointer, x86 stack 0x10..0x3f). Evidence: VERIFY.md.",
+  "types": {
+    "LSVersionNumber": {
+      "definition": "typedef struct { unsigned char bytes[32]; } %s;",
+      "size": 32,
+      "kind": "big",
+      "leaves": 0
+    },
+    "SIFileCallbacks24": {
+      "definition": "typedef struct { unsigned long open_fn, unlink_fn, rename_fn; } %s;",
+      "size": 24,
+      "kind": "big",
+      "leaves": 0
+    },
+    "SIUserCtxConfig1104": {
+      "definition": "typedef struct { unsigned long q[138]; } %s;",
+      "size": 1104,
+      "kind": "big",
+      "leaves": 0
+    },
+    "SIUserCtxBlock32": {
+      "definition": "typedef struct { unsigned long q[4]; } %s;",
+      "size": 32,
+      "kind": "big",
+      "leaves": 0
+    },
+    "CMTimeRange": {
+      "definition": "typedef struct { unsigned long q[6]; } %s;",
+      "size": 48,
+      "kind": "big",
+      "leaves": 0
+    },
+    "CMTimeMapping": {
+      "definition": "typedef struct { unsigned long q[12]; } %s;",
+      "size": 96,
+      "kind": "big",
+      "leaves": 0
+    },
+    "MDPlistObject24": {
+      "definition": "typedef struct { unsigned long base, len; unsigned int off; unsigned char type, pad[3]; } %s;",
+      "size": 24,
+      "kind": "big",
+      "leaves": 0
+    },
+    "MDQueryBatchingParams": {
+      "definition": "typedef struct { long q[6]; } %s;",
+      "size": 48,
+      "kind": "big",
+      "leaves": 0
+    }
+  },
+  "symbols": {
+    "_LSGetVersionFromString": {
+      "argc": 1,
+      "args": "i",
+      "sizes": [
+        8
+      ],
+      "ret": "x",
+      "cret": "LSVersionNumber",
+      "ctypes": [
+        "CFStringRef"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_LSVersionNumberMakeWithString": {
+      "argc": 1,
+      "args": "i",
+      "sizes": [
+        8
+      ],
+      "ret": "x",
+      "cret": "LSVersionNumber",
+      "ctypes": [
+        "CFStringRef"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_LSVersionNumberGetMajorComponent": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i64",
+      "cret": "uint64_t",
+      "ctypes": [
+        "LSVersionNumber"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_LSVersionNumberGetMinorComponent": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i64",
+      "cret": "uint64_t",
+      "ctypes": [
+        "LSVersionNumber"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_LSVersionNumberGetBugFixComponent": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i64",
+      "cret": "uint64_t",
+      "ctypes": [
+        "LSVersionNumber"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_LSVersionNumberHash": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i64",
+      "cret": "uint64_t",
+      "ctypes": [
+        "LSVersionNumber"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_LSVersionNumberCompare": {
+      "argc": 2,
+      "args": "xx",
+      "sizes": [
+        0,
+        0
+      ],
+      "ret": "i64",
+      "cret": "long",
+      "ctypes": [
+        "LSVersionNumber",
+        "LSVersionNumber"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_LSVersionNumberGetDYLDVersion": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "LSVersionNumber"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "SIOpenIndex": {
+      "argc": 10,
+      "args": "iiiiiixiii",
+      "sizes": [
+        8,
+        4,
+        8,
+        8,
+        4,
+        8,
+        0,
+        8,
+        8,
+        8
+      ],
+      "ret": "i32",
+      "cret": "int",
+      "ctypes": [
+        "void *",
+        "int",
+        "void *",
+        "void *",
+        "unsigned int",
+        "void *",
+        "SIFileCallbacks24",
+        "void *",
+        "void *",
+        "void *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "SICreateNewIndex": {
+      "argc": 9,
+      "args": "iiiiixiii",
+      "sizes": [
+        8,
+        4,
+        8,
+        8,
+        4,
+        0,
+        8,
+        8,
+        8
+      ],
+      "ret": "i32",
+      "cret": "int",
+      "ctypes": [
+        "void *",
+        "int",
+        "void *",
+        "void *",
+        "unsigned int",
+        "SIFileCallbacks24",
+        "void *",
+        "void *",
+        "void *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "TCCAccessCheckAuditToken": {
+      "argc": 3,
+      "args": "ixi",
+      "sizes": [
+        8,
+        0,
+        8
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "CFStringRef",
+        "audit_token_t",
+        "CFDictionaryRef"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "SIUserCtxCreate": {
+      "argc": 13,
+      "args": "iixxiiiiiiiii",
+      "sizes": [
+        8,
+        8,
+        0,
+        0,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        1,
+        8
+      ],
+      "ret": "i64",
+      "cret": "void *",
+      "ctypes": [
+        "CFAllocatorRef",
+        "void *",
+        "SIUserCtxConfig1104",
+        "SIUserCtxBlock32",
+        "void *",
+        "void *",
+        "void *",
+        "void *",
+        "void *",
+        "void *",
+        "void *",
+        "unsigned char",
+        "void *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "SIUserCtxGetAuditToken": {
+      "argc": 1,
+      "args": "i",
+      "sizes": [
+        8
+      ],
+      "ret": "x",
+      "cret": "audit_token_t",
+      "ctypes": [
+        "void *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistArrayGetCount": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistArrayGetCount": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistArrayGetPlistObjectAtIndex": {
+      "argc": 2,
+      "args": "xi",
+      "sizes": [
+        0,
+        4
+      ],
+      "ret": "x",
+      "cret": "MDPlistObject24",
+      "ctypes": [
+        "MDPlistObject24",
+        "unsigned int"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistArrayGetPlistObjectAtIndex": {
+      "argc": 2,
+      "args": "xi",
+      "sizes": [
+        0,
+        4
+      ],
+      "ret": "x",
+      "cret": "MDPlistObject24",
+      "ctypes": [
+        "MDPlistObject24",
+        "unsigned int"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistBooleanGetValue": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistBooleanGetValue": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistDataGetBytePtr": {
+      "argc": 2,
+      "args": "xi",
+      "sizes": [
+        0,
+        8
+      ],
+      "ret": "i64",
+      "cret": "void *",
+      "ctypes": [
+        "MDPlistObject24",
+        "unsigned long *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistDataGetBytePtr": {
+      "argc": 2,
+      "args": "xi",
+      "sizes": [
+        0,
+        8
+      ],
+      "ret": "i64",
+      "cret": "void *",
+      "ctypes": [
+        "MDPlistObject24",
+        "unsigned long *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistDictionaryGetPlistObjectForKey": {
+      "argc": 4,
+      "args": "xiii",
+      "sizes": [
+        0,
+        8,
+        8,
+        8
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24",
+        "const char *",
+        "unsigned long",
+        "MDPlistObject24 *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistDictionaryGetPlistObjectForKey": {
+      "argc": 4,
+      "args": "xiii",
+      "sizes": [
+        0,
+        8,
+        8,
+        8
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24",
+        "const char *",
+        "unsigned long",
+        "MDPlistObject24 *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistGetPlistObjectType": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistGetPlistObjectType": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i32",
+      "cret": "uint32_t",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistGetRootPlistObject": {
+      "argc": 1,
+      "args": "i",
+      "sizes": [
+        8
+      ],
+      "ret": "x",
+      "cret": "MDPlistObject24",
+      "ctypes": [
+        "void *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistGetRootPlistObjectFromPlist": {
+      "argc": 1,
+      "args": "i",
+      "sizes": [
+        8
+      ],
+      "ret": "x",
+      "cret": "MDPlistObject24",
+      "ctypes": [
+        "void *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistNumberGetIntValue": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i64",
+      "cret": "long",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistNumberGetIntValue": {
+      "argc": 1,
+      "args": "x",
+      "sizes": [
+        0
+      ],
+      "ret": "i64",
+      "cret": "long",
+      "ctypes": [
+        "MDPlistObject24"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "MDPlistStringGetValue": {
+      "argc": 3,
+      "args": "xii",
+      "sizes": [
+        0,
+        8,
+        8
+      ],
+      "ret": "i64",
+      "cret": "void *",
+      "ctypes": [
+        "MDPlistObject24",
+        "unsigned long *",
+        "unsigned int *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    },
+    "_MDPlistStringGetValue": {
+      "argc": 3,
+      "args": "xii",
+      "sizes": [
+        0,
+        8,
+        8
+      ],
+      "ret": "i64",
+      "cret": "void *",
+      "ctypes": [
+        "MDPlistObject24",
+        "unsigned long *",
+        "unsigned int *"
+      ],
+      "va": 0,
+      "fnp": [],
+      "blk": []
+    }
+  }
+}
