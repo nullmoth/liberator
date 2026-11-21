@@ -1,6 +1,6 @@
 #!/bin/bash
-# Installs the macOS 27 system package: the interpreter for Apple silicon programs, the routes that send
-# those programs to it, and the start-up scripts. Dry run unless --apply is given; --uninstall puts everything back.
+# Installs the macOS 27 system package: the interpreter for Apple silicon programs and the start-up scripts.
+# Apple's programs stay Apple's; the kernel's exec hook sends them to the interpreter. Dry run unless --apply is given; --uninstall puts everything back.
 # usage: install-system.sh [--system <volume> --data <volume>] [--dry-run | --apply | --uninstall]
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -124,8 +124,28 @@ cp "$HERE/a2x/a2xhost-mac.unsigned" "$SIGNED" || die "copy"
 /usr/bin/codesign -f -s - -i .a2xhost-mac --entitlements "$HERE/a2x/a2xhost-standalone.entitlements.plist" "$SIGNED" >/dev/null 2>&1 || die "could not sign the interpreter"
 /usr/bin/codesign --verify --strict "$SIGNED" || die "the signed interpreter does not verify"
 run mkdir -p "$(r /usr/libexec/a2x)"
-for f in a2xhost a2xhost-cat a2xpre.dylib; do place 755 "$HERE/a2x/$f" "$(r "/usr/libexec/a2x/$f")"; done
+for f in a2xhost-cat a2xpre.dylib; do place 755 "$HERE/a2x/$f" "$(r "/usr/libexec/a2x/$f")"; done
 place 755 "$SIGNED" "$(r /usr/libexec/a2x/a2xhost-mac)"
+# The exec hook starts /usr/libexec/a2x/a2xhost for every Apple silicon program. It is the interpreter itself: it runs
+# xpcproxy without a second exec, so a service keeps the identity launchd gave it, and starts every other program
+# through a2xhost-mac or a2xhost-cat.
+place 755 "$SIGNED" "$(r /usr/libexec/a2x/a2xhost)"
+# Every other program goes through the small launcher, which starts the right interpreter at once: a process the
+# system manages (a widget extension) is suspended a few milliseconds after it starts unless it has moved on by then.
+place 755 "$HERE/a2x/a2xlaunch" "$(r /usr/libexec/a2x/a2xlaunch)"
+# The Apple board name Software Update reports for this machine. Liberator names it for the kind of machine
+# (A2X_BOARD); without that the kit's own default, a Mac Studio's, is used.
+BOARDSRC="$HERE/a2x/board"
+case "${A2X_BOARD:-}" in
+  "") ;;
+  *[!A-Za-z0-9-]*) die "the board name '$A2X_BOARD' is not a board name";;
+  *) BOARDSRC=$(mktemp /tmp/gg-board.XXXXXX) && printf '%s' "$A2X_BOARD" > "$BOARDSRC" || die "could not write the board name";;
+esac
+if [ -f "$BOARDSRC" ]; then
+  run mkdir -p "$(r /Library/NullMoth/a2x)"
+  place 644 "$BOARDSRC" "$(r /Library/NullMoth/a2x/board)"
+fi
+[ "$BOARDSRC" = "$HERE/a2x/board" ] || rm -f "$BOARDSRC"
 place 755 "$HERE/a2x/a2xroute" "$(r /usr/libexec/a2x/a2xroute)"
 place 755 "$HERE/a2x/mkroute.sh" "$(r /usr/libexec/a2x/mkroute.sh)"
 place 755 "$HERE/a2x/a2xhost-mac.unsigned" "$(r /usr/libexec/a2x/a2xhost-mac.unsigned)"
@@ -230,86 +250,55 @@ gate_job() {  # <job path> <Apple's program> <gate script> <ws|lw>
 gate_job /System/Library/LaunchDaemons/com.apple.WindowServer.plist /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer /Library/NullMoth/bringup/ws-gate.sh ws
 gate_job /System/Library/LaunchDaemons/com.apple.loginwindow.plist /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow /Library/NullMoth/bringup/lw-gate.sh lw
 
-want=0; have=0; made=0; skipped=0; failed=0
-route_one() { local lf=$1 own_ident=${2:-} f host ident id cur new b perm own adhoc
-  f=$(r "$lf"); want=$((want+1))
-  [ -f "$f" ] || { skipped=$((skipped+1)); return 0; }
-  case "$("$HERE/a2x/a2xroute" --platform "$f" 2>/dev/null)" in
-    6) host="$HERE/a2x/a2xhost-cat.unsigned"; ident=.a2xhost-cat;;
-    1) host="$HERE/a2x/a2xhost-mac.unsigned"; ident=.a2xhost-mac;;
-    *) skipped=$((skipped+1)); echo "  left alone, it has no arm64 slice or declares no platform a host exists for: $f"; return 0;;
-  esac
-  id=$(/usr/bin/codesign -dv -a x86_64 "$f" 2>&1 | sed -n 's/^Identifier=//p')
-  if [ -n "$own_ident" ]; then
-    ident=$own_ident
-    adhoc=$(/usr/bin/codesign -dv -a x86_64 "$f" 2>&1 | grep -c 'flags=0x[0-9a-f]*(adhoc')
-    if [ "$id" = "$own_ident" ] && [ "$adhoc" = 1 ]; then id=.a2xhost-mac; else id=""; fi
-  fi
-  if [ "$id" = ".a2xhost-mac" ] || [ "$id" = ".a2xhost-cat" ]; then
-    cur=$(/usr/bin/codesign -dvvv -a x86_64 "$f" 2>&1 | sed -n 's/^CDHash=//p')
-    bash "$HERE/a2x/mkroute.sh" "$host" "$f" "$SIGNED.r" "$ident" >/dev/null 2>&1 || { failed=$((failed+1)); echo "  cannot rebuild $f"; return 0; }
-    new=$(/usr/bin/codesign -dvvv -a x86_64 "$SIGNED.r" 2>&1 | sed -n 's/^CDHash=//p')
-    [ -n "$cur" ] && [ "$cur" = "$new" ] && { have=$((have+1)); rm -f "$SIGNED.r"; return 0; }       # already this interpreter build
-  elif [ -n "$id" ]; then
-    skipped=$((skipped+1)); echo "  left alone, it has its own Intel half ($id): $f"; return 0
-  else
-    bash "$HERE/a2x/mkroute.sh" "$host" "$f" "$SIGNED.r" "$ident" >/dev/null 2>&1 || { failed=$((failed+1)); echo "  cannot route $f"; return 0; }
-  fi
-  if [ "$MODE" = "--apply" ]; then
-    b="$ORIG$lf"
-    if [ ! -f "$b" ]; then mkdir -p "$(dirname "$b")" && cp -p "$f" "$b" || { failed=$((failed+1)); rm -f "$SIGNED.r"; return 0; }; fi
-    perm=$(stat -f '%Lp' "$f"); own=$(stat -f '%u:%g' "$f")
-    cp "$SIGNED.r" "$f.ggnew" && chown "$own" "$f.ggnew" && chmod "$perm" "$f.ggnew" && mv -f "$f.ggnew" "$f" && made=$((made+1)) || failed=$((failed+1))
-  else
-    made=$((made+1))
-  fi
-  rm -f "$SIGNED.r"
-}
-echo "== 4. routes: Apple's arm64-only programs get the interpreter as their Intel half"
-while IFS= read -r f; do route_one "$f"; done < "$HERE/a2x/routes-26B123.txt"
-route_one /System/Library/CoreServices/UIKitSystem.app/Contents/MacOS/UIKitSystem
-route_one /usr/libexec/xpcproxy com.apple.xpc.proxy
-route_one /usr/libexec/lsd com.apple.lsd
-say "routes: $want listed, $have already current, $made $([ "$MODE" = "--apply" ] && echo made || echo 'to make'), $skipped skipped, $failed failed"
-[ "$failed" = 0 ] || die "$failed routes failed; nothing else was changed for them"
-
-echo "== 4b. applications start in one exec"
-want=0; have=0; made=0; skipped=0; failed=0
-for app in "$SYS"/System/Applications/*.app "$SYS"/System/Applications/Utilities/*.app "$SYS"/System/Library/CoreServices/Dock.app "$SYS"/System/Library/CoreServices/Finder.app; do
-  exe=$("$PB" -c "Print :CFBundleExecutable" "$app/Contents/Info.plist" 2>/dev/null); [ -n "$exe" ] || continue
-  f="$app/Contents/MacOS/$exe"; [ -f "$f" ] || continue
-  /usr/bin/file "$f" | /usr/bin/grep -q arm64 || continue
-  route_one "${f#"$SYS"}"
-done
-
-echo "== 4c. command-line developer tools start"
-swant=0; shave=0; smade=0; sfailed=0
-shim_one() { local f=$1 lf=$2 id adhoc b perm own cur new
-  id=$(/usr/bin/codesign -dv -a x86_64 "$f" 2>&1 | sed -n 's/^Identifier=//p')
-  case "$id" in com.apple.dt.xcode_select.tool-shim-public|com.apple.dt.xcode_select.tool-shim|com.apple.xcrun) ;; *) return 0;; esac
-  /usr/bin/file "$f" | /usr/bin/grep -q arm64 || return 0
-  swant=$((swant+1))
-  adhoc=$(/usr/bin/codesign -dv -a x86_64 "$f" 2>&1 | grep -c 'flags=0x[0-9a-f]*(adhoc')
-  cp "$HERE/a2x/a2xshim" "$SIGNED.s" && /usr/bin/codesign -f -s - -i "$id" "-r=designated => identifier \"$id\"" "$SIGNED.s" >/dev/null 2>&1 \
-    && "$HERE/a2x/a2xroute" "$SIGNED.s" "$f" "$SIGNED.r" >/dev/null 2>&1 || { sfailed=$((sfailed+1)); echo "  cannot make the launcher for $lf"; rm -f "$SIGNED.s" "$SIGNED.r"; return 0; }
-  if [ "$adhoc" = 1 ]; then      # ours already: current when it is this same launcher
-    cur=$(/usr/bin/codesign -dvvv -a x86_64 "$f" 2>&1 | sed -n 's/^CDHash=//p'); new=$(/usr/bin/codesign -dvvv -a x86_64 "$SIGNED.r" 2>&1 | sed -n 's/^CDHash=//p')
-    [ -n "$cur" ] && [ "$cur" = "$new" ] && { shave=$((shave+1)); rm -f "$SIGNED.s" "$SIGNED.r"; return 0; }
-  fi
-  if [ "$MODE" = "--apply" ]; then
-    b="$ORIG$lf"
-    if [ ! -f "$b" ]; then mkdir -p "$(dirname "$b")" && cp -p "$f" "$b" || { sfailed=$((sfailed+1)); rm -f "$SIGNED.s" "$SIGNED.r"; return 0; }; fi
-    perm=$(stat -f '%Lp' "$f"); own=$(stat -f '%u:%g' "$f")
-    cp "$SIGNED.r" "$f.ggnew" && chown "$own" "$f.ggnew" && chmod "$perm" "$f.ggnew" && mv -f "$f.ggnew" "$f" && smade=$((smade+1)) || sfailed=$((sfailed+1))
-  else smade=$((smade+1)); fi
-  rm -f "$SIGNED.s" "$SIGNED.r"
-}
-for f in "$SYS"/usr/bin/*; do [ -f "$f" ] && [ ! -L "$f" ] && shim_one "$f" "${f#"$SYS"}"; done
-say "developer-tool launchers: $swant found, $shave already current, $smade $([ "$MODE" = "--apply" ] && echo made || echo 'to make'), $sfailed failed"
-[ "$sfailed" = 0 ] || die "$sfailed developer-tool launchers could not be made"
+echo "== 4. stock: Apple's programs stay Apple's"
+# Earlier kits replaced Apple's arm64-only programs with routes. The kernel's exec hook now runs them unmodified from
+# the first boot task on, so each Apple program kept in the originals folder goes back, after the file in place is
+# backed up. Only Mach-O files on the system volume are put back: the launchd jobs below stay edited (the window
+# server and login window gates, the spotlight helpers' library) and files on the data volume are this kit's own.
+KEEP_EDITED=" /System/Library/LaunchDaemons/com.apple.WindowServer.plist /System/Library/LaunchDaemons/com.apple.loginwindow.plist /System/Library/LaunchAgents/com.apple.corespotlightd.plist /System/Library/LaunchAgents/com.apple.managedcorespotlightd.plist "
+# Two programs need their own entitlements on the process, which only a route carries; they are handled in 4b.
+KEEP_ROUTED="/System/Library/CoreServices/talagentd /System/Library/CoreServices/diagnostics_agent /System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter"
+rwant=0; rsame=0; rdone=0; rfail=0
+if [ -d "$ORIG" ]; then
+  while IFS= read -r -d '' o; do
+    lf=${o#"$ORIG"}
+    case "$KEEP_EDITED" in *" $lf "*) continue;; esac
+    case " $KEEP_ROUTED " in *" $lf "*) continue;; esac
+    case "$lf" in /Library/*|/usr/local/*|/private/var/*|/Users/*) continue;; esac
+    /usr/bin/file -b "$o" | /usr/bin/grep -q 'Mach-O' || continue
+    f=$(r "$lf"); rwant=$((rwant+1))
+    if [ -f "$f" ] && cmp -s "$o" "$f"; then rsame=$((rsame+1)); continue; fi
+    if [ "$MODE" != "--apply" ]; then rdone=$((rdone+1)); continue; fi
+    backup_current "$f" "$o" || { rfail=$((rfail+1)); echo "  could not keep a copy of $lf"; continue; }
+    cp -p "$o" "$f.ggstock" && mv -f "$f.ggstock" "$f" && cmp -s "$o" "$f" && rdone=$((rdone+1)) \
+      || { rm -f "$f.ggstock"; rfail=$((rfail+1)); echo "  could not put back $lf"; }
+  done < <(find "$ORIG" -type f -print0)
+fi
 rm -f "$SIGNED" "$SIGNED.r"
-say "applications: $want arm64 executables, $have already current, $made $([ "$MODE" = "--apply" ] && echo made || echo 'to make'), $skipped with their own Intel half, $failed failed"
-[ "$failed" = 0 ] || die "$failed applications could not be routed"
+say "stock: $rwant Apple programs kept from earlier installs, $rsame already Apple's, $rdone $([ "$MODE" = "--apply" ] && echo 'put back' || echo 'to put back'), $rfail failed"
+[ "$rfail" = 0 ] || die "$rfail Apple programs could not be put back; the files in place are unchanged or backed up"
+
+echo "== 4b. programs that keep a route"
+# Without talagentd the menu bar shows no Apple menu and no application menus; without its route NotificationCenter is
+# ended by the system about once a minute. Apple's file is kept in the originals folder first and put back in place,
+# and the route is built from it there: a program inside an app bundle must be signed from inside the bundle, or the
+# signature is bound to an Info.plist that is not there and the program is refused at start.
+kdone=0; kfail=0
+for lf in $KEEP_ROUTED; do
+  f=$(r "$lf"); o="$ORIG$lf"
+  [ -f "$f" ] || { echo "  not on this system: $lf"; continue; }
+  if [ "$MODE" != "--apply" ]; then echo "  would route $lf"; continue; fi
+  if [ ! -f "$o" ]; then
+    if /usr/bin/file -b "$f" | /usr/bin/grep -q 'x86_64'; then kfail=$((kfail+1)); echo "  $lf is not Apple's file and no original is kept"; continue; fi
+    mkdir -p "$(dirname "$o")" && cp -p "$f" "$o" || { kfail=$((kfail+1)); echo "  could not keep Apple's $lf"; continue; }
+  fi
+  cmp -s "$o" "$f" || { cp -p "$o" "$f.ggapple" && mv -f "$f.ggapple" "$f"; } || { rm -f "$f.ggapple"; kfail=$((kfail+1)); echo "  could not put Apple's $lf in place"; continue; }
+  if /bin/bash "$HERE/a2x/mkroute.sh" "$HERE/a2x/a2xhost-mac.unsigned" "$f" "$f.ggroute" \
+     && chown root:wheel "$f.ggroute" && chmod 755 "$f.ggroute" && mv -f "$f.ggroute" "$f"; then kdone=$((kdone+1))
+  else rm -f "$f.ggroute"; kfail=$((kfail+1)); echo "  could not route $lf"; fi
+done
+say "routes kept: $kdone made, $kfail failed"
+[ "$kfail" = 0 ] || die "$kfail programs that need a route could not be routed"
 
 echo "== 5. not done by this script"
 echo "  the exec-hook kernel extension and the NVIDIA kernel extensions load through the boot loader (1401 builds that)"

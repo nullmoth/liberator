@@ -19,7 +19,8 @@
   "nmxintel=3",
   "nmxamd=3",
   "a2x_pcibus=0x10010fe",
-  "a2x_nondrv=1"
+  "a2x_nondrv=1",
+  "a2xbootarm=1"
  ],
  "caps": [
   {
@@ -159,6 +160,11 @@
    "plist_path": "Contents/Info.plist"
   }
  ],
+ "gfx_27": [
+  "WhateverGreen.kext",
+  "WhateverXe.kext",
+  "NootedRed.kext"
+ ],
  "gpu_ids": [
   "2D05"
  ],
@@ -286,11 +292,6 @@
   "IntelLucy.kext",
   "RealtekRTL8111.kext",
   "AtherosE2200Ethernet.kext"
- ],
- "gfx_27": [
-  "WhateverGreen.kext",
-  "WhateverXe.kext",
-  "NootedRed.kext"
  ],
  "laydown": {
   "dir": "laydown",

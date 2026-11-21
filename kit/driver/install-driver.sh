@@ -216,8 +216,17 @@ put() { local kind=$1 a=$2 md=$3 path=$4 d src; d=$(r "$4"); src="$FILES$4"
   backup_current "$path" || die "could not keep a copy of $path before replacing it; nothing was placed there"
   keep "$path" || die "could not keep the original of $path; nothing was placed there"
   rm -f "$d.ggnew"
+  # A file made immutable (schg/uchg, done to the aux collection so macOS 27 does not delete it at start-up) cannot be
+  # replaced; the lock is lifted for the swap and put back on the new file.
+  lock=""
+  if [ "$kind" = F ] && [ -f "$d" ] && [ ! -L "$d" ]; then
+    case ",$(ls -lO "$d" | awk '{print $5}')," in *,schg,*) lock=schg;; esac
+    case ",$(ls -lO "$d" | awk '{print $5}')," in *,uchg,*) lock=${lock:+$lock,}uchg;; esac
+    [ -z "$lock" ] || chflags noschg,nouchg "$d" || die "could not unlock $path to replace it; nothing was placed there"
+  fi
   case "$kind" in
-    F) cp "$src" "$d.ggnew" && chown root:wheel "$d.ggnew" && chmod "$a" "$d.ggnew" && mv -fh "$d.ggnew" "$d" || { rm -f "$d.ggnew"; die "could not place $path"; };;
+    F) cp "$src" "$d.ggnew" && chown root:wheel "$d.ggnew" && chmod "$a" "$d.ggnew" && mv -fh "$d.ggnew" "$d" || { rm -f "$d.ggnew"; [ -z "$lock" ] || chflags "$lock" "$d"; die "could not place $path"; }
+       [ -z "$lock" ] || chflags "$lock" "$d" || die "placed $path but could not lock it again ($lock)";;
     L) ln -s "$a" "$d.ggnew" && chown -h root:wheel "$d.ggnew" && mv -fh "$d.ggnew" "$d" || { rm -f "$d.ggnew"; die "could not place the link $path"; };;
     E) : > "$d.ggnew" && chown root:wheel "$d.ggnew" && chmod "$a" "$d.ggnew" && mv -fh "$d.ggnew" "$d" || { rm -f "$d.ggnew"; die "could not make $path"; };;
   esac; }
