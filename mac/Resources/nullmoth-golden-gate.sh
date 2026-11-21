@@ -463,10 +463,24 @@ system_stop() {
   if [ "$(os_version)" = 26.7.1 ]; then stop "This Mac's macOS 26.7.1 cannot prepare macOS 27. Reason: $1. Press Send logs so we can look at it. Nothing was changed"; fi
   stop "This Mac's macOS $(os_version) cannot prepare macOS 27. Update to macOS 26.7.1, then run Golden Gate again. Reason: $1. Nothing was changed"
 }
+# Only the two apply programs can use parallel transfers. They still run the
+# pinned script and its own size, checksum, and progress checks.
+run_kit_program() {
+  local script=$1 helper="$HERE/nullmoth-download.sh"
+  if [ -r "$helper" ] && [ "${!#}" = --apply ]; then
+    case "${script##*/}" in
+      lay-down-27.sh|make-kernel-collections.sh)
+        shift
+        /bin/bash -c '. "$1" || exit 1; nm_enable_kit_downloads; shift; . "$0"' "$script" "$helper" "$@"
+        return $?;;
+    esac
+  fi
+  /bin/bash "$@"
+}
 # run_kit <script> <args...>: runs a kit script, showing its lines; RC is its exit code and SYSWHY its "SYSTEM: " reason
 run_kit() {
   local t="$PRIV/last-run.txt"
-  /bin/bash "$@" 2>&1 | tee "$t"; RC=${PIPESTATUS[0]}
+  run_kit_program "$@" 2>&1 | tee "$t"; RC=${PIPESTATUS[0]}
   SYSWHY=$(sed -n 's/^SYSTEM: //p' "$t" 2>/dev/null | tail -n 1); rm -f "$t"
   [ "$RC" != 3 ] || [ -n "$SYSWHY" ] || SYSWHY="a step of the kit cannot run on this macOS"
 }
@@ -1639,7 +1653,7 @@ installer)
   # a copy goes onto the new data volume, so that what laid a system down can be read from either side.
   LAYLOG="$GGDIR/laydown.log"; [ -w "$GGDIR" ] || stop "the folder for Golden Gate's records ($GGDIR) cannot be written. Nothing was changed"
   LAYOUT="$PRIV/laydown-run.txt"
-  /bin/bash "$LDIR/$linst" "$@" --apply 2>&1 | tee "$LAYOUT"; rc=${PIPESTATUS[0]}
+  run_kit_program "$LDIR/$linst" "$@" --apply 2>&1 | tee "$LAYOUT"; rc=${PIPESTATUS[0]}
   if [ "$LAYLOG" != /dev/null ]; then tail -c 1048576 "$LAYOUT" > "$LAYLOG.cap" 2>/dev/null && mv -f "$LAYLOG.cap" "$LAYLOG"; fi
   [ "$rc" != 3 ] || system_stop "$(sed -n 's/^SYSTEM: //p' "$LAYOUT" | tail -n 1)"
   [ "$rc" = 0 ] || stop "the lay-down step stopped; see its lines above. This macOS and its volumes are untouched"

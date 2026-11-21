@@ -35,7 +35,8 @@ arm "the shipped script takes only https" "$(grep -c "^PROTO='=https'$" "$S") $(
 # refusals: each leaves the installed kit as it was
 before=$(cd "$D" && find . -type f -exec shasum {} + | LC_ALL=C sort | shasum)
 printf 'x' >> "$T/grown.tgz"; cat "$AR" "$T/grown.tgz" > "$T/longer.tgz"
-head -c 100000 "$AR" > "$T/short.tgz"
+archive_bytes=$(stat -f '%z' "$AR")
+head -c "$((archive_bytes - 1))" "$AR" > "$T/short.tgz"
 python3 - "$AR" "$T/flip.tgz" <<'PY'
 import sys
 b=bytearray(open(sys.argv[1],'rb').read()); b[len(b)//2]^=1; open(sys.argv[2],'wb').write(b)
