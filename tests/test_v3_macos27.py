@@ -135,7 +135,8 @@ class SyntheticReference(unittest.TestCase):
 
     def test_the_built_macos27_efi_matches_the_reference(self):
         notes = []
-        changes = v3_macos27.apply(self.f.efi, self.f.kit, notes, self.f.report)
+        # the reference configuration carries the kit's model, so the comparison is made with that model kept
+        changes = v3_macos27.apply(self.f.efi, self.f.kit, notes, self.f.report, kit_model=True)
         self.assertEqual(self.diff(), [])
         self.assertTrue(any(c["v3"] == "personality" and c["count"] == 1 for c in changes), changes)
         self.assertTrue(any("auxiliary kernel collection" in n for n in notes), notes)
@@ -199,14 +200,115 @@ class SyntheticReference(unittest.TestCase):
 
 
 class ModelIdentity(unittest.TestCase):
-    def test_each_generation_has_its_class(self):
-        for name, gen, cls in (("NVIDIA GeForce GTX 1660 SUPER", "GTX 16", "M1"), ("NVIDIA GeForce RTX 2080 Ti", "RTX 20", "M2"),
-                               ("NVIDIA GeForce RTX 3060", "RTX 30", "M3"), ("NVIDIA GeForce RTX 4070 Ti SUPER", "RTX 40", "M4"),
-                               ("NVIDIA GeForce RTX 5060", "RTX 50", "M5")):
-            self.assertEqual(v3_macos27.gpu_generation(name), gen)
-            self.assertEqual(v3_macos27.IDENTITY[gen]["class"], cls)
-        for name in ("Quadro RTX 6000", "NVIDIA RTX A4000", "NVIDIA GeForce GTX 1080", "", None):
-            self.assertIsNone(v3_macos27.gpu_generation(name))
+    # The table as decided: kind of machine -> (model, board ID). Written out here on purpose, not read from the code.
+    ROWS = {"desktop": ("Mac15,14", "J575dAP"), "air": ("Mac17,3", "J813AP"), "pro": ("Mac17,9", "J714sAP")}
+    SERIAL, UUID = "C02ABCDEHX87", "11111111-2222-3333-4444-555555555555"
+    NVIDIA = {"Manufacturer": "NVIDIA", "Device Type": "Discrete GPU", "Device ID": "10DE-28A0"}
+    RADEON = {"Manufacturer": "AMD", "Device Type": "Discrete GPU", "Device ID": "1002-7480"}
+    INTEL = {"Manufacturer": "Intel", "Device Type": "Integrated GPU", "Device ID": "8086-A7A0"}
+    APU = {"Manufacturer": "AMD", "Device Type": "Integrated GPU", "Device ID": "1002-1681"}
+
+    @staticmethod
+    def machine(platform, gpus):
+        return {"Motherboard": {"Name": "board", "Platform": platform}, "GPU": {f"g{i}": dict(g) for i, g in enumerate(gpus)}}
+
+    @classmethod
+    def identity_pair(cls, changes):
+        """(model, board) from the one identity change, or None. The board is reported here, not written to the config:
+        it is handed to the system installer at finish time."""
+        ident = [c for c in changes if c["v3"] == "identity" and "board" in c]
+        return (ident[0]["model"], ident[0]["board"]) if len(ident) == 1 else None
+
+    def own_identity(self, fx):
+        cp = os.path.join(fx.efi, "EFI", "OC", "config.plist")
+        c0 = read(cp)
+        c0["PlatformInfo"]["Generic"].update({"SystemSerialNumber": self.SERIAL, "SystemUUID": self.UUID})
+        write(cp, c0)
+        return dict(c0["PlatformInfo"]["Generic"])
+
+    def test_the_table_is_the_three_decided_pairs_and_nothing_else(self):
+        self.assertEqual({k: (v["model"], v["board"]) for k, v in v3_macos27.IDENTITY.items()}, self.ROWS)
+        # the desktop row is the model every PC has started macOS 27 with; the board ID never reaches boot-args
+        self.assertEqual(v3_macos27.IDENTITY["desktop"]["model"], "Mac15,14")
+        self.assertFalse([a for a in v3_macos27.BOOT_ARGS_ALLOWED if "target" in a])
+
+    def test_the_rule_picks_by_the_kind_of_machine(self):
+        rule = v3_macos27.identity_rule
+        for laptop, discrete, integrated, want in (
+                (False, True, False, "desktop"), (False, False, True, "desktop"), (False, True, True, "desktop"),
+                # a laptop with no card (and one whose graphics are not named at all) is a MacBook Air
+                (True, False, True, "air"), (True, False, False, "air"),
+                # a laptop with a card is a MacBook Pro whether or not it has built-in graphics too
+                (True, True, True, "pro"), (True, True, False, "pro")):
+            with self.subTest(laptop=laptop, discrete=discrete, integrated=integrated):
+                self.assertEqual(rule(laptop, discrete, integrated), want)
+
+    def test_a_scan_report_gives_the_rule_its_facts(self):
+        facts = v3_macos27.machine_facts
+        self.assertIsNone(facts(None))                                   # no scan: nothing is guessed
+        self.assertIsNone(facts({}))
+        self.assertEqual(facts(self.machine("Desktop", [self.NVIDIA])), {"laptop": False, "discrete": True, "integrated": False})
+        self.assertEqual(facts(self.machine("Laptop", [self.INTEL])), {"laptop": True, "discrete": False, "integrated": True})
+        # a discrete card is any NVIDIA or AMD one, not only a card the driver takes
+        self.assertEqual(facts(self.machine("Laptop", [self.RADEON, self.INTEL])), {"laptop": True, "discrete": True, "integrated": True})
+        self.assertEqual(facts(self.machine("Laptop", [self.NVIDIA, self.APU])), {"laptop": True, "discrete": True, "integrated": True})
+        self.assertEqual(v3_macos27.identity_for(self.machine("Laptop", [self.INTEL]))[0], "air")
+        self.assertEqual(v3_macos27.identity_for(None), (None, None))
+
+    def test_every_row_is_built_with_its_model_its_board_and_its_serial(self):
+        for name, report, want in (
+                ("a desktop with a card", self.machine("Desktop", [self.NVIDIA]), "desktop"),
+                ("a desktop on built-in graphics", self.machine("Desktop", [self.INTEL]), "desktop"),
+                ("a laptop on Intel built-in graphics", self.machine("Laptop", [self.INTEL]), "air"),
+                ("a laptop on AMD built-in graphics", self.machine("Laptop", [self.APU]), "air"),
+                ("a laptop with an NVIDIA card and Intel graphics", self.machine("Laptop", [self.NVIDIA, self.INTEL]), "pro"),
+                ("a laptop with a Radeon card and no built-in graphics", self.machine("Laptop", [self.RADEON]), "pro")):
+            with self.subTest(machine=name), tempfile.TemporaryDirectory() as tmp:
+                fx = Fixture(tmp)
+                self.own_identity(fx)
+                changes = v3_macos27.apply(fx.efi, fx.kit, [], report)
+                model, board = self.ROWS[want]
+                cfg = fx.built()
+                self.assertEqual(cfg["PlatformInfo"]["Generic"]["SystemProductName"], model)
+                # the board ID goes to the installer (reported in the change), never to boot-args
+                self.assertNotIn("target", cfg["NVRAM"]["Add"]["7C436110-AB2A-4BBB-A880-FE41995C9F82"]["boot-args"])
+                self.assertEqual(self.identity_pair(changes), (model, board))
+                self.assertIn((model, board), self.ROWS.values())
+                # the kit already sets the desktop model, so only a laptop's model (and its serial) actually change
+                if model == "Mac15,14":
+                    self.assertEqual(cfg["PlatformInfo"]["Generic"]["SystemSerialNumber"], self.SERIAL)
+                    self.assertEqual([c for c in changes if c["v3"] == "serial"], [])
+                else:
+                    self.assertEqual(cfg["PlatformInfo"]["Generic"]["SystemSerialNumber"],
+                                     v3_macos27.serial_for_model(self.SERIAL, self.UUID, model))
+
+    def test_a_mixed_table_is_caught_by_the_pair_not_being_a_decided_row(self):
+        # control: with the table mutated so the MacBook Pro model carries another row's board, the build's identity
+        # change is a (model, board) that is not one of the decided rows
+        old = v3_macos27.IDENTITY["pro"]["board"]
+        v3_macos27.IDENTITY["pro"]["board"] = "J813AP"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fx = Fixture(tmp)
+                changes = v3_macos27.apply(fx.efi, fx.kit, [], self.machine("Laptop", [self.NVIDIA, self.INTEL]))
+                self.assertEqual(self.identity_pair(changes), ("Mac17,9", "J813AP"))
+                self.assertNotIn(("Mac17,9", "J813AP"), self.ROWS.values())
+        finally:
+            v3_macos27.IDENTITY["pro"]["board"] = old
+
+    def test_the_kits_model_is_kept_when_asked_and_reports_no_board(self):
+        for report in (self.machine("Desktop", [self.NVIDIA]), self.machine("Laptop", [self.NVIDIA, self.INTEL])):
+            with tempfile.TemporaryDirectory() as tmp:
+                fx = Fixture(tmp)
+                before = self.own_identity(fx)
+                changes = v3_macos27.apply(fx.efi, fx.kit, [], report, kit_model=True)
+                cfg = fx.built()
+                self.assertEqual(cfg["PlatformInfo"]["Generic"]["SystemProductName"], "Mac15,14")      # the kit's own
+                self.assertEqual(cfg["PlatformInfo"]["Generic"]["SystemSerialNumber"], before["SystemSerialNumber"])
+                self.assertNotIn("target", cfg["NVRAM"]["Add"]["7C436110-AB2A-4BBB-A880-FE41995C9F82"]["boot-args"])
+                self.assertEqual([c["model"] for c in changes if c["v3"] == "identity"], ["kept from the kit (asked for)"])
+                self.assertIsNone(self.identity_pair(changes))         # no board is reported with the kit's model
+                self.assertEqual([c for c in changes if c["v3"] == "serial"], [])
 
     def card(self, did):
         return {"GPU": {"card": {"Manufacturer": "NVIDIA", "Device Type": "Discrete GPU", "Device ID": did}}}
@@ -223,57 +325,49 @@ class ModelIdentity(unittest.TestCase):
         # nothing of the PC's own to work from: no serial is made up, or every such PC would get the same one
         self.assertIsNone(v3_macos27.serial_for_model("", None, "Mac17,15"))
 
+    def laptop(self, did="10DE-28A0"):
+        return {"Motherboard": {"Name": "board", "Platform": "Laptop"},
+                "GPU": {"card": {"Manufacturer": "NVIDIA", "Device Type": "Discrete GPU", "Device ID": did}}}
+
     def test_the_serial_changes_only_when_the_model_does(self):
-        def own_identity(fx):
-            cp = os.path.join(fx.efi, "EFI", "OC", "config.plist")
-            with open(cp, "rb") as f:
-                c0 = plistlib.load(f)
-            c0["PlatformInfo"]["Generic"].update({"SystemSerialNumber": "C02ABCDEHX87", "SystemUUID": "11111111-2222-3333-4444-555555555555"})
-            with open(cp, "wb") as f:
-                plistlib.dump(c0, f)
-            return dict(c0["PlatformInfo"]["Generic"])
-        with tempfile.TemporaryDirectory() as tmp:
+        own_identity = self.own_identity
+        with tempfile.TemporaryDirectory() as tmp:       # a laptop changes the model (from the kit's Mac15,14): serial follows
             fx = Fixture(tmp)
             before = own_identity(fx)
-            changes = v3_macos27.apply(fx.efi, fx.kit, [], self.card("10DE-2D05"))
+            changes = v3_macos27.apply(fx.efi, fx.kit, [], self.laptop())
             after = fx.built()["PlatformInfo"]["Generic"]
-            self.assertNotEqual(before.get("SystemProductName"), "Mac17,15")
-            self.assertEqual(after["SystemSerialNumber"], "2412BRAJTG")
+            self.assertEqual(after["SystemProductName"], "Mac17,9")
+            self.assertEqual(after["SystemSerialNumber"], v3_macos27.serial_for_model(self.SERIAL, self.UUID, "Mac17,9"))
             self.assertEqual([c for c in changes if c["v3"] == "serial"], [{"v3": "serial", "why": "the model changed; the serial follows it"}])
-        with tempfile.TemporaryDirectory() as tmp:       # a config with no serial and no UUID: left alone, and said
+        with tempfile.TemporaryDirectory() as tmp:       # a laptop config with no serial and no UUID: left alone, and said
             fx = Fixture(tmp); notices = []
-            v3_macos27.apply(fx.efi, fx.kit, notices, self.card("10DE-2D05"))
+            v3_macos27.apply(fx.efi, fx.kit, notices, self.laptop())
             self.assertNotIn("SystemSerialNumber", fx.built()["PlatformInfo"]["Generic"])
             self.assertTrue(any("serial was left as it is" in n for n in notices), notices)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:       # a desktop: the model is already the kit's Mac15,14, so the serial stays
             fx = Fixture(tmp)
             before = own_identity(fx)
-            changes = v3_macos27.apply(fx.efi, fx.kit, [], self.card("10DE-2504"))
+            changes = v3_macos27.apply(fx.efi, fx.kit, [], self.card("10DE-2D05"))
+            self.assertEqual(fx.built()["PlatformInfo"]["Generic"]["SystemProductName"], "Mac15,14")
             self.assertEqual(fx.built()["PlatformInfo"]["Generic"].get("SystemSerialNumber"), before.get("SystemSerialNumber"))
             self.assertEqual([c for c in changes if c["v3"] == "serial"], [])
+        with tempfile.TemporaryDirectory() as tmp:       # no scan at all: nothing is guessed, model and serial stay
+            fx = Fixture(tmp)
+            before = own_identity(fx)
+            changes = v3_macos27.apply(fx.efi, fx.kit, [], None)
+            self.assertEqual(fx.built()["PlatformInfo"]["Generic"].get("SystemSerialNumber"), before.get("SystemSerialNumber"))
+            self.assertEqual([c for c in changes if c["v3"] in ("serial", "identity")], [])
 
-    def test_the_build_records_the_class_and_sets_a_model_only_when_one_is_chosen(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fx = Fixture(tmp)
-            changes = v3_macos27.apply(fx.efi, fx.kit, [], self.card("10DE-2D05"))
-            ident = [c for c in changes if c["v3"] == "identity"]
-            self.assertEqual([(c["generation"], c["class"], c["model"]) for c in ident], [("RTX 50", "M5", "Mac17,15")])
-            self.assertEqual(fx.built()["PlatformInfo"]["Generic"]["SystemProductName"], "Mac17,15")
-        with tempfile.TemporaryDirectory() as tmp:
-            fx = Fixture(tmp)
-            changes = v3_macos27.apply(fx.efi, fx.kit, [], self.card("10DE-2504"))
-            self.assertEqual([c["generation"] for c in changes if c["v3"] == "identity"], ["RTX 30"])
-            # No model is chosen for this class yet: the kit's own SystemProductName is what the build has.
-            self.assertEqual(fx.built()["PlatformInfo"]["Generic"]["SystemProductName"], "Mac15,14")
-        with tempfile.TemporaryDirectory() as tmp:
-            fx = Fixture(tmp)
-            old = v3_macos27.IDENTITY["RTX 20"]["model"]
-            v3_macos27.IDENTITY["RTX 20"]["model"] = "TestModel1,1"
-            try:
-                v3_macos27.apply(fx.efi, fx.kit, [], self.card("10DE-1E04"))
-            finally:
-                v3_macos27.IDENTITY["RTX 20"]["model"] = old
-            self.assertEqual(fx.built()["PlatformInfo"]["Generic"]["SystemProductName"], "TestModel1,1")
+    def test_the_card_no_longer_decides_the_model(self):
+        # an RTX 50, an RTX 30 and an RTX 20 desktop are all the same kind of machine: the Mac Studio
+        for did in ("10DE-2D05", "10DE-2504", "10DE-1E04"):
+            with self.subTest(card=did), tempfile.TemporaryDirectory() as tmp:
+                fx = Fixture(tmp)
+                changes = v3_macos27.apply(fx.efi, fx.kit, [], self.card(did))
+                ident = [c for c in changes if c["v3"] == "identity"]
+                self.assertEqual([(c["form"], c["name"], c["model"], c["board"]) for c in ident], [("desktop", "Mac Studio", "Mac15,14", "J575dAP")])
+                self.assertEqual(fx.built()["PlatformInfo"]["Generic"]["SystemProductName"], "Mac15,14")
+                self.assertEqual(self.identity_pair(changes), ("Mac15,14", "J575dAP"))
 
     def test_this_pcs_disk_and_network_controllers_are_marked_built_in(self):
         from p1401 import v3_macos27 as v
@@ -311,15 +405,31 @@ class ModelIdentity(unittest.TestCase):
         self.assertEqual(v.builtin_devices(cfg, None), [])
         self.assertEqual(cfg["DeviceProperties"]["Add"], {})
 
-    def test_a_pc_with_no_classed_card_gets_no_identity_change(self):
+    def test_a_build_without_a_scan_gets_no_identity_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             fx = Fixture(tmp)
-            changes = v3_macos27.apply(fx.efi, fx.kit, [], fx.report)
+            changes = v3_macos27.apply(fx.efi, fx.kit, [], None)
             self.assertEqual([c for c in changes if c["v3"] == "identity"], [])
+            self.assertEqual(fx.built()["PlatformInfo"]["Generic"]["SystemProductName"], "Mac15,14")     # the kit's
+            self.assertNotIn("target", fx.built()["NVRAM"]["Add"]["7C436110-AB2A-4BBB-A880-FE41995C9F82"]["boot-args"])
 
 
 class KitLimits(unittest.TestCase):
     """A kit may set only the listed config keys and add only the listed boot arguments."""
+
+    def test_every_boot_argument_the_repository_kit_adds_is_one_both_lists_allow(self):
+        # A kit argument missing from either list stops Golden Gate on the user's machine ("adds a boot argument 1401
+        # does not let a kit add"), so the shipped manifest is checked against both copies here.
+        with open(os.path.join(HERE, "kit", "v3-kit.json")) as f:
+            args = json.load(f)["boot_args"]
+        with open(os.path.join(HERE, "mac", "Resources", "nullmoth-golden-gate.sh")) as f:
+            script = next(l for l in f if l.startswith("BOOT_ARGS_ALLOWED=")).split("=", 1)[1].strip().strip('"').split()
+        self.assertIn("a2xbootarm=1", args)
+        self.assertEqual([a for a in args if a not in v3_macos27.BOOT_ARGS_ALLOWED], [])
+        self.assertEqual([a for a in args if a not in script], [])
+
+    def test_control_an_argument_neither_list_allows_is_caught(self):
+        self.assertNotIn("a2xbootarm=2", v3_macos27.BOOT_ARGS_ALLOWED)
 
     def manifest(self, fx, **changes):
         path = os.path.join(fx.kit_path, v3_macos27.MANIFEST)

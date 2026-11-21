@@ -53,41 +53,52 @@ UNKNOWN_MAX = "26.99.99"           # where a kext nobody has run on macOS 27 sto
 DIAG_BOOT_ARGS = ("debug", "msgbuf", "pmsg", "serial", "-liludbgall", "-liludbg", "iog_debug",
                   "io_debug", "pcidbg", "nvdebug", "-nvdbg", "watchdog")
 
-# Model identity on macOS 27 follows the NVIDIA generation, so the PC presents itself as the Apple silicon class its
-# card is closest to: GTX 16 as M1, RTX 20 as M2, RTX 30 as M3, RTX 40 as M4, RTX 50 as M5 (Mac Studio, M5 Ultra).
-# "model" is the SystemProductName for that class. TODO: only RTX 50 has one. While a model is None the build keeps
-# the SystemProductName the kit sets and records which class the card belongs to; nothing here invents an identifier.
-# The Mac app's nullmoth-golden-gate.sh applies kits too and carries the same models (mac/tools/test_golden_gate.py
-# compares the two).
+# Model identity on macOS 27 follows the kind of machine, not the graphics card: a desktop presents as a Mac Studio, a
+# laptop on built-in graphics alone as a MacBook Air, and a laptop with a graphics card (NVIDIA or AMD, with or without
+# built-in graphics beside it) as a MacBook Pro. "model" is the SystemProductName and "board" is the board ID Apple's
+# own device tree gives that model (its "target-type"); the two are a pair and are never mixed across rows. Apple's
+# Software Update offers macOS 27 updates keyed on this board ID. The desktop row is the model every build has started
+# macOS 27 with on a PC so far; the two laptop rows are the 13-inch Air and 14-inch MacBook Pro (the scan does not give
+# a screen size, so the smaller model of each kind is used). The Mac app's nullmoth-golden-gate.sh applies kits too and
+# carries the same table (mac/tools/test_golden_gate.py compares the two).
 IDENTITY = {
-    "GTX 16": {"class": "M1", "model": None},
-    "RTX 20": {"class": "M2", "model": None},
-    "RTX 30": {"class": "M3", "model": None},
-    "RTX 40": {"class": "M4", "model": None},
-    "RTX 50": {"class": "M5", "model": "Mac17,15"},   # Mac Studio, M5 Ultra
+    "desktop": {"name": "Mac Studio", "model": "Mac15,14", "board": "J575dAP"},
+    "air": {"name": "MacBook Air", "model": "Mac17,3", "board": "J813AP"},
+    "pro": {"name": "MacBook Pro", "model": "Mac17,9", "board": "J714sAP"},
 }
-_GENERATION = re.compile(r"\b(?:GTX (16)\d\d|RTX ([2-5]0)\d\d)\b")
 
 
-def gpu_generation(name):
-    """ "RTX 50" for "NVIDIA GeForce RTX 5060 Ti", "GTX 16" for a GTX 1660; None for anything else (workstation
-    cards have no class here)."""
-    m = _GENERATION.search(name or "")
-    if not m:
+def identity_rule(laptop, discrete, integrated=False):
+    """The IDENTITY key for a machine: whether it is a laptop, whether it has a discrete graphics card, and whether it
+    has built-in graphics. A desktop is a Mac Studio. A laptop with a card is a MacBook Pro whether or not it has
+    built-in graphics too, so "integrated" does not change the answer; a laptop with no card (and one whose graphics
+    are not known at all) is a MacBook Air."""
+    if not laptop:
+        return "desktop"
+    return "pro" if discrete else "air"
+
+
+def machine_facts(report):
+    """What identity_rule needs, from a scan report: {"laptop", "discrete", "integrated"}. None when there is no scan
+    at all: nothing is guessed then. A laptop is a machine the scan calls one (Motherboard > Platform is "Laptop", the
+    same reading golden_gate.machine_of takes); a discrete card is an NVIDIA or AMD graphics device the scan types
+    "Discrete GPU"."""
+    if not report:
         return None
-    return "GTX 16" if m.group(1) else f"RTX {m.group(2)}"
+    platform = (report.get("Motherboard") or {}).get("Platform")
+    gpus = [g for g in ((report or {}).get("GPU") or {}).values() if isinstance(g, dict)]
+    return {"laptop": platform == "Laptop",
+            "discrete": any(g.get("Device Type") == "Discrete GPU" and g.get("Manufacturer") in ("NVIDIA", "AMD") for g in gpus),
+            "integrated": any(g.get("Device Type") == "Integrated GPU" for g in gpus)}
 
 
 def identity_for(report):
-    """(generation, IDENTITY entry) for the newest supported NVIDIA card in a scan report, or (None, None)."""
-    from . import nullmoth  # noqa: PLC0415
-    found = set()
-    for name, gpu in nullmoth.cards(report or {}).items():
-        found.add(gpu_generation(nullmoth.TABLE["ids"].get(nullmoth._pid(gpu), "")) or gpu_generation(name))
-    for gen in reversed(list(IDENTITY)):
-        if gen in found:
-            return gen, IDENTITY[gen]
-    return None, None
+    """(IDENTITY key, IDENTITY entry) for the machine a scan report describes, or (None, None) without a scan."""
+    facts = machine_facts(report)
+    if facts is None:
+        return None, None
+    key = identity_rule(**facts)
+    return key, IDENTITY[key]
 
 
 # All a kit's manifest may set in config.plist and all it may add to boot-args. A kit is data from outside this
@@ -96,7 +107,9 @@ SETTABLE = ("Misc/Security/SecureBootModel", "PlatformInfo/Generic/SystemProduct
 BOOT_ARGS_ALLOWED = ("-v", "-lilubetaall", "-vsmcbeta", "-no_compat_check",
                      "a2x_conlive=1", "a2xbusydump=2", "pci_log=0x201", "pci_log_mode=0x2", "gfxrst=4", "nvrmholdcap=180",
                      "nmxintel=3", "nmxamd=3", "nmxfb_pipe=1",
-                     "a2x_pcibus=0x10010fe", "a2x_nondrv=1")
+                     "a2x_pcibus=0x10010fe", "a2x_nondrv=1",
+                     # the exec hook arms itself at boot, before the first service starts (stock macOS 27)
+                     "a2xbootarm=1")
 
 _KERNEL = re.compile(r"\d{1,2}\.\d{1,2}\.\d{1,2}\Z")
 _KEXT = re.compile(r"[A-Za-z0-9_.+-]{1,96}\.kext\Z")
@@ -405,26 +418,34 @@ def apply(efi_dir, kit, notices, report=None, kit_model=False):
         _set_path(cfg, dotted, value)
         changes.append({"v3": "set", "key": dotted, "value": value if not isinstance(value, bytes) else value.hex()})
 
+    # An NVIDIA PC (every build made here): the GPU BAR macOS is given is capped at 256 MB (ResizeAppleGpuBars 8). The
+    # NVIDIA kernel driver sizes the card's BAR itself later in the start; a full-size BAR from the firmware is moved by
+    # the PCI setup under the boot console and the verbose text stops until the window server starts. Golden Gate's
+    # stage step sets the same value (mac/Resources/nullmoth-golden-gate.sh apply_kit).
+    cfg.setdefault("Booter", {}).setdefault("Quirks", {})["ResizeAppleGpuBars"] = 8
+    changes.append({"v3": "set", "key": "Booter/Quirks/ResizeAppleGpuBars", "value": 8})
+
     for section, name, path in builtin_devices(cfg, report):
         changes.append({"v3": "built-in", "section": section, "device": name, "path": path})
 
     # kit_model: keep the model the kit sets (the one its reference configuration started macOS 27 with) instead of
-    # the model for this card's generation. It is the second attempt when macOS 27 does not start with that model.
-    gen, ident = identity_for(report)
-    if gen and kit_model:
-        changes.append({"v3": "identity", "generation": gen, "class": ident["class"], "model": "kept from the kit (asked for)"})
-    elif gen:
-        if ident["model"]:
-            generic = (cfg.get("PlatformInfo") or {}).get("Generic") or {}
-            if generic.get("SystemProductName") != ident["model"]:
-                fresh = serial_for_model(generic.get("SystemSerialNumber"), generic.get("SystemUUID"), ident["model"])
-                if fresh:
-                    _set_path(cfg, "PlatformInfo/Generic/SystemSerialNumber", fresh)
-                    changes.append({"v3": "serial", "why": "the model changed; the serial follows it"})
-                else:
-                    notices.append("The config has no serial number or UUID of its own, so the serial was left as it is.")
-            _set_path(cfg, "PlatformInfo/Generic/SystemProductName", ident["model"])
-        changes.append({"v3": "identity", "generation": gen, "class": ident["class"], "model": ident["model"] or "kept from the kit"})
+    # the model for this kind of machine. It is the second attempt when macOS 27 does not start with that model.
+    # The model is set here; the matching board ID goes to the system installer at finish time (A2X_BOARD), never into
+    # the config, and so follows whatever model the config ends up with.
+    form, ident = identity_for(report)
+    if form and kit_model:
+        changes.append({"v3": "identity", "form": form, "model": "kept from the kit (asked for)"})
+    elif form:
+        generic = (cfg.get("PlatformInfo") or {}).get("Generic") or {}
+        if generic.get("SystemProductName") != ident["model"]:
+            fresh = serial_for_model(generic.get("SystemSerialNumber"), generic.get("SystemUUID"), ident["model"])
+            if fresh:
+                _set_path(cfg, "PlatformInfo/Generic/SystemSerialNumber", fresh)
+                changes.append({"v3": "serial", "why": "the model changed; the serial follows it"})
+            else:
+                notices.append("The config has no serial number or UUID of its own, so the serial was left as it is.")
+        _set_path(cfg, "PlatformInfo/Generic/SystemProductName", ident["model"])
+        changes.append({"v3": "identity", "form": form, "name": ident["name"], "model": ident["model"], "board": ident["board"]})
 
     # A kext of the PC's own build that has code, that the kit neither brings nor knows, and that has no upper limit
     # of its own, stops at macOS 26. The result names each one.

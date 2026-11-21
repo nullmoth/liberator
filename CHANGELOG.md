@@ -1,5 +1,21 @@
 # Changelog
 
+## Liberator Beta 5
+- Version 0.5.0, built for its own kit (release tag v3.0.0-beta.5).
+- Stock macOS 27: Apple's own programs are put back in place and run untouched (about 445 of them). Earlier betas replaced each one with a modified copy. Three programs still keep a modified copy because they need their own entitlements: the menu bar's app-lifecycle service, a diagnostics agent and NotificationCenter.
+- The kernel switches on the redirect of Apple silicon programs by itself at start-up, before any service runs.
+- Per-user settings and preferences work in stock mode: the per-user background services start.
+- The `log` command runs; it refused before with "Cannot run while sandboxed".
+- Spotlight no longer crash-loops: its server was being ended by the system about every 100 seconds for holding too many ports, and its workers were crashing; both are fixed. Program launches on an idle desktop dropped from about 230 to about 7 per 19 seconds.
+- Widgets and NotificationCenter no longer restart in a loop in stock mode.
+- NVIDIA PCs: the verbose start-up text now runs all the way to the login window, and the on-screen start-up counter is gone.
+- Older Intel processors, before Haswell (such as 2012 and 2013 machines): a wrong-result bug in the engine is fixed. A certification run of 9,953,528 tests finished with 0 mismatches on an Ivy Bridge processor.
+- Apple lists macOS 27 updates: the PC reports a Mac Studio board, and laptops a MacBook board, so Software Update offers macOS 27.2.1. Installing an Apple update is not supported yet and a newer build would start without the kit's system files, so do not press Update Now; Liberator still holds automatic downloads off.
+- Built-in graphics are unchanged from Beta 4.
+- Updating on macOS 27: open Liberator on macOS 27 and choose Install. It gets this release's kit, puts Apple's own programs back in place, updates the system package, the driver and the kernel collections, renews the startup files, and asks for a restart. Golden Gate is not run again.
+- Nothing an update replaces is deleted: the files that were in place are kept in /Library/NullMoth/backups (and the previous startup files in EFI/NullMoth-backups on the startup partition), and Liberator lists those folders when the update ends.
+- Not yet: Wi-Fi on macOS 27, Spotlight search results (the index fills far too slowly), installing Apple's macOS 27 updates, and the Weather widget's data.
+
 ## Liberator Beta 4
 - Version 0.4.0, built for its own kit (release tag v3.0.0-beta.4).
 - Apple's arm64-only programs run on a new, faster engine across all of macOS 27, every app and background service.

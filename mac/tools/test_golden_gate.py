@@ -328,8 +328,10 @@ with tempfile.TemporaryDirectory() as td:
         tdir = stand_in_tools(os.path.join(td, "tools-old-" + os.path.basename(rel)), broken=(rel,))
         rc, out = run("preflight", fx.efi, fx.kit_path, *[tdir if a == TOOLS else a for a in READY])
         arm(f"a macOS whose {os.path.basename(rel)} answers differently: the same sentence, with that reason", rc == 1 and SYSMSG + word in out, out)
-    # the model: this card's generation by default, the kit's own when asked (the second attempt if 27 does not start)
-    for name, more, model, word in (("by default an RTX 50 PC is staged as the model for its generation", [], "Mac17,15", "NOTE model: Mac17,15"),
+    # the model: this kind of machine's by default, the kit's own when asked (the second attempt if 27 does not start)
+    for name, more, model, word in (("by default a desktop PC is staged as the model for its kind of machine, and is told the model, the board ID and the rule",
+                                     [], "Mac15,14", "NOTE model: Mac15,14 (Mac Studio, board ID J575dAP, which Apple's Software Update keys its macOS 27 updates on). The model follows the kind of machine: "
+                                     "a desktop is a Mac Studio, a laptop on built-in graphics a MacBook Air, a laptop with a graphics card a MacBook Pro"),
                                     ("with --kit-model the same PC keeps the model the kit sets", ["--kit-model"], "Mac15,14", "NOTE model: Mac15,14 (kept from the kit, as asked)")):
         m = fresh(td, "model" + str(len(more)))
         serial0 = plistlib.load(open(os.path.join(m.efi, "EFI", "OC", "config.plist"), "rb"))["PlatformInfo"]["Generic"].get("SystemSerialNumber")
@@ -337,12 +339,14 @@ with tempfile.TemporaryDirectory() as td:
         g = plistlib.load(open(os.path.join(m.efi, "EFI", gg.STAGED, "config.plist"), "rb"))["PlatformInfo"]["Generic"]
         arm(name + (", and the serial is left as it was" if more else ""),
             rc == 0 and g["SystemProductName"] == model and word in out and (not more or g.get("SystemSerialNumber") == serial0), out + repr(g))
+    _bq = plistlib.load(open(os.path.join(m.efi, "EFI", gg.STAGED, "config.plist"), "rb")).get("Booter", {}).get("Quirks", {})
+    arm("an NVIDIA PC's macOS 27 startup files cap the GPU BAR macOS is given at 256 MB (ResizeAppleGpuBars 8)",
+        _bq.get("ResizeAppleGpuBars") == 8, repr(_bq.get("ResizeAppleGpuBars")))
     setup_text = (ROOT / "Resources/nullmoth-setup.sh").read_text()
-    # The app's own flow keeps the kit's model (the one that has started macOS 27) unless the card's model is asked
-    # for: the model for the card's generation has not started macOS 27 on a real PC yet.
-    arm("setup keeps the kit's model by default, hands --kit-model to the stage step only, and takes --card-model to turn it off",
-        "--card-model) GGCARDMODEL=1;;" in setup_text and '$([ "$1" = stage ] && [ -z "${GGCARDMODEL:-}" ] && echo --kit-model)' in setup_text
-        and '[ -n "${GGKITMODEL:-}" ] && echo --kit-model' not in setup_text)
+    # The app's own flow gives the model for the kind of machine; --kit-model (the second attempt) keeps the kit's.
+    arm("setup gives the kind-of-machine model by default and hands --kit-model to the stage step only when asked",
+        "--kit-model) GGKITMODEL=1;;" in setup_text and '$([ "$1" = stage ] && [ -n "${GGKITMODEL:-}" ] && echo --kit-model)' in setup_text
+        and '[ -z "${GGCARDMODEL:-}" ] && echo --kit-model' not in setup_text)
     os.remove(os.path.join(fx.efi, ".1401-build"))
     rc, out = run("preflight", fx.efi, fx.kit_path, *READY)
     # testers with their own PC OpenCore files were refused and got past it by creating the marker by hand; the rest
@@ -408,7 +412,12 @@ with tempfile.TemporaryDirectory() as td:
     arm("what the kit marks for an NVIDIA machine is left out on other graphics, and the rest of the kit is there",
         "NetArm2x86IOAPIC.kext" not in lim and "A2XACPIPlatform.kext" in lim and "a2x_exec_hook.kext" in lim, repr(sorted(lim)))
     arm("what the kit marks for a PC is left out on a Mac, and the other kit arguments are added", " -vsmcbeta " not in args27 and " -no_compat_check " in args27, args27)
-    arm("a real Mac keeps its own model, and is told so", sc["PlatformInfo"]["Generic"].get("SystemProductName") == "" and "NOTE model: this Mac's own (not changed)" in out, out)
+    _mq = plistlib.load(open(os.path.join(mac1.efi, "EFI", "OC", "config.plist"), "rb")).get("Booter", {}).get("Quirks", {})
+    arm("a real Mac keeps its own GPU BAR setting",
+        sc.get("Booter", {}).get("Quirks", {}).get("ResizeAppleGpuBars") == _mq.get("ResizeAppleGpuBars") != 8,
+        repr((sc.get("Booter", {}).get("Quirks", {}).get("ResizeAppleGpuBars"), _mq.get("ResizeAppleGpuBars"))))
+    arm("a real Mac keeps its own model, gets no board ID argument, and is told so",
+        sc["PlatformInfo"]["Generic"].get("SystemProductName") == "" and "a2xtarget" not in args27 and "NOTE model: this Mac's own (not changed)" in out, out + args27)
     # 2d-i. an OpenCore Legacy Patcher config is the same place and shape as any Mac's own: it is taken, and a config
     # that is not whole (or not there at all) is refused with the reason, not with a bare "not a 1401 build"
     def oclp_variant(name, change):
@@ -614,8 +623,9 @@ with tempfile.TemporaryDirectory() as td:
     # 3. stage makes what the builder makes, and leaves EFI/OC alone
     a, b = fresh(td, "py"), fresh(td, "sh")
     oc_before = tree(os.path.join(b.efi, "EFI", "OC"))
-    gg.stage(a.efi, a.kit_path, a.report)
-    rc, out = run("stage", b.efi, b.kit_path, "--device-id", "0BDA-8922", "--gpu-id", "0000")
+    # with the kit's model kept: the configuration these are compared with below carries that model
+    gg.stage(a.efi, a.kit_path, a.report, kit_model=True)
+    rc, out = run("stage", b.efi, b.kit_path, "--device-id", "0BDA-8922", "--gpu-id", "0000", "--kit-model")
     arm("stage succeeds", rc == 0 and "RESULT ok" in out, out)
     arm("stage left EFI/OC byte for byte", tree(os.path.join(b.efi, "EFI", "OC")) == oc_before)
     pa, sb = (tree(os.path.join(x.efi, "EFI", gg.STAGED), parsed=True) for x in (a, b))
@@ -650,8 +660,8 @@ with tempfile.TemporaryDirectory() as td:
     arm("and match the configuration that booted macOS 27.2",
         bool(cfg) and v3_macos27.diff_reference(cfg, b.ref, b.kit, os.path.join(b.efi, "EFI", gg.STAGED, "Kexts"), b.ref_kexts) == [],
         v3_macos27.diff_reference(cfg, b.ref, b.kit) if cfg else "no config")
-    # model identity: the script and the builder give an RTX 50 the same model, and leave an RTX 30 with the kit's
-    for did, want in (("2D05", "Mac17,15"), ("2504", "Mac15,14")):
+    # model identity: the script and the builder give a desktop the same model (the kit's Mac15,14) whatever its card
+    for did in ("2D05", "2504"):
         ia, ib = fresh(td, "idpy" + did), fresh(td, "idsh" + did)
         for x in (ia, ib):                                    # a PC's own serial and UUID, as every real config has
             cp = os.path.join(x.efi, "EFI", "OC", "config.plist"); c0 = plistlib.load(open(cp, "rb"))
@@ -660,20 +670,106 @@ with tempfile.TemporaryDirectory() as td:
         gg.stage(ia.efi, ia.kit_path, {"GPU": {"card": {"Manufacturer": "NVIDIA", "Device Type": "Discrete GPU", "Device ID": "10DE-" + did}}})
         run("stage", ib.efi, ib.kit_path, "--device-id", "none", "--gpu-id", did)
         ca, cb = (plistlib.load(open(os.path.join(x.efi, "EFI", gg.STAGED, "config.plist"), "rb")) for x in (ia, ib))
-        arm(f"card {did}: the script and the builder agree, and the model is {want}",
-            ca == cb and cb["PlatformInfo"]["Generic"]["SystemProductName"] == want, cb["PlatformInfo"]["Generic"])
-        base = plistlib.load(open(os.path.join(ib.efi, "EFI", "OC", "config.plist"), "rb"))["PlatformInfo"]["Generic"]
-        was, now = base.get("SystemSerialNumber"), cb["PlatformInfo"]["Generic"].get("SystemSerialNumber")
-        if did == "2D05":
-            arm(f"card {did}: the model changed, so the serial follows it: a new 10-character serial, the same from the script and the builder",
-                bool(was) and now != was and len(now or "") == 10 and set(now) <= set(v3_macos27.SERIAL_ALPHABET)
-                and now == ca["PlatformInfo"]["Generic"].get("SystemSerialNumber")
-                and now == v3_macos27.serial_for_model(was, base.get("SystemUUID"), want), (was, now))
-            run("cancel", ib.efi, ib.kit_path, "--confirm"); run("stage", ib.efi, ib.kit_path, "--device-id", "none", "--gpu-id", did)
-            again = plistlib.load(open(os.path.join(ib.efi, "EFI", gg.STAGED, "config.plist"), "rb"))["PlatformInfo"]["Generic"].get("SystemSerialNumber")
-            arm(f"card {did}: staging the same PC again gives the same serial, never a third identity", again == now, (now, again))
-        else:
-            arm(f"card {did}: no model is chosen for this card, so the serial is kept", bool(was) and now == was, (was, now))
+        arm(f"card {did}: the script and the builder agree, and a desktop's model is the kit's Mac15,14",
+            ca == cb and cb["PlatformInfo"]["Generic"]["SystemProductName"] == "Mac15,14", cb["PlatformInfo"]["Generic"])
+        arm(f"card {did}: a desktop keeps its own serial, since the model did not change from the kit's",
+            cb["PlatformInfo"]["Generic"].get("SystemSerialNumber") == "C02ABCDEHX87", cb["PlatformInfo"]["Generic"].get("SystemSerialNumber"))
+
+    # The kind of machine decides the model and the board ID. Every row of the table, and a laptop with a card alone:
+    # the script (told the machine through its test inputs) and the builder (told it through a scan report) give the
+    # same model and serial. The board ID is handed to the system installer at finish time, so it is never in the config.
+    ROWS = {"desktop": ("Mac15,14", "J575dAP"), "air": ("Mac17,3", "J813AP"), "pro": ("Mac17,9", "J714sAP")}   # as decided; not read from the code
+    SER0, UUID0 = "C02ABCDEHX87", "11111111-2222-3333-4444-555555555555"
+
+    def target_args(cfg):    # the board ID never reaches boot-args
+        return [a for v in cfg["NVRAM"]["Add"].values() if isinstance(v, dict) for a in (v.get("boot-args") or "").split() if "target" in a]
+
+    def own_numbers(x):
+        cp = os.path.join(x.efi, "EFI", "OC", "config.plist"); c0 = plistlib.load(open(cp, "rb"))
+        c0["PlatformInfo"]["Generic"].update({"SystemSerialNumber": SER0, "SystemUUID": UUID0})
+        plistlib.dump(c0, open(cp, "wb"))
+
+    NV_GPU = {"Manufacturer": "NVIDIA", "Device Type": "Discrete GPU", "Device ID": "10DE-28A0"}
+    RADEON = {"Manufacturer": "AMD", "Device Type": "Discrete GPU", "Device ID": "1002-7340"}
+    INTEL = {"Manufacturer": "Intel", "Device Type": "Integrated GPU", "Device ID": "8086-A7A0"}
+    APU = {"Manufacturer": "AMD", "Device Type": "Integrated GPU", "Device ID": "1002-1681"}
+
+    def scan(platform, gpus):
+        return {"Motherboard": {"Name": "board", "Platform": platform}, "GPU": {f"g{i}": dict(g) for i, g in enumerate(gpus)}}
+
+    NOCARD = ["--gpu-id", ""]            # the cards were looked for and there is no NVIDIA one
+    KINDS = (
+        ("a desktop with an NVIDIA card", "desktop", ["--laptop", "no", "--gpu-id", "2504"], scan("Desktop", [NV_GPU])),
+        ("a desktop on built-in graphics alone", "desktop", ["--laptop", "no", *NOCARD, "--display", "8086:3E92"], scan("Desktop", [INTEL])),
+        ("a laptop on Intel built-in graphics", "air", ["--laptop", "yes", *NOCARD, "--display", "8086:A7A0"], scan("Laptop", [INTEL])),
+        ("a laptop on AMD built-in graphics", "air", ["--laptop", "yes", *NOCARD, "--display", "1002:1681"], scan("Laptop", [APU])),
+        ("a laptop with an NVIDIA card and Intel graphics", "pro", ["--laptop", "yes", "--gpu-id", "28A0", "--display", "8086:A7A0"], scan("Laptop", [NV_GPU, INTEL])),
+        ("a laptop with a Radeon card and Intel graphics", "pro", ["--laptop", "yes", *NOCARD, "--display", "8086:3E9B", "--display", "1002:7340"], scan("Laptop", [RADEON, INTEL])),
+        ("a laptop with an NVIDIA card and AMD graphics", "pro", ["--laptop", "yes", "--gpu-id", "2520", "--display", "1002:1681"], scan("Laptop", [NV_GPU, APU])),
+        ("a laptop with a card and no built-in graphics", "pro", ["--laptop", "yes", "--gpu-id", "28A0"], scan("Laptop", [NV_GPU])),
+    )
+    for i, (name, form, args, report) in enumerate(KINDS):
+        model, board = ROWS[form]
+        ka, kb = fresh(td, f"kindpy{i}"), fresh(td, f"kindsh{i}")
+        for x in (ka, kb):
+            own_numbers(x)
+        gg.stage(ka.efi, ka.kit_path, report)
+        rc, out = run("stage", kb.efi, kb.kit_path, "--device-id", "none", *args)
+        ca, cb = (plistlib.load(open(os.path.join(x.efi, "EFI", gg.STAGED, "config.plist"), "rb")) if os.path.exists(os.path.join(x.efi, "EFI", gg.STAGED, "config.plist"))
+                  else {"PlatformInfo": {"Generic": {}}, "NVRAM": {"Add": {}}} for x in (ka, kb))
+        ga, gb = ca["PlatformInfo"]["Generic"], cb["PlatformInfo"]["Generic"]
+        arm(f"{name}: the script stages {model}, with no board ID in boot-args, and names the model, the board ID and the rule",
+            rc == 0 and gb.get("SystemProductName") == model and target_args(cb) == []
+            and f"NOTE model: {model} (" in out and f"board ID {board}, which Apple's Software Update keys" in out, out[-700:] + repr(target_args(cb)))
+        arm(f"{name}: the builder gives the same model and no board ID in boot-args",
+            ga.get("SystemProductName") == model and target_args(ca) == [], (ga.get("SystemProductName"), target_args(ca)))
+        want_serial = SER0 if model == "Mac15,14" else v3_macos27.serial_for_model(SER0, UUID0, model)   # a desktop is already the kit's model: its own serial is kept
+        arm(f"{name}: the serial follows the model, the same from the script and the builder",
+            gb.get("SystemSerialNumber") == ga.get("SystemSerialNumber") == want_serial and gb.get("SystemUUID") == UUID0,
+            (ga.get("SystemSerialNumber"), gb.get("SystemSerialNumber"), want_serial))
+    # --kit-model on a laptop: the kit's own model, its serial as it was, and no board ID named
+    kk = fresh(td, "kindkit"); own_numbers(kk)
+    rc, out = run("stage", kk.efi, kk.kit_path, "--device-id", "none", "--laptop", "yes", "--gpu-id", "28A0", "--display", "8086:A7A0", "--kit-model")
+    ck = plistlib.load(open(os.path.join(kk.efi, "EFI", gg.STAGED, "config.plist"), "rb"))
+    arm("with --kit-model a laptop with a card keeps the kit's model and its own serial, and names no board ID",
+        rc == 0 and ck["PlatformInfo"]["Generic"]["SystemProductName"] == "Mac15,14" and ck["PlatformInfo"]["Generic"]["SystemSerialNumber"] == SER0
+        and target_args(ck) == [] and "NOTE model: Mac15,14 (kept from the kit, as asked)" in out and "board ID" not in out, out[-500:] + repr(target_args(ck)))
+    # control: a copy of the script whose table gives the MacBook Pro model another row's board ID names that wrong pair
+    mixed = os.path.join(td, "mixed-table.sh")
+    with open(mixed, "w") as fh:
+        fh.write(open(SCRIPT).read().replace("pro:Mac17,9:J714sAP", "pro:Mac17,9:J813AP"))
+    shutil.copy(str(ROOT / "Resources/nvidia_gsp_ids.json"), td)      # the card list the script reads from beside itself
+    km = fresh(td, "kindmixed"); own_numbers(km)
+    r = subprocess.run(["/bin/bash", mixed, "stage", "--root", km.efi, "--kit", km.kit_path, "--device-id", "none", "--laptop", "yes", "--gpu-id", "28A0", "--display", "8086:A7A0"],
+                       capture_output=True, text=True, timeout=300, env={k: v for k, v in os.environ.items() if k != v3_macos27.KIT_ENV})
+    cm = plistlib.load(open(os.path.join(km.efi, "EFI", gg.STAGED, "config.plist"), "rb")) if r.returncode == 0 else None
+    arm("control: a copy of the script whose table gives the MacBook Pro model the Air's board ID stages Mac17,9 and names board ID J813AP, not a decided pair",
+        cm is not None and cm["PlatformInfo"]["Generic"]["SystemProductName"] == "Mac17,9" and "board ID J813AP" in r.stdout
+        and ("Mac17,9", "J813AP") not in ROWS.values(), r.stdout[-400:] + r.stderr[-300:])
+    # refresh run on macOS 27 does not read the kind of machine again: the model in use is kept
+    kr = fresh(td, "kindrefresh"); own_numbers(kr)
+    LAP = ["--laptop", "yes", "--gpu-id", "28A0", "--display", "8086:A7A0"]   # a laptop with a card: the MacBook Pro
+    run("stage", kr.efi, kr.kit_path, "--device-id", "none", *LAP); run("activate", kr.efi, kr.kit_path, "--confirm")
+    in_use = lambda: plistlib.load(open(os.path.join(kr.efi, "EFI", "OC", "config.plist"), "rb"))   # noqa: E731
+
+    def newer(kit, word):                # the same kit as a later release: its manifest names itself differently
+        path = os.path.join(kit, v3_macos27.MANIFEST)
+        m = json.load(open(path))
+        m["kit"] = m.get("kit", "kit") + word
+        json.dump(m, open(path, "w"))
+    first = in_use()
+    newer(kr.kit_path, " (newer)")
+    rc, out = run("refresh", kr.efi, kr.kit_path, "--confirm", "--device-id", "none", "--macos-major", "27", "--gpu-id", "28A0", "--laptop", "no")
+    second = in_use()
+    arm("refresh from macOS 27, where the battery is not read again, keeps the model in use and its serial",
+        rc == 0 and "are now this kit's" in out and first["PlatformInfo"]["Generic"]["SystemProductName"] == "Mac17,9"
+        and second["PlatformInfo"]["Generic"]["SystemProductName"] == "Mac17,9" and target_args(second) == []
+        and second["PlatformInfo"]["Generic"]["SystemSerialNumber"] == first["PlatformInfo"]["Generic"]["SystemSerialNumber"], out[-500:] + repr(target_args(second)))
+    newer(kr.kit_path, " (newer still)")
+    rc, out = run("refresh", kr.efi, kr.kit_path, "--confirm", "--device-id", "none", "--macos-major", "26", "--gpu-id", "28A0", "--laptop", "no")
+    third = in_use()
+    arm("control: the same refresh from macOS 26 reads the machine again (here told it is a desktop) and follows it",
+        rc == 0 and third["PlatformInfo"]["Generic"]["SystemProductName"] == "Mac15,14" and target_args(third) == [], out[-500:] + repr(target_args(third)))
     c = fresh(td, "nobt")
     run("stage", c.efi, c.kit_path, "--device-id", "8087-0026", "--gpu-id", "0000")
     arm("without a Realtek adapter the Realtek firmware kext stays out (control: with one it is in)",
@@ -753,7 +849,7 @@ me=%s; mode=install; pay=; data=; sys=; esp=
 while [ $# -gt 0 ]; do case "$1" in --dry-run) mode=dry;; --apply) mode=apply;; --payload) pay=$2; shift;;
   --data) data=$2; shift;; --system) sys=$2; shift;; --esp) esp=$2; shift;; *) echo "unknown $1"; exit 9;; esac; shift; done
 [ -f "$pay/$(basename "$0")" ] && [ -d "$sys/System" ] && [ -d "$esp/EFI" ] || exit 8
-echo "$me $mode $pay" >> "$data/Library/calls.log"
+echo "$me $mode $pay ${A2X_BOARD:--}" >> "$data/Library/calls.log"
 [ ! -e "$data/Library/refuse-$me-$mode" ]
 """
 
@@ -819,7 +915,9 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
             package(f.kit_path, "driver", "driver", "install-macos27.sh")
         if system:
             package(f.kit_path, "system", "system", "install-system.sh")
-        run("stage", f.efi, f.kit_path, "--device-id", "0BDA-8922")
+        # staged as a desktop (an NVIDIA card, not a laptop): the model is the kit's Mac15,14, so the installer is
+        # given its board ID J575dAP
+        run("stage", f.efi, f.kit_path, "--device-id", "0BDA-8922", "--gpu-id", "2D05", "--laptop", "no")
         rc, out = run("activate", f.efi, f.kit_path, "--confirm")
         assert rc == 0, out
         return f
@@ -866,6 +964,8 @@ echo "$me $mode $pay" >> "$data/Library/calls.log"
     arm("finish runs system dry run, driver dry run, then each again with --apply, system first",
         rc == 0 and [c[:2] for c in got] == [["system", "dry"], ["driver", "dry"], ["system", "apply"], ["driver", "apply"]]
         and "RESULT ok" in out and tree(g.efi) == before, out + repr(got))
+    arm("the system installer is given the board ID for the model in the macOS 27 config (a desktop: J575dAP) as A2X_BOARD; the driver installer is given none",
+        [c[3] for c in got if c[0] == "system"] == ["J575dAP", "J575dAP"] and [c[3] for c in got if c[0] == "driver"] == ["-", "-"], repr(got))
     arm("each installer gets its own package folder as --payload, from the private copy and never from the kit folder or the startup partition",
         len(got) == 4 and [os.path.basename(c[2]) for c in got] == ["system", "driver", "system", "driver"]
         and all(not c[2].startswith(g.kit_path) and not c[2].startswith(g.efi) and not os.path.exists(c[2]) for c in got), got)
@@ -1713,9 +1813,17 @@ echo "$me $mode" >> "@LOG@"
                                     '"$PAY/$inst" --payload "$PAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --apply')]
     arm("in the script both dry runs come before either real run, and the system package before the driver", order == sorted(order), order)
 
-arm("the script carries every model the builder has (RTX 50 only so far)",
-    {k: v["model"] for k, v in v3_macos27.IDENTITY.items() if v["model"]} == {"RTX 50": "Mac17,15"}
-    and "MODEL_RTX50=Mac17,15" in open(SCRIPT).read())
+_table = re.search(r'^IDENTITY_TABLE="([^"]*)"$', open(SCRIPT).read(), re.M)
+_rows = {r.split(":")[0]: tuple(r.split(":")[1:]) for r in (_table.group(1).split() if _table else [])}
+arm("the script's table of models and board IDs is the builder's, row for row, and both are the three decided pairs",
+    _rows == {k: (v["model"], v["board"]) for k, v in v3_macos27.IDENTITY.items()}
+    == {"desktop": ("Mac15,14", "J575dAP"), "air": ("Mac17,3", "J813AP"), "pro": ("Mac17,9", "J714sAP")}, repr(_rows))
+arm("control: a table with one board ID changed is not the builder's",
+    dict(_rows, pro=("Mac17,9", "J716sAP")) != {k: (v["model"], v["board"]) for k, v in v3_macos27.IDENTITY.items()})
+arm("the board ID reaches the system installer as A2X_BOARD, never as a boot argument",
+    open(SCRIPT).read().count("/usr/bin/env ${A2XBOARD:+A2X_BOARD=$A2XBOARD} /bin/bash") == 4
+    and open(SCRIPT).read().count("${A2XBOARD:+A2X_BOARD=$A2XBOARD}") == 4 and "a2xtarget" not in open(SCRIPT).read()
+    and "a2xtarget" not in " ".join(v3_macos27.BOOT_ARGS_ALLOWED))
 arm("the script's lists of what a kit may set are the builder's",
     f'SET_ALLOWED="{" ".join(v3_macos27.SETTABLE)}"' in open(SCRIPT).read()
     and f'BOOT_ARGS_ALLOWED="{" ".join(v3_macos27.BOOT_ARGS_ALLOWED)}"' in open(SCRIPT).read())

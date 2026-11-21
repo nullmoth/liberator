@@ -32,7 +32,7 @@
 # in the config is limited to the keys and boot arguments listed below; anything else is refused by name.
 #
 # usage: nullmoth-golden-gate.sh <step> --root <mounted startup partition> --kit <v3 kit> [--confirm] [--kit-model]
-# --kit-model (stage): keep the model the kit sets instead of the model for this card's generation; the second attempt
+# --kit-model (stage): keep the model the kit sets instead of the model for this kind of machine; the second attempt
 # when macOS 27 does not start with that model.
 # test-hook-begin
 # In this source only, and removed from the copy the app carries (build.sh, tools/strip_test_hooks.py): options
@@ -78,10 +78,14 @@ ESP_MARGIN_KB=8192    # kept free on the startup partition after the staged copy
 NV=7C436110-AB2A-4BBB-A880-FE41995C9F82
 # All a kit's manifest may set in config.plist, and all it may add to boot-args (p1401/v3_macos27.py has the same lists).
 SET_ALLOWED="Misc/Security/SecureBootModel PlatformInfo/Generic/SystemProductName"
-BOOT_ARGS_ALLOWED="-v -lilubetaall -vsmcbeta -no_compat_check a2x_conlive=1 a2xbusydump=2 pci_log=0x201 pci_log_mode=0x2 gfxrst=4 nvrmholdcap=180 nmxintel=3 nmxamd=3 nmxfb_pipe=1 a2x_pcibus=0x10010fe a2x_nondrv=1"
-# The model each NVIDIA generation presents as on macOS 27 (p1401/v3_macos27.py IDENTITY); generations without a
-# model keep what the kit sets.
-MODEL_RTX50=Mac17,15
+BOOT_ARGS_ALLOWED="-v -lilubetaall -vsmcbeta -no_compat_check a2x_conlive=1 a2xbusydump=2 pci_log=0x201 pci_log_mode=0x2 gfxrst=4 nvrmholdcap=180 nmxintel=3 nmxamd=3 nmxfb_pipe=1 a2x_pcibus=0x10010fe a2x_nondrv=1 a2xbootarm=1"
+# The model a machine presents as on macOS 27 follows the kind of machine, not its graphics card: a desktop is a Mac
+# Studio, a laptop on built-in graphics alone a MacBook Air, a laptop with a graphics card a MacBook Pro. Each entry is
+# kind:model:board. The board is the board ID Apple's own device tree gives that model (its "target-type"); model and
+# board are a pair and are never mixed across entries, and Apple's Software Update offers macOS 27 updates keyed on it.
+# The two laptop rows are the 13-inch Air and 14-inch MacBook Pro: the scan gives no screen size, so the smaller model
+# of each kind is used. p1401/v3_macos27.py IDENTITY is the same table.
+IDENTITY_TABLE="desktop:Mac15,14:J575dAP air:Mac17,3:J813AP pro:Mac17,9:J714sAP"
 
 STEP=${1:-}; [ $# -gt 0 ] && shift
 ROOT=""; KIT=""; CONFIRM=0; DRVOFF=""; DRVON=""; MAJOR=""; GPUS=""; GPUS_GIVEN=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0; ESPFREE=""
@@ -382,6 +386,44 @@ kit_carries() {  # $1 = nvidia, apple or test: does this kit carry macOS 27 grap
 }
 kit_paths() { local n i out=""; n=$(kv graphics) || n=""; case "$n" in ''|*[!0-9]*) echo nvidia; return;; esac
   i=0; while [ "$i" -lt "$n" ]; do out="$out, $(kv graphics.$i)"; i=$((i + 1)); done; printf '%s' "${out#, }"; }
+# ---- the kind of machine, for the model it presents as on macOS 27 ----
+# laptop_or_not: LAPTOP becomes yes or no when nothing has set it: a laptop is a machine with a battery fitted.
+laptop_or_not() {
+  [ -n "$LAPTOP" ] || { if ioreg -rc AppleSmartBattery 2>/dev/null | grep -q '"BatteryInstalled" = Yes'; then LAPTOP=yes; else LAPTOP=no; fi; }
+}
+# gpu_kinds: HASDGPU and HASIGPU (0 or 1) from the display devices on the PCI bus. Every NVIDIA device is a graphics
+# card and every Intel one is built-in graphics. An AMD device is told apart by its company, since its ID alone does
+# not say: alone it is the processor's built-in graphics, and beside an Intel device or a second AMD one there is a card.
+gpu_kinds() {
+  local d nv=0 intel=0 amd=0
+  [ $GPUS_GIVEN = 1 ] || GPUS=$(nvidia_ids)
+  if [ $DISPLAYS_GIVEN = 0 ] && [ $GPUS_GIVEN = 0 ]; then DISPLAYS=$(display_ids); fi
+  for d in $GPUS; do nv=1; done
+  for d in $DISPLAYS; do
+    case "$(upper "$d")" in 10DE:*) nv=1;; 8086:*) intel=1;; 1002:*) amd=$((amd + 1));; esac
+  done
+  HASDGPU=$nv; HASIGPU=$intel
+  [ $amd -eq 0 ] || HASIGPU=1
+  if [ $amd -ge 2 ] || { [ $amd -eq 1 ] && [ $intel = 1 ]; }; then HASDGPU=1; fi
+}
+# identity_rule <laptop yes|no> <graphics card 0|1>: the kind of machine, one of the names in IDENTITY_TABLE (the
+# builder's identity_rule gives the same answer). A desktop is a Mac Studio; a laptop with a card is a MacBook Pro
+# whether or not it has built-in graphics too; a laptop with no card is a MacBook Air.
+identity_rule() {
+  [ "$1" = yes ] || { echo desktop; return 0; }
+  if [ "$2" = 1 ]; then echo pro; else echo air; fi
+}
+identity_row() { local r; for r in $IDENTITY_TABLE; do case "$r" in "$1":*) echo "$r"; return 0;; esac; done; return 1; }   # $1 = kind
+identity_row_of_model() {   # $1 = model
+  local r m; for r in $IDENTITY_TABLE; do m=${r#*:}; [ "${m%%:*}" = "$1" ] && { echo "$r"; return 0; }; done; return 1
+}
+identity_name() {
+  case "$1" in desktop) echo "Mac Studio";; air) echo "MacBook Air";; pro) echo "MacBook Pro";; esac
+}
+# board_of_model: the board ID paired with a model in IDENTITY_TABLE, or nothing. The macOS 27 system installer is
+# given it as A2X_BOARD so it writes the matching board to the new system; a model this app does not set (a real Mac's
+# own) has no row, so nothing is passed and the installer uses the kit's default board.
+board_of_model() { local r; r=$(identity_row_of_model "$1") || return 0; r=${r#*:}; printf '%s' "${r#*:}"; }
 chip_maker() { case "${1%%:*}" in 1002) echo AMD;; 8086) echo Intel;; 10DE) echo NVIDIA;; *) echo "${1%%:*}";; esac; }
 bluetooth_ids() {  # VVVV-PPPP of USB devices in the wireless-controller class (224), which Bluetooth adapters use
   ioreg -p IOUSB -l -w 0 2>/dev/null | awk '
@@ -762,6 +804,9 @@ is_macpro6() {
 # whether they were ever run on macOS 27: on the first real Mac this let six kernel-patching kexts into the macOS 27
 # kernel, and it never reached its first service. So a limit that reaches 27 is treated like no limit at all.
 reaches_27() { case "${1%%.*}" in '') return 0;; *[!0-9]*) return 1;; esac; [ "${1%%.*}" -ge 27 ]; }
+# IDFORM and IDBOARD: the kind of machine and the board ID apply_kit chose (empty when the model was not chosen here).
+# KEEPMODEL: a model already in use that apply_kit keeps, with its board ID, instead of reading the machine again.
+IDFORM=""; IDBOARD=""; KEEPMODEL=""
 NOT27=""; DEP27=""; NOTABLES=0     # what apply_kit reports: kexts kept off macOS 27 (DEP27: codeless ones held with
                                    # their driver, "kext>driver"), and identity tables it could not write
 PATCH_ON=0; PATCH_OWN=0; PATCH_OFF=0; PATCH_OFF_NAMES=""; PATCH_AMD=0   # kernel patches: carried to 27, replaced by the kit's own, left at 26
@@ -989,31 +1034,49 @@ EOF
 $(kv set)
 EOF
   fi
+  # A PC on an NVIDIA card: OpenCore caps the GPU BAR macOS is given at 256 MB (ResizeAppleGpuBars 8). The NVIDIA kernel
+  # driver sizes the card's BAR itself later in the start; a full-size BAR from the firmware is moved by the PCI setup
+  # under the boot console, and the verbose text then stops until the window server starts. Measured on macOS 27.2
+  # with an RTX 50-series card: with the cap the text runs to the login window.
+  if [ "$EFIKIND" != mac ] && [ "$GFX" != apple ] && [ "$GFX" != test ]; then
+    [ "$(plutil -type Booter "$AC" 2>/dev/null)" = dictionary ] || plutil -insert Booter -dictionary "$AC" || { bad "could not add Booter to the config"; return 1; }
+    [ "$(plutil -type Booter.Quirks "$AC" 2>/dev/null)" = dictionary ] || plutil -insert Booter.Quirks -dictionary "$AC" || { bad "could not add Booter/Quirks to the config"; return 1; }
+    plutil -replace Booter.Quirks.ResizeAppleGpuBars -integer 8 "$AC" || { bad "could not set ResizeAppleGpuBars"; return 1; }
+  fi
 
-  # model identity follows the newest NVIDIA generation that has a model (the same rule as the builder's). With
-  # --kit-model the model the kit sets is kept: the one its reference configuration started macOS 27 with.
+  # model identity follows the kind of machine (the same rule as the builder's): a desktop is a Mac Studio, a laptop
+  # on built-in graphics a MacBook Air, a laptop with a graphics card a MacBook Pro. With --kit-model the model the kit
+  # sets is kept: the one its reference configuration started macOS 27 with. A real Mac keeps its own model.
+  local idrow="" idmodel="" idboard=""
+  IDFORM=""; IDBOARD=""
+  # test-hook-begin
+  [ -n "$LAPTOP" ] || [ $GPUS_GIVEN = 0 ] || LAPTOP=no   # a test that names the cards and not the kind of machine means a desktop
+  # test-hook-end
+  if [ $KITMODEL = 0 ] && [ "$EFIKIND" != mac ] && ! idrow=$(identity_row_of_model "$KEEPMODEL"); then
+    laptop_or_not; gpu_kinds
+    idrow=$(identity_row "$(identity_rule "$LAPTOP" "$HASDGPU")") || { bad "no model for this kind of machine"; return 1; }
+  fi
   [ $GPUS_GIVEN = 1 ] || { GPUS=$(nvidia_ids); GPUS_GIVEN=1; }
-  [ $KITMODEL = 0 ] || GPUS=""
-  for a in $GPUS; do a=$(upper "$a")
-    printf '%s' "$a" | grep -Eq '^[0-9A-F]{4}$' || continue
-    val=$(plutil -extract "ids.$a" raw -o - "$HERE/nvidia_gsp_ids.json" 2>/dev/null) || continue
-    if printf '%s' "$val" | grep -Eq '(^| )RTX 50[0-9][0-9]( |$)'; then
-      # A serial names the model it was made for: when the model changes the serial follows it, worked out from this
-      # PC's old serial, its UUID and the new model so that staging again gives the same one (p1401/v3_macos27.py
-      # serial_for_model computes the same value). With neither a serial nor a UUID it is left as it is.
-      if [ "$(cget PlatformInfo.Generic.SystemProductName)" != "$MODEL_RTX50" ]; then
-        s0=$(cget PlatformInfo.Generic.SystemSerialNumber | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'); u0=$(cget PlatformInfo.Generic.SystemUUID | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-        if [ -n "$s0" ] || [ -n "$u0" ]; then
-          hex=$(printf '%s\n%s\n%s' "$s0" "$u0" "$MODEL_RTX50" | /usr/bin/shasum -a 256 | cut -c1-20); fresh=""; k=1
-          while [ $k -le 19 ]; do b=$((16#$(printf '%s' "$hex" | cut -c$k-$((k + 1))))); fresh="$fresh$(printf '%s' 0123456789ABCDEFGHJKLMNPQRSTUVWXYZ | cut -c$((b % 34 + 1)))"; k=$((k + 2)); done
-          [ ${#fresh} = 10 ] || { bad "could not work out the serial for the new model"; return 1; }
-          sets PlatformInfo.Generic.SystemSerialNumber "$fresh" || { bad "could not set the serial"; return 1; }
-        fi
+  if [ -n "$idrow" ]; then
+    IDFORM=${idrow%%:*}; idmodel=${idrow#*:}; idboard=${idmodel#*:}; idmodel=${idmodel%%:*}
+    printf '%s' "$idmodel" | grep -Eq '^Mac[0-9]+,[0-9]+$' && printf '%s' "$idboard" | grep -Eq '^J[0-9]+[a-z]?AP$' || { bad "no model for this kind of machine"; return 1; }
+    # A serial names the model it was made for: when the model changes the serial follows it, worked out from this
+    # PC's old serial, its UUID and the new model so that staging again gives the same one (p1401/v3_macos27.py
+    # serial_for_model computes the same value). With neither a serial nor a UUID it is left as it is.
+    if [ "$(cget PlatformInfo.Generic.SystemProductName)" != "$idmodel" ]; then
+      s0=$(cget PlatformInfo.Generic.SystemSerialNumber | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'); u0=$(cget PlatformInfo.Generic.SystemUUID | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+      if [ -n "$s0" ] || [ -n "$u0" ]; then
+        hex=$(printf '%s\n%s\n%s' "$s0" "$u0" "$idmodel" | /usr/bin/shasum -a 256 | cut -c1-20); fresh=""; k=1
+        while [ $k -le 19 ]; do b=$((16#$(printf '%s' "$hex" | cut -c$k-$((k + 1))))); fresh="$fresh$(printf '%s' 0123456789ABCDEFGHJKLMNPQRSTUVWXYZ | cut -c$((b % 34 + 1)))"; k=$((k + 2)); done
+        [ ${#fresh} = 10 ] || { bad "could not work out the serial for the new model"; return 1; }
+        sets PlatformInfo.Generic.SystemSerialNumber "$fresh" || { bad "could not set the serial"; return 1; }
       fi
-      sets PlatformInfo.Generic.SystemProductName "$MODEL_RTX50" || { bad "could not set the model"; return 1; }
-      break
     fi
-  done
+    sets PlatformInfo.Generic.SystemProductName "$idmodel" || { bad "could not set the model"; return 1; }
+    IDBOARD=$idboard
+  fi
+  # The board ID is not written into the config: it is handed to the macOS 27 system installer at finish time as
+  # A2X_BOARD, and so follows whatever model the config carries. IDFORM and IDBOARD are left for the stage note only.
 
   # a kext of the PC's own build that has code, that the kit neither brings nor knows, and that has no upper limit of
   # its own, stops at macOS 26; the result names each one
@@ -1166,7 +1229,7 @@ preflight)
   # driver runs on under macOS 26 may try it.
   [ -n "$CPUV" ] || CPUV=$(sysctl -n machdep.cpu.vendor 2>/dev/null)
   case "$CPUV" in *AMD*) UNTRIED="${UNTRIED:+$UNTRIED. }macOS 27 with this kit has not been started on a PC with an AMD processor yet";; esac
-  [ -n "$LAPTOP" ] || { if ioreg -rc AppleSmartBattery 2>/dev/null | grep -q '"BatteryInstalled" = Yes'; then LAPTOP=yes; else LAPTOP=no; fi; }
+  laptop_or_not
   [ "$LAPTOP" != yes ] || UNTRIED="${UNTRIED:+$UNTRIED. }macOS 27 with this kit has not been started on a laptop yet; its built-in screen and its switch between two graphics chips are untried"
   EFIKIND=""
   if [ -f "$C" ] && startup_ok; then
@@ -1240,7 +1303,7 @@ preflight)
     fi
   fi
   # What passing does not say. macOS 27 with this kit has been started on one desktop PC so far, so on another
-  # board or another processor generation it is untried, and so is the model the PC is given for its card.
+  # board or another processor generation it is untried, and so is the model the PC is given for its kind of machine.
   note "macOS 27 has been started on one desktop PC so far. On a different board or processor generation it is untried and may not start; Cancel Golden Gate puts the startup files back, and the 1401 USB stick still starts macOS 26"
   [ -z "$UNTRIED" ] || note "$UNTRIED. If macOS 27 does not reach its desktop, start macOS 26 from the 1401 USB stick and press Send logs there: 1401 reads the macOS 27 volume's logs from macOS 26, and that is how the failure reaches us"
   ok "this Mac is ready for Golden Gate"; echo "RESULT ok"; exit 0;;
@@ -1293,7 +1356,8 @@ stage)
   write_state staged "$DNOTE" "$DINST" "$SNOTE" || { undo; stop "could not record the state. EFI/OC is unchanged"; }
   ok "macOS 27 startup files staged at EFI/$STAGED; this Mac still starts from EFI/OC"
   if [ "$EFIKIND" = mac ]; then note "model: this Mac's own (not changed)"
-  else note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"; fi
+  elif [ -z "$IDBOARD" ]; then note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"
+  else note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null) ($(identity_name "$IDFORM"), board ID $IDBOARD, which Apple's Software Update keys its macOS 27 updates on). The model follows the kind of machine: a desktop is a Mac Studio, a laptop on built-in graphics a MacBook Air, a laptop with a graphics card a MacBook Pro"; fi
   [ -z "$GFX" ] || note "graphics path: $GFX"
   for k in $NOT27; do note "$k was never run on macOS 27: it stays on macOS 26 and does not load on macOS 27"; done
   for k in $DEP27; do note "${k%%>*} has no code of its own and only serves ${k#*>}, which stays on macOS 26: it stays on macOS 26 too"; done
@@ -1490,6 +1554,9 @@ refresh)
   SCR="$EFI/.golden-gate-scratch"; rm -rf "$SCR" "$EFI/$RENEWED"
   mkdir "$SCR" && cp -R "$EFI/$KEPT" "$SCR/OC" || { rm -rf "$SCR"; stop "could not copy the startup files. EFI/OC is unchanged"; }
   stage_path
+  # The kind of machine (battery, graphics) is read from macOS 15 or 26. From macOS 27 it is not read again:
+  # a model of the table that the startup files in use already carry is kept, with its board ID.
+  from_ok || KEEPMODEL=$(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/OC/config.plist" 2>/dev/null)
   # Which graphics path a PC takes is read from the macOS that is running. For an NVIDIA card it is the card alone
   # that decides, so macOS 27 gives the answer macOS 26 gave. For the other paths it is not known to, so from
   # macOS 27 they are refused, never guessed.
@@ -1703,15 +1770,20 @@ finish)
     *) stop "the volume this app laid down does not hold macOS 27. Nothing was changed";; esac
   [ -d "$DATA/Library" ] && [ ! -L "$DATA/Library" ] || stop "the macOS 27 data volume ($DATA) has no Library folder of its own. Nothing was changed"
   owners_or_stop
+  # The board ID the system installer writes to the new system follows the model the macOS 27 config carries (staged,
+  # or active once the startup files are switched). A real Mac's own model has no row, so A2X_BOARD is left unset and
+  # the installer uses the kit's default board.
+  case "$ST" in active) A2XBOARD=$(board_of_model "$(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$C" 2>/dev/null)");;
+    *) A2XBOARD=$(board_of_model "$(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)");; esac
   step "Checking the macOS 27 system install (dry run)"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
-  /bin/bash "$SPAY/$sinst" --payload "$SPAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --dry-run || stop "the v3 system installer refused its dry run. Nothing was changed"
+  /usr/bin/env ${A2XBOARD:+A2X_BOARD=$A2XBOARD} /bin/bash "$SPAY/$sinst" --payload "$SPAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --dry-run || stop "the v3 system installer refused its dry run. Nothing was changed"
   step "Checking the macOS 27 driver install (dry run)"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
   GG_EFIKIND=$(is_mac_efi && echo mac || echo pc) /bin/bash "$PAY/$inst" --payload "$PAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --dry-run || stop "the v3 driver installer refused its dry run. Nothing was changed"
   step "Installing the macOS 27 system package"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
-  /bin/bash "$SPAY/$sinst" --payload "$SPAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --apply || stop "the v3 system installer stopped; see its lines above. The driver was not installed"
+  /usr/bin/env ${A2XBOARD:+A2X_BOARD=$A2XBOARD} /bin/bash "$SPAY/$sinst" --payload "$SPAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --apply || stop "the v3 system installer stopped; see its lines above. The driver was not installed"
   report_choice "$DATA"
   step "Installing the macOS 27 driver"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. The system package is installed; the driver is not"
@@ -1732,16 +1804,20 @@ local)
   [ -n "$MAJOR" ] || { MAJOR=$(sw_vers -productVersion 2>/dev/null); MAJOR=${MAJOR%%.*}; }
   [ "$MAJOR" = "${TARGET%%.*}" ] || stop "this step runs on macOS ${TARGET%%.*}; this Mac runs macOS ${MAJOR:-?}. Nothing was changed"
   packages_or_stop
+  # The board ID the system installer writes follows the model this macOS is running as (its SMBIOS model, which the
+  # startup files set). A model this app does not set has no row, so A2X_BOARD is left unset and the installer keeps
+  # the board the system already has. --model stands in for the running model in a test.
+  lm=$MODELGIVEN; [ -n "$lm" ] || lm=$(sysctl -n hw.model 2>/dev/null); A2XBOARD=$(board_of_model "$lm")
   step "Checking the macOS 27 system install (dry run)"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
-  /bin/bash "$SPAY/$sinst" --payload "$SPAY" --dry-run || stop "the v3 system installer refused its dry run. Nothing was changed"
+  /usr/bin/env ${A2XBOARD:+A2X_BOARD=$A2XBOARD} /bin/bash "$SPAY/$sinst" --payload "$SPAY" --dry-run || stop "the v3 system installer refused its dry run. Nothing was changed"
   step "Checking the macOS 27 driver install (dry run)"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
   /bin/bash "$PAY/$inst" --payload "$PAY" --dry-run || stop "the v3 driver installer refused its dry run. Nothing was changed"
   [ $CONFIRM = 1 ] || { ok "both installers passed their dry runs. Nothing was changed"; echo "RESULT ok"; exit 0; }
   step "Installing the macOS 27 system package"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
-  /bin/bash "$SPAY/$sinst" --payload "$SPAY" --apply || stop "the v3 system installer stopped; see its lines above. The driver was not installed"
+  /usr/bin/env ${A2XBOARD:+A2X_BOARD=$A2XBOARD} /bin/bash "$SPAY/$sinst" --payload "$SPAY" --apply || stop "the v3 system installer stopped; see its lines above. The driver was not installed"
   step "Installing the macOS 27 driver"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. The system package is installed; the driver is not"
   /bin/bash "$PAY/$inst" --payload "$PAY" --apply || stop "the v3 driver installer stopped; see its lines above"

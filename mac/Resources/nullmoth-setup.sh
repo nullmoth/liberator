@@ -299,7 +299,7 @@ on_usb() {      # true when the partition is on an external or removable disk (a
 if [ -n "${V3REFRESH:-}" ]; then
   d=$(booted_part) || d=$(boot_esp)
   if [ -n "$d" ] && mount_efi "$d" && [ "$(ocrel_in "$MOUNT_POINT")" = EFI/OC ]; then
-    /bin/bash "$GGS" refresh --root "$MOUNT_POINT" --kit "$GGKIT" --confirm $([ -z "${GGCARDMODEL:-}" ] && echo --kit-model); v3rc=$?
+    /bin/bash "$GGS" refresh --root "$MOUNT_POINT" --kit "$GGKIT" --confirm $([ -n "${GGKITMODEL:-}" ] && echo --kit-model); v3rc=$?
   else
     echo "NOTE the partition this Mac starts from was not found from macOS 27, so its startup files were not renewed. To renew them, start macOS 26 and run the update there"
     echo "RESULT ok"; v3rc=0
@@ -1537,9 +1537,10 @@ if [ -n "${GG:-}" ]; then
   # was found above. "prepare" is the app's button: every check first, then the staged copy beside EFI/OC.
   [ "$OCREL" = EFI/OC ] || stop "Golden Gate needs the OpenCore config at EFI/OC; this one is at $OCREL. Nothing was changed"
   GGS="$(dirname "$0")/nullmoth-golden-gate.sh"; [ -f "$GGS" ] || stop "this build of 1401 has no Golden Gate script"
-  # The stage step keeps the model the kit sets: the one its reference configuration has started macOS 27 with. The
-  # model for the card's generation (--card-model) has not started macOS 27 on a real PC yet, so it is not the default.
-  gg() { /bin/bash "$GGS" "$1" --root "$MP" ${GGKIT:+--kit "$GGKIT"} ${GGCONFIRM:+--confirm} $([ "$1" = stage ] && [ -z "${GGCARDMODEL:-}" ] && echo --kit-model) ${GGACCOUNT:+--bring-account "$GGACCOUNT"} $([ "$1" = installer ] && [ -n "${GGSIZE:-}" ] && echo "--size-gb $GGSIZE") $([ "$1" = finish ] && echo "--report $([ -n "${GGREPORT:-}" ] && echo yes || echo no) --kit-tag $(sed -n 's/^tag //p' "$HERE/v3-kit.pin" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-')") | grep -v '^RESULT '; return "${PIPESTATUS[0]}"; }
+  # The stage step gives the PC the model for its kind of machine (a desktop the Mac Studio the kit already sets; a
+  # laptop a MacBook Air or Pro). --kit-model keeps the model the kit sets instead: the second attempt when macOS 27
+  # does not start with the kind-of-machine model.
+  gg() { /bin/bash "$GGS" "$1" --root "$MP" ${GGKIT:+--kit "$GGKIT"} ${GGCONFIRM:+--confirm} $([ "$1" = stage ] && [ -n "${GGKITMODEL:-}" ] && echo --kit-model) ${GGACCOUNT:+--bring-account "$GGACCOUNT"} $([ "$1" = installer ] && [ -n "${GGSIZE:-}" ] && echo "--size-gb $GGSIZE") $([ "$1" = finish ] && echo "--report $([ -n "${GGREPORT:-}" ] && echo yes || echo no) --kit-tag $(sed -n 's/^tag //p' "$HERE/v3-kit.pin" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-')") | grep -v '^RESULT '; return "${PIPESTATUS[0]}"; }
   if [ "$GG" = all ]; then
     # Every step in order, each only if the one before it passed. What an earlier run already did is not done
     # again: startup files that are staged stay, kernel collections that are made are judged as they are, and a

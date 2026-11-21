@@ -41,7 +41,7 @@ def run(script, *args):
 source = (ROOT / "Resources/nullmoth-golden-gate.sh").read_text()
 carried = strip_test_hooks.strip(source)
 arm("the source has test regions and the carried copy has none of their markers",
-    source.count("# test-hook-begin") == source.count("# test-hook-end") == 3 and "test-hook" not in carried and "# ship: " not in carried)
+    source.count("# test-hook-begin") == source.count("# test-hook-end") == 4 and "test-hook" not in carried and "# ship: " not in carried)
 arm("no stand-in option is left in the carried copy", not [h for h in HOOKS if h in carried], [h for h in HOOKS if h in carried])
 arm("control: every one of them is in the source", all(h in source for h in HOOKS))
 # line for line: the carried copy is the source without the lines inside the regions, plus the one "ship" line

@@ -139,7 +139,8 @@ class Steps(Base):
 
     def test_stage_leaves_the_default_startup_files_untouched(self):
         before = tree(self.oc())
-        state = gg.stage(self.root, self.kit, self.fx.report)
+        # the reference configuration carries the kit's model, so the comparison is made with that model kept
+        state = gg.stage(self.root, self.kit, self.fx.report, kit_model=True)
         self.assertEqual(state["state"], "staged")
         self.assertEqual(tree(self.oc()), before)
         staged = read(os.path.join(self.oc(gg.STAGED), "config.plist"))
@@ -305,16 +306,17 @@ class Steps(Base):
     def said(self, out):
         return [c["detail"] for c in out["checks"] if c["check"] == "untried-here"]
 
-    def test_pc1_the_card_it_has_run_on_passes_with_no_extra_notice_and_gets_its_generations_model(self):
+    def test_pc1_the_card_it_has_run_on_passes_with_no_extra_notice_and_gets_the_desktop_model(self):
         rc, out = self.cli("preflight", self.PC1)
         self.assertEqual((rc, [c["check"] for c in out["checks"] if not c["ok"]]), (0, []))
         self.assertTrue(any(c["check"] == "gpu" and c["detail"] == "NVIDIA card NVIDIA GeForce RTX 5060 (2D05) is one the driver takes" for c in out["checks"]))
         self.assertIn(gg.UNTRIED_NOTE, [c["detail"] for c in out["checks"]])       # passing is not "tried on a PC like this"
         self.assertEqual(self.said(out), [])
         rc, out = self.cli("stage", self.PC1)
-        self.assertEqual((rc, out["model"]), (0, "Mac17,15"))
+        self.assertEqual((rc, out["model"]), (0, "Mac15,14"))           # a desktop: the Mac Studio
         staged = read(os.path.join(self.root, "EFI", gg.STAGED, "config.plist"))
-        self.assertEqual(staged["PlatformInfo"]["Generic"]["SystemProductName"], "Mac17,15")
+        self.assertEqual(staged["PlatformInfo"]["Generic"]["SystemProductName"], "Mac15,14")
+        self.assertNotIn("target", staged["NVRAM"]["Add"][next(iter(staged["NVRAM"]["Add"]))]["boot-args"])   # the board ID goes to the installer, not boot-args
         self.assertIn("RealtekBluetoothFirmware.kext", [e["BundlePath"] for e in staged["Kernel"]["Add"]])   # from this PC's scan
 
     def test_pc1_staged_with_the_kits_model_when_asked(self):
@@ -322,7 +324,7 @@ class Steps(Base):
         staged = read(os.path.join(self.root, "EFI", gg.STAGED, "config.plist"))
         self.assertEqual((rc, out["model"]), (0, "kept from the kit (asked for)"))
         self.assertEqual(staged["PlatformInfo"]["Generic"]["SystemProductName"], self.fx.kit["set"]["PlatformInfo/Generic/SystemProductName"])
-        self.assertNotEqual(staged["PlatformInfo"]["Generic"]["SystemProductName"], "Mac17,15")
+        self.assertNotIn("target", staged["NVRAM"]["Add"][next(iter(staged["NVRAM"]["Add"]))]["boot-args"])   # the board ID never reaches boot-args
 
     def test_pc2_an_untried_card_on_an_amd_desktop_passes_is_told_so_and_is_staged_from_its_own_scan(self):
         rc, out = self.cli("preflight", self.PC2)
@@ -333,8 +335,8 @@ class Steps(Base):
         self.assertIn("press Send logs there", gg.SEND_LOGS)
         rc, out = self.cli("stage", self.PC2)
         staged = read(os.path.join(self.root, "EFI", gg.STAGED, "config.plist"))
-        self.assertEqual((rc, out["model"]), (0, "kept from the kit"))   # no model exists for RTX 30: the kit's is kept
-        self.assertEqual(staged["PlatformInfo"]["Generic"]["SystemProductName"], self.fx.kit["set"]["PlatformInfo/Generic/SystemProductName"])
+        self.assertEqual((rc, out["model"]), (0, "Mac15,14"))            # a desktop, whatever its card
+        self.assertEqual(staged["PlatformInfo"]["Generic"]["SystemProductName"], "Mac15,14")
         self.assertNotIn("RealtekBluetoothFirmware.kext", [e["BundlePath"] for e in staged["Kernel"]["Add"]])   # no Realtek adapter here
 
     def test_pc3_a_card_the_driver_does_not_take_is_refused_saying_what_was_found(self):
@@ -399,6 +401,8 @@ class Steps(Base):
         a, b = copy.deepcopy(before), copy.deepcopy(staged)
         nvk = next(iter(a["NVRAM"]["Add"]))
         args26, args27 = a["NVRAM"]["Add"][nvk].pop("boot-args").split(), b["NVRAM"]["Add"][nvk].pop("boot-args").split()
+        # the board ID never reaches boot-args (it goes to the system installer at finish time)
+        self.assertFalse([x for x in args27 if "target" in x])
         self.assertEqual([x for x in args27 if x not in v3_macos27.BOOT_ARGS_ALLOWED], [x for x in args26 if x not in v3_macos27.BOOT_ARGS_ALLOWED])
         self.assertTrue(set(args27) >= set(args26) | {"-v"})               # nothing of the PC's own is dropped
         own26 = {e["BundlePath"]: e for e in a["Kernel"].pop("Add")}
@@ -413,6 +417,12 @@ class Steps(Base):
             b["PlatformInfo"]["Generic"].pop(key, None)
         a["Misc"]["Security"].pop("SecureBootModel", None)
         b["Misc"]["Security"].pop("SecureBootModel", None)
+        # the one quirk staging changes on an NVIDIA PC: the GPU BAR macOS is given is capped at 256 MB
+        self.assertEqual(b.get("Booter", {}).get("Quirks", {}).pop("ResizeAppleGpuBars", None), 8)
+        a.get("Booter", {}).get("Quirks", {}).pop("ResizeAppleGpuBars", None)
+        for c in (a, b):
+            if c.get("Booter") == {"Quirks": {}}:
+                c.pop("Booter")
         self.assertEqual(b, a)                                             # patches, quirks, device properties, ACPI, UUID, MLB, SIP
         self.assertEqual(staged["PlatformInfo"]["Generic"]["SystemProductName"], kit_model)
 
@@ -422,8 +432,6 @@ class Steps(Base):
         self.assertEqual(rc, 0, out)
         return before, read(os.path.join(self.root, "EFI", gg.STAGED, "config.plist")), out
 
-    KIT_MODEL = property(lambda self: self.fx.kit["set"]["PlatformInfo/Generic/SystemProductName"])
-
     def test_an_amd_desktop_keeps_its_kernel_patches_quirks_and_fan_kexts(self):
         amd = {"Motherboard": {"Name": "B550 AORUS ELITE", "Platform": "Desktop"}, "CPU": {"Manufacturer": "AMD", "Processor Name": "AMD Ryzen 7 5800X"},
                "GPU": {"NVIDIA GeForce RTX 3070": {"Manufacturer": "NVIDIA", "Device ID": "10DE-2484", "Device Type": "Discrete GPU"}}}
@@ -432,9 +440,9 @@ class Steps(Base):
         before, staged, out = self.stage_pc(amd, extra_args="npci=0x3000", patches=patches,
                                             more_kexts=("AMDRyzenCPUPowerManagement.kext", "SMCAMDProcessor.kext", "SMCSuperIO.kext"),
                                             quirks={"ProvideCurrentCpuInfo": True, "DummyPowerManagement": True})
-        self.staged_keeps_the_pcs_own(before, staged, self.KIT_MODEL)       # no model for RTX 30: the kit's
+        self.staged_keeps_the_pcs_own(before, staged, "Mac15,14")           # a desktop: the Mac Studio
         self.assertEqual(staged["Kernel"]["Patch"], before["Kernel"]["Patch"])
-        self.assertEqual(out["model"], "kept from the kit")
+        self.assertEqual(out["model"], "Mac15,14")
 
     def test_a_laptop_with_a_switch_keeps_its_guard_arguments_and_device_properties(self):
         mux = {"Motherboard": {"Name": "LEGION 5", "Platform": "Laptop"}, "CPU": {"Manufacturer": "Intel", "Processor Name": "13th Gen Intel(R) Core(TM) i7-13700H"},
@@ -442,7 +450,10 @@ class Steps(Base):
                        "Intel Iris Xe": {"Manufacturer": "Intel", "Device ID": "8086-A7A0", "Device Type": "Integrated GPU"}}}
         props = {"PciRoot(0x0)/Pci(0x2,0x0)": {"AAPL,ig-platform-id": bytes.fromhex("0600a6a0"), "enable-backlight-registers-fix": bytes.fromhex("01000000")}}
         before, staged, out = self.stage_pc(mux, extra_args="gfxrst=4 -igfxblr nvmuxless=0", props=props, more_kexts=("VoodooPS2Controller.kext", "ECEnabler.kext"))
-        self.staged_keeps_the_pcs_own(before, staged, self.KIT_MODEL)       # no model for RTX 40
+        self.staged_keeps_the_pcs_own(before, staged, "Mac17,9")            # a laptop with a card: the MacBook Pro
+        self.assertEqual(out["model"], "Mac17,9")
+        # the model changed from the kit's Mac15,14, so the serial follows it
+        self.assertNotEqual(staged["PlatformInfo"]["Generic"]["SystemSerialNumber"], before["PlatformInfo"]["Generic"]["SystemSerialNumber"])
         self.assertIn("gfxrst=4", staged["NVRAM"]["Add"][next(iter(staged["NVRAM"]["Add"]))]["boot-args"].split())
         self.assertEqual(staged["DeviceProperties"], before["DeviceProperties"])
 
@@ -451,14 +462,14 @@ class Steps(Base):
                    "GPU": {"NVIDIA GeForce RTX 3060 Laptop GPU": {"Manufacturer": "NVIDIA", "Device ID": "10DE-2520", "Device Type": "Discrete GPU"},
                            "AMD Radeon 680M": {"Manufacturer": "AMD", "Device ID": "1002-1681", "Device Type": "Integrated GPU"}}}
         before, staged, out = self.stage_pc(muxless, extra_args="nvmuxless=1 -NRedDPDelay", more_kexts=("NootedRed.kext",))
-        self.staged_keeps_the_pcs_own(before, staged, self.KIT_MODEL)
+        self.staged_keeps_the_pcs_own(before, staged, "Mac17,9")
         rc, pre = self.cli("preflight", muxless)
         self.assertEqual(rc, 0)
         said = self.said(pre)[0]
         for part in ("has not been run on NVIDIA GeForce RTX 3060 Laptop GPU yet", "AMD processor", "laptop"):
             self.assertIn(part, said)
 
-    def test_two_more_generations_get_the_kits_model_and_keep_their_own_files(self):
+    def test_two_more_generations_get_the_desktop_model_and_keep_their_own_files(self):
         for name, did in (("NVIDIA GeForce GTX 1660 SUPER", "21C4"), ("NVIDIA GeForce RTX 2070 SUPER", "1E84")):
             with self.subTest(card=name):
                 self.tearDown()
@@ -466,14 +477,16 @@ class Steps(Base):
                 pc = {"Motherboard": {"Name": "Z390-A", "Platform": "Desktop"}, "CPU": {"Manufacturer": "Intel", "Processor Name": "Intel(R) Core(TM) i7-9700K"},
                       "GPU": {name: {"Manufacturer": "NVIDIA", "Device ID": "10DE-" + did, "Device Type": "Discrete GPU"}}}
                 before, staged, out = self.stage_pc(pc, extra_args="alcid=1", more_kexts=("IntelMausi.kext", "USBMap.kext"))
-                self.staged_keeps_the_pcs_own(before, staged, self.KIT_MODEL)
-                self.assertEqual(out["model"], "kept from the kit")
+                self.staged_keeps_the_pcs_own(before, staged, "Mac15,14")
+                self.assertEqual(out["model"], "Mac15,14")
                 self.assertNotIn("RealtekBluetoothFirmware.kext", [e["BundlePath"] for e in staged["Kernel"]["Add"]])
 
-    def test_the_tried_pc_changes_only_model_and_serial_beyond_the_kit(self):
+    def test_the_tried_desktop_keeps_the_kits_model_and_its_own_serial(self):
+        # PC1 is a desktop, so the model it is given is the kit's own Mac15,14: the serial is not touched beyond the kit
         before, staged, out = self.stage_pc(self.PC1, extra_args="alcid=11")
-        self.staged_keeps_the_pcs_own(before, staged, "Mac17,15")
-        self.assertNotEqual(staged["PlatformInfo"]["Generic"]["SystemSerialNumber"], before["PlatformInfo"]["Generic"]["SystemSerialNumber"])
+        self.staged_keeps_the_pcs_own(before, staged, "Mac15,14")
+        self.assertEqual(out["model"], "Mac15,14")
+        self.assertEqual(staged["PlatformInfo"]["Generic"]["SystemSerialNumber"], before["PlatformInfo"]["Generic"]["SystemSerialNumber"])
         self.assertEqual(staged["PlatformInfo"]["Generic"]["MLB"], before["PlatformInfo"]["Generic"]["MLB"])
 
     def test_a_made_kit_carries_no_path_from_the_machine_that_made_it(self):

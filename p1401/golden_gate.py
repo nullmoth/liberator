@@ -448,9 +448,9 @@ def main(argv):
     ap.add_argument("--gpu-id", action="append", default=[], help="an NVIDIA device ID, four hex digits")
     ap.add_argument("--disk-free-gb", type=float, default=0.0)
     ap.add_argument("--confirm", action="store_true", help="activate: the user confirmed the change of default")
-    ap.add_argument("--report", default="", help="the scan's Report.json: its NVIDIA cards and Bluetooth adapter are used")
+    ap.add_argument("--report", default="", help="the scan's Report.json: the kind of machine, its graphics and its Bluetooth adapter are used")
     ap.add_argument("--kit-model", action="store_true",
-                    help="stage: keep the model the kit sets instead of the model for this card's generation")
+                    help="stage: keep the model the kit sets instead of the model for this kind of machine")
     ap.add_argument("--plain", action="store_true", help="print sentences instead of JSON")
     a = ap.parse_args(argv)
     try:
