@@ -78,7 +78,7 @@ ESP_MARGIN_KB=8192    # kept free on the startup partition after the staged copy
 NV=7C436110-AB2A-4BBB-A880-FE41995C9F82
 # All a kit's manifest may set in config.plist, and all it may add to boot-args (p1401/v3_macos27.py has the same lists).
 SET_ALLOWED="Misc/Security/SecureBootModel PlatformInfo/Generic/SystemProductName"
-BOOT_ARGS_ALLOWED="-v -lilubetaall -vsmcbeta -no_compat_check a2x_conlive=1 a2xbusydump=2 pci_log=0x201 pci_log_mode=0x2 gfxrst=4 nvrmholdcap=180 nmxintel=3 nmxamd=3 nmxfb_pipe=1 a2x_pcibus=0x10010fe a2x_nondrv=1 a2xbootarm=1"
+BOOT_ARGS_ALLOWED="-v -lilubetaall -vsmcbeta -no_compat_check a2x_conlive=1 pci_log=0x201 pci_log_mode=0x2 gfxrst=4 nvrmholdcap=180 nmxintel=3 nmxamd=3 nmxfb_pipe=1 a2x_pcibus=0x10010fe a2x_nondrv=1 a2xbootarm=1 debug=0x100100"
 # The model a machine presents as on macOS 27 follows the kind of machine, not its graphics card: a desktop is a Mac
 # Studio, a laptop on built-in graphics alone a MacBook Air, a laptop with a graphics card a MacBook Pro. Each entry is
 # kind:model:board. The board is the board ID Apple's own device tree gives that model (its "target-type"); model and
@@ -88,14 +88,14 @@ BOOT_ARGS_ALLOWED="-v -lilubetaall -vsmcbeta -no_compat_check a2x_conlive=1 a2xb
 IDENTITY_TABLE="desktop:Mac15,14:J575dAP air:Mac17,3:J813AP pro:Mac17,9:J714sAP"
 
 STEP=${1:-}; [ $# -gt 0 ] && shift
-ROOT=""; KIT=""; CONFIRM=0; DRVOFF=""; DRVON=""; MAJOR=""; GPUS=""; GPUS_GIVEN=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0; ESPFREE=""
+ROOT=""; KIT=""; CONFIRM=0; DRVOFF=""; DRVON=""; MAJOR=""; GPUS=""; GPUS_GIVEN=0; GPUS_ARG=0; DISK_GB=""; DEVIDS=""; DEVIDS_GIVEN=0; ESPFREE=""
 PCITREE=""; DISPLAYS=""; DISPLAYS_GIVEN=0; APPLEIDS=""; APPLEIDS_GIVEN=0
 DISKUTIL=/usr/sbin/diskutil; TOOLS=""
 KITMODEL=0; CPUV=""; LAPTOP=""; ACCOUNT=""
 # --startlog yes: the startup log. The macOS 27 startup files get the boot arguments that make a failed start say why (the
 # verbose screen, the platform driver's heartbeat, a power-button tap that breaks into a hung kernel). Off unless asked
 # for, and made again without it on the next stage or refresh. Never the take-the-screen argument a Mac froze on.
-STARTLOG=""; STARTLOG_ARGS="-v a2xbusydump=2 debug=0x104"
+STARTLOG=""; STARTLOG_ARGS="-v debug=0x104"
 REPORT=""; KITTAG=""   # --report yes|no: the owner's answer about start reports from macOS 27; --kit-tag: the kit's release
 # Every step's lines also go to one log on this macOS: a step that stopped can be read afterwards, Send logs takes
 # it, and the app shows its last line while a long step runs. Kept under 1 MB: past that the older half is dropped.
@@ -107,7 +107,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --report) REPORT=${2:-}; shift;; --startlog) STARTLOG=${2:-}; shift;; --kit-tag) KITTAG=${2:-}; shift;;
   --off) DRVOFF=${2:-}; shift;; --on) DRVON=${2:-}; shift;;
   # test-hook-begin
-  --macos-major) MAJOR=${2:-}; shift;; --gpu-id) GPUS="$GPUS ${2:-}"; GPUS_GIVEN=1; shift;; --pci-tree) PCITREE=${2:-}; shift;;
+  --macos-major) MAJOR=${2:-}; shift;; --gpu-id) GPUS="$GPUS ${2:-}"; GPUS_GIVEN=1; GPUS_ARG=1; shift;; --pci-tree) PCITREE=${2:-}; shift;;
   --disk-free-gb) DISK_GB=${2:-}; shift;; --esp-free-kb) ESPFREE=${2:-}; shift;; --device-id) DEVIDS="$DEVIDS ${2:-}"; DEVIDS_GIVEN=1; shift;;
   --diskutil) DISKUTIL=${2:-}; shift;; --tools) TOOLS=${2:-}; shift;; --kc-work) KCWORK=${2:-}; shift;; --lay-work) LAYWORK=${2:-}; shift;; --preboot) PREBOOT=${2:-}; shift;; --step-log) STEPLOG=${2:-}; shift;;
   --cpu-vendor) CPUV=${2:-}; shift;; --laptop) LAPTOP=${2:-}; shift;; --model) MODELGIVEN=${2:-}; shift;;
@@ -205,7 +205,12 @@ chain_trusted() {  # $1 and every folder above it, up to /
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 
 NOT_OFFERED="macOS 27 is not offered by this build of 1401. It needs the NullMoth v3 kit, which is not public."
-kv() { plutil -extract "$1" raw -o - "$KIT/$MANIFEST" 2>/dev/null; }      # one value of the kit's manifest
+# pex KEY FILE: one value of a plist, printed only when plutil found it. On macOS 15 a missing key makes
+# `plutil -extract ... raw` print its error message on STDOUT, so a caller that captured the output read the message
+# as the value: every kit entry without an executable or comment failed the text check and staging stopped with "a kit
+# entry has a field 1401 will not write" (users on macOS 15, Beta 4 and Beta 5). macOS 26/27 print nothing there.
+pex() { local v; v=$(plutil -extract "$1" raw -o - "$2" 2>/dev/null) || return 1; printf '%s' "$v"; }
+kv() { pex "$1" "$KIT/$MANIFEST"; return 0; }      # one value of the kit's manifest (empty when absent)
 khas() { plutil -extract "$1" raw -o - "$KIT/$MANIFEST" >/dev/null 2>&1; }
 kit_ok() {
   [ -n "$KIT" ] && [ -f "$KIT/$MANIFEST" ] && [ "$(kv darwin)" = 27 ] || return 1
@@ -258,7 +263,7 @@ EFI="$ROOT/EFI"; C="$EFI/OC/config.plist"
 
 read_state() {   # prints none, staged or active; fails on a state file 1401 did not write
   [ -e "$EFI/$STATE" ] || { echo none; return 0; }
-  local s; s=$(plutil -extract state raw -o - "$EFI/$STATE" 2>/dev/null) || return 1
+  local s; s=$(pex state "$EFI/$STATE") || return 1
   case "$s" in staged|active) echo "$s";; *) return 1;; esac
 }
 layout_ok() {    # the folders must be the ones the state names
@@ -279,7 +284,7 @@ write_state() {  # $1 = state, $2 = driver note, $3 = driver installer, $4 = sys
   # later write carries the recorded value on. A record without it was written by a release that did not keep it,
   # and is read as "another kit": that is how a newer release knows the startup files must be made again.
   local tmp="$EFI/$STATE.tmp" km="${STATE_KIT:-}"
-  [ -n "$km" ] || km=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null)
+  [ -n "$km" ] || km=$(pex kit_md5 "$EFI/$STATE")
   case "$km" in *[!0-9a-f]*) km="";; esac
   printf '{\n "state": "%s",\n "from_major": %s,\n "target": "%s",\n "staged_at": %s,\n "driver": "%s",\n "driver_installer": "%s",\n "system": "%s",\n "kit_md5": "%s"\n}\n' \
     "$1" "$FROM_MAJOR" "$TARGET" "$(date +%s)" "$2" "$3" "${4:-}" "$km" > "$tmp" && mv -f "$tmp" "$EFI/$STATE"
@@ -295,7 +300,7 @@ heal() {         # a swap stopped between its two renames leaves no EFI/OC: put 
   mv "$EFI/$KEPT" "$EFI/OC" || stop "EFI/OC is missing and macOS 26's startup files could not be put back from EFI/$KEPT"
   note "a stopped run had left no EFI/OC; macOS 26's startup files are back as the default"
   if [ -e "$EFI/$STATE" ]; then
-    write_state staged "$(plutil -extract driver raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract driver_installer raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract system raw -o - "$EFI/$STATE" 2>/dev/null)" \
+    write_state staged "$(pex driver "$EFI/$STATE")" "$(pex driver_installer "$EFI/$STATE")" "$(pex system "$EFI/$STATE")" \
       || stop "macOS 26's startup files are back, but the record could not be updated"
   fi
 }
@@ -417,6 +422,38 @@ identity_row() { local r; for r in $IDENTITY_TABLE; do case "$r" in "$1":*) echo
 identity_row_of_model() {   # $1 = model
   local r m; for r in $IDENTITY_TABLE; do m=${r#*:}; [ "${m%%:*}" = "$1" ] && { echo "$r"; return 0; }; done; return 1
 }
+
+# carry_user_startup <config in use> <new OC folder>: what the user added to the macOS 27 startup files by hand, kept
+# through a refresh. The new set is built from macOS 26's files plus the kit, so without this an update drops every
+# kext the user enabled on macOS 27 only, and an identity the kit's table does not know (a hand-set model, serial and
+# board) goes back to the kit's. Kept: each enabled Kernel.Add entry whose bundle the new set does not have, with its
+# folder; and the whole PlatformInfo section when the model in use is not one of the table's. Prints what it kept.
+carry_user_startup() {
+  local old=$1 new=$2 oldk n i bp en m have tmp kept=0 model
+  oldk=$(dirname "$old")/Kexts
+  n=$(plutil -extract Kernel.Add raw -o - "$old" 2>/dev/null) || n=0
+  i=0; while [ "$i" -lt "$n" ]; do
+    bp=$(pex "Kernel.Add.$i.BundlePath" "$old"); en=$(pex "Kernel.Add.$i.Enabled" "$old")
+    if [ "$en" = true ] && [ -n "$bp" ]; then
+      m=$(plutil -extract Kernel.Add raw -o - "$new/config.plist" 2>/dev/null) || m=0
+      have=0; local j=0; while [ "$j" -lt "$m" ]; do [ "$(pex "Kernel.Add.$j.BundlePath" "$new/config.plist")" = "$bp" ] && have=1; j=$((j + 1)); done
+      if [ $have = 0 ] && [ -d "$oldk/${bp%%/*}" ]; then
+        [ -d "$new/Kexts/${bp%%/*}" ] || cp -R "$oldk/${bp%%/*}" "$new/Kexts/" || return 1
+        tmp=$(mktemp) || return 1
+        plutil -extract "Kernel.Add.$i" xml1 -o "$tmp" "$old" && plutil -insert "Kernel.Add.$m" -xml "$(cat "$tmp")" "$new/config.plist" || { rm -f "$tmp"; return 1; }
+        rm -f "$tmp"; kept=$((kept + 1)); note "kept the user's own kext: $bp"
+      fi
+    fi
+    i=$((i + 1)); done
+  model=$(pex PlatformInfo.Generic.SystemProductName "$old")
+  if [ -n "$model" ] && ! identity_row_of_model "$model" >/dev/null; then
+    tmp=$(mktemp) || return 1
+    plutil -extract PlatformInfo xml1 -o "$tmp" "$old" && plutil -replace PlatformInfo -xml "$(cat "$tmp")" "$new/config.plist" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"; note "kept the user's own identity: $model"
+  fi
+  return 0
+}
+
 identity_name() {
   case "$1" in desktop) echo "Mac Studio";; air) echo "MacBook Air";; pro) echo "MacBook Pro";; esac
 }
@@ -445,19 +482,19 @@ card_tried() {      # $1 = device ID: the kit's own list when it carries one, el
   if n=$(kv gpu_ids) && [ -n "$n" ] && [ "$n" != 0 ]; then
     i=0; while [ "$i" -lt "$n" ]; do [ "$(upper "$(kv gpu_ids.$i)")" = "$id" ] && return 0; i=$((i + 1)); done; return 1
   fi
-  n=$(plutil -extract tested raw -o - "$HERE/nvidia_gsp_ids.json" 2>/dev/null) || return 1
+  n=$(pex tested "$HERE/nvidia_gsp_ids.json") || return 1
   case "$n" in ''|*[!0-9]*) return 1;; esac
-  i=0; while [ "$i" -lt "$n" ]; do [ "$(upper "$(plutil -extract "tested.$i" raw -o - "$HERE/nvidia_gsp_ids.json" 2>/dev/null)")" = "$id" ] && return 0; i=$((i + 1)); done
+  i=0; while [ "$i" -lt "$n" ]; do [ "$(upper "$(pex "tested.$i" "$HERE/nvidia_gsp_ids.json")")" = "$id" ] && return 0; i=$((i + 1)); done
   return 1
 }
-card_name() { printf '%s' "$1" | grep -Eq '^[0-9A-F]{4}$' && plutil -extract "ids.$1" raw -o - "$HERE/nvidia_gsp_ids.json" 2>/dev/null; }
+card_name() { printf '%s' "$1" | grep -Eq '^[0-9A-F]{4}$' && pex "ids.$1" "$HERE/nvidia_gsp_ids.json"; }
 cards_tried() {    # the cards macOS 27 has been started on, by name
   local n i id out=""
   if n=$(kv gpu_ids) && [ -n "$n" ] && [ "$n" != 0 ]; then
     i=0; while [ "$i" -lt "$n" ]; do id=$(upper "$(kv gpu_ids.$i)"); out="$out, $(card_name "$id" || echo "NVIDIA card") ($id)"; i=$((i + 1)); done
   else
-    n=$(plutil -extract tested raw -o - "$HERE/nvidia_gsp_ids.json" 2>/dev/null); i=0
-    while [ "$i" -lt "${n:-0}" ]; do id=$(upper "$(plutil -extract "tested.$i" raw -o - "$HERE/nvidia_gsp_ids.json" 2>/dev/null)"); out="$out, $(card_name "$id" || echo "NVIDIA card") ($id)"; i=$((i + 1)); done
+    n=$(pex tested "$HERE/nvidia_gsp_ids.json"); i=0
+    while [ "$i" -lt "${n:-0}" ]; do id=$(upper "$(pex "tested.$i" "$HERE/nvidia_gsp_ids.json")"); out="$out, $(card_name "$id" || echo "NVIDIA card") ($id)"; i=$((i + 1)); done
   fi
   printf '%s' "${out#, }"
 }
@@ -556,7 +593,7 @@ dl_record() {
   return 0
 }
 gb1() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }     # bytes as GB with one decimal
-vfield() { printf '%s' "$1" | plutil -extract "$2" raw -o - - 2>/dev/null; }
+vfield() { local v; v=$(printf '%s' "$1" | plutil -extract "$2" raw -o - - 2>/dev/null) || return 1; printf '%s' "$v"; }
 mac27_volumes() {
   local rec="$GGDIR/macos27-volumes" su du here si di
   SYS=""; DATA=""; WHY=""; SYSID=""; DATAID=""
@@ -594,16 +631,62 @@ mac27_laid_down() {
     pre_s=$(vfield "$("$DISKUTIL" info -plist "$SYSID" 2>/dev/null)" MountPoint)
     pre_d=$(vfield "$("$DISKUTIL" info -plist "$DATAID" 2>/dev/null)" MountPoint)
     if mac27_volumes mount; then
-      ver=$(plutil -extract ProductVersion raw -o - "$SYS/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)
+      ver=$(pex ProductVersion "$SYS/System/Library/CoreServices/SystemVersion.plist")
     fi
     for id in $([ -n "$pre_s" ] || echo "$SYSID") $([ -n "$pre_d" ] || echo "$DATAID"); do
       "$DISKUTIL" unmount "$id" >/dev/null 2>&1
     done
   else
-    ver=$(plutil -extract ProductVersion raw -o - "$SYS/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)
+    ver=$(pex ProductVersion "$SYS/System/Library/CoreServices/SystemVersion.plist")
   fi
   case "$ver" in 27.*) return 0;; esac
   return 1
+}
+# kc_refresh: the Intel kernel collections on an already laid-down macOS 27 are the ones THIS kit's maker pins. The
+# lay-down places them only on a first install, so an update kept the old ones while the driver installer put on this
+# kit's auxiliary collection, which is linked against this kit's boot collection: macOS 27 then refused the driver
+# ("auxkcload: aux KC _BootKCID ... != booted KC", no NVIDIA display; a user's code report 11-19, Beta 3 -> 4). When
+# they differ the maker runs (dry run, then real) into the root-only work folder and both files are placed on the
+# system volume and in its Preboot group folder, where the lay-down puts them, each copy compared byte for byte.
+kc_pin() { local LDIR=$KC_LDIR; sed -n "s/^[a-z]* [0-9]* [0-9a-f]* [0-9]* \([0-9a-f]\{64\}\) $1\"\{0,1\}$/\1/p; s/^KINDS=\"[a-z]* [0-9]* [0-9a-f]* [0-9]* \([0-9a-f]\{64\}\) $1$/\1/p" "$LDIR/make-kernel-collections.sh" | head -n 1; }
+kc_refresh() {
+  local d k want have stale="" grp prev pmp mounted="" g KM
+  # finish does not look up the lay-down step; the maker lives in its folder. A kit without one has nothing to refresh.
+  d=$(kv laydown.dir); case "$d" in ''|*/*|.*) return 0;; esac
+  KC_LDIR="$KIT/$d"; KM="$KC_LDIR/make-kernel-collections.sh"
+  [ -d "$KC_LDIR" ] && [ ! -L "$KC_LDIR" ] && [ -f "$KM" ] && [ ! -L "$KM" ] || return 0
+  for k in BootKernelExtensions.kc SystemKernelExtensions.kc; do
+    want=$(kc_pin "$k"); printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' || { WHY="the kit's collections maker pins no checksum for $k"; return 1; }
+    have=$(shasum -a 256 "$SYS/System/Library/KernelCollections/$k" 2>/dev/null | cut -c1-64)
+    [ "$have" = "$want" ] || stale="$stale $k"
+  done
+  [ -n "$stale" ] || { ok "the macOS 27 kernel collections are this kit's"; return 0; }
+  step "The macOS 27 kernel collections are not this kit's ($stale): making and placing this kit's"
+  { [ -d "$KCWORK" ] || { mkdir -p "$KCWORK" 2>/dev/null && chmod 755 "$KCWORK"; }; } && kc_folder_trusted || { WHY="the folder for the kernel collections ($KCWORK) is not one only root can write"; return 1; }
+  tree_trusted "$KIT" || { WHY="the private copy of the v3 kit changed"; return 1; }
+  run_kit "$KM" --out "$KCWORK" --dry-run; [ "$RC" = 0 ] || { WHY="the kernel collections maker refused its dry run"; return 1; }
+  run_kit "$KM" --out "$KCWORK" --apply; [ "$RC" = 0 ] || { WHY="the kernel collections could not be made"; return 1; }
+  for k in BootKernelExtensions.kc SystemKernelExtensions.kc; do
+    [ -f "$KCWORK/$k" ] && [ ! -L "$KCWORK/$k" ] && [ "$(shasum -a 256 "$KCWORK/$k" | cut -c1-64)" = "$(kc_pin "$k")" ] || { WHY="the maker left no $k with the pinned checksum"; return 1; }
+  done
+  grp=$(vfield "$("$DISKUTIL" info -plist "$SYSID" 2>/dev/null)" APFSVolumeGroupID)
+  printf '%s' "$grp" | grep -Eq '^[0-9A-Fa-f-]{36}$' || { WHY="the macOS 27 volume's group could not be read"; return 1; }
+  prev=$("$DISKUTIL" apfs list "$(vfield "$("$DISKUTIL" info -plist "$SYSID" 2>/dev/null)" APFSContainerReference)" 2>/dev/null \
+    | awk '/APFS Volume Disk \(Role\)/ && /\(Preboot\)/ {for (i=1;i<=NF;i++) if ($i ~ /^disk[0-9]+s[0-9]+$/) {print $i; exit}}')
+  [ -n "$prev" ] || { WHY="the macOS 27 container has no Preboot volume"; return 1; }
+  pmp=$(vfield "$("$DISKUTIL" info -plist "$prev" 2>/dev/null)" MountPoint)
+  if [ -z "$pmp" ]; then pmp=$(mktemp -d /private/var/tmp/gg-preboot.XXXXXX) && mount -t apfs -o nobrowse "/dev/$prev" "$pmp" || { WHY="could not mount Preboot ($prev)"; return 1; }; mounted=$pmp; fi
+  g="$pmp/$grp/boot/System/Library/KernelCollections"
+  [ -d "$g" ] && [ ! -L "$g" ] && [ ! -L "$pmp/$grp" ] || { [ -z "$mounted" ] || umount "$mounted"; WHY="Preboot has no boot folder for the macOS 27 group $grp"; return 1; }
+  for k in BootKernelExtensions.kc SystemKernelExtensions.kc; do
+    [ ! -L "$SYS/System/Library/KernelCollections/$k" ] && [ ! -L "$g/$k" ] || { [ -z "$mounted" ] || umount "$mounted"; WHY="a kernel collection on macOS 27 is a symbolic link"; return 1; }
+    cp -p "$KCWORK/$k" "$SYS/System/Library/KernelCollections/$k.new" && mv -f "$SYS/System/Library/KernelCollections/$k.new" "$SYS/System/Library/KernelCollections/$k" \
+      && cmp -s "$KCWORK/$k" "$SYS/System/Library/KernelCollections/$k" \
+      && cp -p "$KCWORK/$k" "$g/$k.new" && mv -f "$g/$k.new" "$g/$k" && cmp -s "$KCWORK/$k" "$g/$k" \
+      || { [ -z "$mounted" ] || umount "$mounted"; WHY="could not place $k on macOS 27"; return 1; }
+  done
+  [ -z "$mounted" ] || umount "$mounted"
+  ok "this kit's kernel collections are on macOS 27 and its Preboot folder"
 }
 # The two macOS 27 volumes must keep file owners. A volume can be mounted with owners ignored (macOS does that to a
 # volume it treats as external, and remembers the choice per volume): every file then reads back as owner 99, the
@@ -663,7 +746,7 @@ packages_or_stop() {   # the kit's two packages, in its private copy: PAY/inst t
 # ---- the kit applied to one OC folder: the same changes, in the same order, as p1401/v3_macos27.py apply() ----
 WHY=""
 bad() { WHY=$*; return 1; }
-cget() { plutil -extract "$1" raw -o - "$AC" 2>/dev/null; }
+cget() { pex "$1" "$AC"; }
 # builtin_paths: the firmware device path of each storage and network controller on this PC's PCI bus, one per line.
 # Read from the I/O registry: a controller's path is the PCI root it hangs from (its ACPI _UID) and the device and
 # function numbers of every PCI device above it and of itself. Storage is PCI class 01 and network class 02; a disk or
@@ -671,8 +754,11 @@ cget() { plutil -extract "$1" raw -o - "$AC" 2>/dev/null; }
 # _UID, or whose address does not read as hex, is left out. --pci-tree gives the registry text for a test; with the
 # other test inputs given and no tree, nothing is scanned.
 builtin_paths() {
+  # Only GPU ids given on the command line (a test without this machine's registry) skip the registry. The check
+  # stage sets GPUS_GIVEN itself once it has read the cards, and testing that here made every real PC skip this
+  # step: nothing was ever marked built-in (a user's code report, 11-19: no "built-in:" lines, empty DeviceProperties).
   if [ -n "$PCITREE" ]; then cat "$PCITREE"
-  elif [ $GPUS_GIVEN = 1 ]; then return 0
+  elif [ $GPUS_ARG = 1 ]; then return 0
   else ioreg -p IOService -l -w0 2>/dev/null; fi | awk '
     /^[ |]*\+-o / {
       d = index($0, "+-o"); while (top > 0 && sd[top] >= d) top--
@@ -993,13 +1079,18 @@ apply_kit() {    # $1 = the OC folder to change
         if [ "$val" = "$from" ]; then $PB -c "Set :IOKitPersonalities:$key:IOProviderClass $to" "$info" || { bad "could not change $name"; return 1; }; changed=1
         elif [ "$val" = "$to" ]; then already=1; fi
       done <<EOF
-$(plutil -extract IOKitPersonalities raw -o - "$info" 2>/dev/null)
+$(pex IOKitPersonalities "$info")
 EOF
       [ $changed = 1 ] || [ $already = 1 ] || { bad "$name has no personality on $from to move to $to"; return 1; }
     fi
     j=$((j + 1)); done
 
   args=$(cget "NVRAM.Add.$NV.boot-args"); added=""
+  # a2xbusydump is a Mac Pro-only boot diagnostic: on the Mac Pro its address is a real USB controller, but on some
+  # PCs that same address is ordinary RAM and the kernel panics when it recycles the page. It is no longer written,
+  # and any machine that already carries it in its boot-args (an earlier install, or the old startup-log toggle) has
+  # it removed here on the next refresh.
+  if [ -n "$args" ]; then stripped=""; for t in $args; do case "$t" in a2xbusydump*) ;; *) stripped="$stripped $t";; esac; done; args=${stripped# }; fi
   m=$(kv boot_args); j=0
   while [ "$j" -lt "$m" ]; do a=$(kv boot_args.$j)
     if not_for_this "$a"; then j=$((j + 1)); continue; fi
@@ -1103,7 +1194,7 @@ EOF
         case "$keep" in *" $name "*) ;; *)
           sets "Kernel.Add.$i.MaxKernel" 26.99.99 || { bad "could not limit $name"; return 1; }
           NOT27="$NOT27 $name"
-          cid=$(plutil -extract CFBundleIdentifier raw -o - "$kd/$(cget "Kernel.Add.$i.BundlePath")/$(cget "Kernel.Add.$i.PlistPath")" 2>/dev/null) \
+          cid=$(pex CFBundleIdentifier "$kd/$(cget "Kernel.Add.$i.BundlePath")/$(cget "Kernel.Add.$i.PlistPath")") \
             && capids="$capids $cid=$name";; esac
       fi
       i=$((i + 1)); done
@@ -1356,8 +1447,8 @@ stage)
   write_state staged "$DNOTE" "$DINST" "$SNOTE" || { undo; stop "could not record the state. EFI/OC is unchanged"; }
   ok "macOS 27 startup files staged at EFI/$STAGED; this Mac still starts from EFI/OC"
   if [ "$EFIKIND" = mac ]; then note "model: this Mac's own (not changed)"
-  elif [ -z "$IDBOARD" ]; then note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"
-  else note "model: $(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null) ($(identity_name "$IDFORM"), board ID $IDBOARD, which Apple's Software Update keys its macOS 27 updates on). The model follows the kind of machine: a desktop is a Mac Studio, a laptop on built-in graphics a MacBook Air, a laptop with a graphics card a MacBook Pro"; fi
+  elif [ -z "$IDBOARD" ]; then note "model: $(pex PlatformInfo.Generic.SystemProductName "$EFI/$STAGED/config.plist")$([ $KITMODEL = 0 ] || echo ' (kept from the kit, as asked)')"
+  else note "model: $(pex PlatformInfo.Generic.SystemProductName "$EFI/$STAGED/config.plist") ($(identity_name "$IDFORM"), board ID $IDBOARD, which Apple's Software Update keys its macOS 27 updates on). The model follows the kind of machine: a desktop is a Mac Studio, a laptop on built-in graphics a MacBook Air, a laptop with a graphics card a MacBook Pro"; fi
   [ -z "$GFX" ] || note "graphics path: $GFX"
   for k in $NOT27; do note "$k was never run on macOS 27: it stays on macOS 26 and does not load on macOS 27"; done
   for k in $DEP27; do note "${k%%>*} has no code of its own and only serves ${k#*>}, which stays on macOS 26: it stays on macOS 26 too"; done
@@ -1380,7 +1471,7 @@ activate)
   step "Making the macOS 27 startup files the default"
   mv "$EFI/OC" "$EFI/$KEPT" || stop "could not set macOS 26's startup files aside. Nothing was changed"
   mv "$EFI/$STAGED" "$EFI/OC" || { mv "$EFI/$KEPT" "$EFI/OC"; stop "the staged files could not be made the default; macOS 26's startup files are back"; }
-  write_state active "$(plutil -extract driver raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract driver_installer raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract system raw -o - "$EFI/$STATE" 2>/dev/null)" \
+  write_state active "$(pex driver "$EFI/$STATE")" "$(pex driver_installer "$EFI/$STATE")" "$(pex system "$EFI/$STATE")" \
     || { mv "$EFI/OC" "$EFI/$STAGED"; mv "$EFI/$KEPT" "$EFI/OC"; stop "could not record the change; macOS 26's startup files are back"; }
   ok "this Mac now starts from the macOS 27 startup files; macOS 26's are kept at EFI/$KEPT"
   # The boot picker starts the startup disk by itself after a few seconds. Until this step set it, that was still
@@ -1481,7 +1572,7 @@ rollback|cancel|remove)
     step "Putting macOS 26's startup files back"
     mv "$EFI/OC" "$EFI/$STAGED" || stop "could not set the macOS 27 startup files aside. Nothing was changed"
     mv "$EFI/$KEPT" "$EFI/OC" || { mv "$EFI/$STAGED" "$EFI/OC"; stop "macOS 26's startup files could not be put back; the partition is as it was"; }
-    write_state staged "$(plutil -extract driver raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract driver_installer raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract system raw -o - "$EFI/$STATE" 2>/dev/null)" \
+    write_state staged "$(pex driver "$EFI/$STATE")" "$(pex driver_installer "$EFI/$STATE")" "$(pex system "$EFI/$STATE")" \
       || note "macOS 26's startup files are back, but the record could not be updated; run Cancel again"
     ok "this Mac starts from macOS 26's startup files again"; ST=staged
   elif [ "$STEP" = rollback ]; then
@@ -1524,7 +1615,7 @@ kit-current)
   # this question the startup files of the older kit stayed in place for good while only the packages were renewed.
   state_or_stop
   [ "$ST" != none ] || { note "no macOS 27 startup files are staged on this partition"; echo "RESULT stop"; exit 1; }
-  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(kit_id)
+  have=$(pex kit_md5 "$EFI/$STATE"); want=$(kit_id)
   if [ -n "$want" ] && [ "$have" = "$want" ]; then ok "the macOS 27 startup files were staged from this kit"; echo "RESULT ok"; exit 0; fi
   note "the macOS 27 startup files were staged from another kit"; echo "RESULT stop"; exit 1;;
 
@@ -1537,7 +1628,7 @@ refresh)
   [ $CONFIRM = 1 ] || stop "the macOS 27 startup files are renewed only when you confirm it. Nothing was changed"
   state_or_stop
   [ "$ST" = active ] || stop "this Mac does not start from the macOS 27 startup files (state: $ST), so there is nothing to renew. Nothing was changed"
-  have=$(plutil -extract kit_md5 raw -o - "$EFI/$STATE" 2>/dev/null); want=$(kit_id)
+  have=$(pex kit_md5 "$EFI/$STATE"); want=$(kit_id)
   if [ -n "$want" ] && [ "$have" = "$want" ]; then ok "the macOS 27 startup files are already this kit's"; echo "RESULT ok"; exit 0; fi
   step "Making the macOS 27 startup files again from this kit"
   C="$EFI/$KEPT/config.plist"
@@ -1556,16 +1647,37 @@ refresh)
   stage_path
   # The kind of machine (battery, graphics) is read from macOS 15 or 26. From macOS 27 it is not read again:
   # a model of the table that the startup files in use already carry is kept, with its board ID.
-  from_ok || KEEPMODEL=$(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/OC/config.plist" 2>/dev/null)
+  from_ok || KEEPMODEL=$(pex PlatformInfo.Generic.SystemProductName "$EFI/OC/config.plist")
   # Which graphics path a PC takes is read from the macOS that is running. For an NVIDIA card it is the card alone
   # that decides, so macOS 27 gives the answer macOS 26 gave. For the other paths it is not known to, so from
   # macOS 27 they are refused, never guessed.
   [ "$GFX" = nvidia ] || from_ok || { rm -rf "$SCR"; stop "on this PC's graphics the startup files are renewed from macOS 26: start macOS 26 and update there. Nothing was changed"; }
   apply_kit "$SCR/OC" || { rm -rf "$SCR"; stop "the macOS 27 startup files could not be made again ($WHY). EFI/OC is unchanged"; }
+  carry_user_startup "$EFI/OC/config.plist" "$SCR/OC" || { rm -rf "$SCR"; stop "the user's own startup additions could not be carried over. EFI/OC is unchanged"; }
+  # A real Mac keeps the platform driver, the exec hook and the boot arguments it already starts macOS 27 with. The
+  # kit's builds of those two are made for PCs; on a Mac Pro 6,1 they stopped macOS 27 before its first log line,
+  # while the Mac's own pair, with the kit's graphics and system files, started it with its desktop and network.
+  if [ "${EFIKIND:-}" = mac ]; then
+    for k in A2XACPIPlatform.kext a2x_exec_hook.kext; do
+      if [ -d "$EFI/OC/Kexts/$k" ] && [ -d "$SCR/OC/Kexts/$k" ]; then
+        rm -rf "$SCR/OC/Kexts/$k" && cp -R "$EFI/OC/Kexts/$k" "$SCR/OC/Kexts/" || { rm -rf "$SCR"; stop "could not keep this Mac's own $k. EFI/OC is unchanged"; }
+        note "kept this Mac's own $k"
+      fi
+    done
+    mba=$(pex "NVRAM.Add.$NV.boot-args" "$EFI/OC/config.plist") || mba=""
+    if [ -n "$mba" ]; then
+      # a2xbusydump reads a Mac Pro 6,1 USB controller at a fixed address; on any other Mac that address can be RAM
+      if [ "$(sysctl -n hw.model 2>/dev/null)" != MacPro6,1 ]; then
+        s=""; for t in $mba; do case "$t" in a2xbusydump*) ;; *) s="$s $t";; esac; done; mba=${s# }
+      fi
+      plutil -replace "NVRAM.Add.$NV.boot-args" -string "$mba" "$SCR/OC/config.plist" || { rm -rf "$SCR"; stop "could not keep this Mac's boot arguments. EFI/OC is unchanged"; }
+      note "kept this Mac's own boot arguments"
+    fi
+  fi
   mv "$EFI/OC" "$EFI/$RENEWED" || { rm -rf "$SCR"; stop "could not set the startup files in use aside. Nothing was changed"; }
   mv "$SCR/OC" "$EFI/OC" || { mv "$EFI/$RENEWED" "$EFI/OC"; rm -rf "$SCR"; stop "the new startup files could not be put in place; the ones in use are back"; }
   STATE_KIT=$want
-  write_state active "$(plutil -extract driver raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract driver_installer raw -o - "$EFI/$STATE" 2>/dev/null)" "$(plutil -extract system raw -o - "$EFI/$STATE" 2>/dev/null)" \
+  write_state active "$(pex driver "$EFI/$STATE")" "$(pex driver_installer "$EFI/$STATE")" "$(pex system "$EFI/$STATE")" \
     || { rm -rf "$EFI/OC"; mv "$EFI/$RENEWED" "$EFI/OC"; rm -rf "$SCR"; stop "could not record the change; the startup files in use are back"; }
   # The startup files that were in use are kept, not deleted: they move to EFI/NullMoth-backups/OC-<date>, the two
   # newest such folders are kept, and the folder is named to the user. A hand-made change on a Mac is never lost.
@@ -1666,7 +1778,7 @@ laid)
   # a second run does not lay macOS 27 down again. The install step leaves both volumes unmounted, so they are
   # mounted here to be read: without that a finished lay-down looked like none, and the second run stopped on it.
   if mac27_volumes mount; then
-    case "$(plutil -extract ProductVersion raw -o - "$SYS/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)" in
+    case "$(pex ProductVersion "$SYS/System/Library/CoreServices/SystemVersion.plist")" in
       27.*) ok "macOS 27 is already on its own volumes"; echo "RESULT ok"; exit 0;; esac
   fi
   note "macOS 27 is not laid down yet"; echo "RESULT stop"; exit 1;;
@@ -1766,15 +1878,16 @@ finish)
   # partition is never run: that partition has no owners or permissions, so anything on it could have been changed.
   packages_or_stop
   mac27_volumes mount || stop "$WHY. Nothing was changed"
-  case "$(plutil -extract ProductVersion raw -o - "$SYS/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)" in 27.*) ;;
+  case "$(pex ProductVersion "$SYS/System/Library/CoreServices/SystemVersion.plist")" in 27.*) ;;
     *) stop "the volume this app laid down does not hold macOS 27. Nothing was changed";; esac
   [ -d "$DATA/Library" ] && [ ! -L "$DATA/Library" ] || stop "the macOS 27 data volume ($DATA) has no Library folder of its own. Nothing was changed"
   owners_or_stop
+  kc_refresh || stop "$WHY. The system package and driver were not installed"
   # The board ID the system installer writes to the new system follows the model the macOS 27 config carries (staged,
   # or active once the startup files are switched). A real Mac's own model has no row, so A2X_BOARD is left unset and
   # the installer uses the kit's default board.
-  case "$ST" in active) A2XBOARD=$(board_of_model "$(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$C" 2>/dev/null)");;
-    *) A2XBOARD=$(board_of_model "$(plutil -extract PlatformInfo.Generic.SystemProductName raw -o - "$EFI/$STAGED/config.plist" 2>/dev/null)");; esac
+  case "$ST" in active) A2XBOARD=$(board_of_model "$(pex PlatformInfo.Generic.SystemProductName "$C")");;
+    *) A2XBOARD=$(board_of_model "$(pex PlatformInfo.Generic.SystemProductName "$EFI/$STAGED/config.plist")");; esac
   step "Checking the macOS 27 system install (dry run)"
   tree_trusted "$KIT" || stop "the private copy of the v3 kit changed. Nothing was changed"
   /usr/bin/env ${A2XBOARD:+A2X_BOARD=$A2XBOARD} /bin/bash "$SPAY/$sinst" --payload "$SPAY" --system "$SYS" --data "$DATA" --esp "$ROOT" --dry-run || stop "the v3 system installer refused its dry run. Nothing was changed"
@@ -1791,7 +1904,7 @@ finish)
   # Which kit set it up is left on the new system, for the log collector there: the kit's name and its manifest's checksum.
   KR=$(mktemp -t 1401-kit-record) || KR=""
   if [ -n "$KR" ]; then
-    printf 'kit %s, manifest md5 %s\n' "$(plutil -extract kit raw -o - "$KIT/$MANIFEST" 2>/dev/null)" "$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)" > "$KR"
+    printf 'kit %s, manifest md5 %s\n' "$(kv kit)" "$(md5 -q "$KIT/$MANIFEST" 2>/dev/null)" > "$KR"
     put_on_data "$KR" Library/NullMoth/golden-gate/kit.txt || note "the kit's name could not be recorded on the new data volume"
     rm -f "$KR"
   fi

@@ -11,7 +11,6 @@
   "-vsmcbeta",
   "-no_compat_check",
   "a2x_conlive=1",
-  "a2xbusydump=2",
   "pci_log=0x201",
   "pci_log_mode=0x2",
   "gfxrst=4",
@@ -20,7 +19,8 @@
   "nmxamd=3",
   "a2x_pcibus=0x10010fe",
   "a2x_nondrv=1",
-  "a2xbootarm=1"
+  "a2xbootarm=1",
+  "debug=0x100100"
  ],
  "caps": [
   {

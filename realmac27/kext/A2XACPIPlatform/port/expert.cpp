@@ -718,6 +718,7 @@ static void A2XRootBusyTrace(void *arg, wait_result_t)
 static const ACPI_TABLE_HEADER *gA2XDMAR;                      // see a2xVTdTranslationOff
 static void a2xVTdTranslationOff(const ACPI_TABLE_HEADER *hdr);
 bool A2XVTdStartMapper(const void *dmar, uint32_t len, IOService *platform);   // vtdmap.cpp
+void A2XXHCIRouteStart(void);   // xhciroute.cpp
 
 bool A2XACPIPlatformExpert::start(IOService *provider)
 {
@@ -757,6 +758,7 @@ bool A2XACPIPlatformExpert::start(IOService *provider)
         PE_parse_boot_argn("a2x_vtdmap", &on, sizeof on);
         if (!on || !A2XVTdStartMapper(gA2XDMAR, gA2XDMAR->Length, this)) a2xVTdTranslationOff(gA2XDMAR);
     }
+    A2XXHCIRouteStart();   // before any PCI nub exists: Intel 7/8/9-series and X99 USB ports to xHCI
 
     // The platform interrupt controller comes first: the I/O APIC drivers and the PCI message controller
     // register under it, and the kernel delivers device vectors to it.

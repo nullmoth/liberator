@@ -21,6 +21,28 @@ coredisplay_set() { /usr/bin/defaults write "$COREDISPLAY" "$IOP_KEY" -bool true
 coredisplay_off() { /usr/bin/defaults write "$COREDISPLAY" "$IOP_KEY" -bool false; }
 coredisplay_get() { /usr/bin/defaults read "$COREDISPLAY" "$IOP_KEY" 2>/dev/null; }
 start_windowserver() { exec "$WS" "$@"; }
+# A laptop whose built-in screen is wired to its own graphics chip: the NVIDIA card lists its connectors and none has
+# a display (NVRMFB publishes connected-displays on each nub it enumerated, about 7 s after start), and another
+# graphics chip (PCI class 03, vendor not NVIDIA) is present, so the firmware's picture on that chip is the screen.
+# Waiting for an NVIDIA head there only meant minutes of black screen and restarts that could never help.
+# Prints "yes <other chips>" or "no <why>"; DISPLAY_ELSEWHERE_IOREG lets a test feed it a registry listing.
+display_elsewhere() {
+  local cds other
+  if [ -n "${DISPLAY_ELSEWHERE_IOREG:-}" ]; then cds=$(cat "$DISPLAY_ELSEWHERE_IOREG")
+  else cds=$(/usr/sbin/ioreg -lw0 2>/dev/null); fi
+  other=$(printf '%s\n' "$cds" | LC_ALL=C awk '
+    function flush() { if (disp && ven != "" && ven != "de10") n++; disp = 0; ven = "" }
+    /\+-o / { flush() }
+    /"class-code" = <....03..>/ { disp = 1 }
+    /"vendor-id" = </ { i = index($0, "<"); ven = substr($0, i + 1, 4) }
+    END { flush(); print n + 0 }')
+  cds=$(printf '%s\n' "$cds" | LC_ALL=C sed -n 's/.*"connected-displays" = \([0-9][0-9]*\).*/\1/p')
+  if [ -z "$cds" ]; then echo "no (the NVIDIA card has not listed its connectors yet)"; return 1; fi
+  if printf '%s\n' "$cds" | grep -qv '^0$'; then echo "no (a display is connected to the NVIDIA card)"; return 1; fi
+  if [ "$other" -lt 1 ]; then echo "no (no other graphics chip: the screen can only be on the NVIDIA card)"; return 1; fi
+  echo "yes ($other other graphics chip(s))"; return 0
+}
+ELSEWHERE_MARK=/var/run/nullmoth-display-elsewhere   # emptied at every boot
 GFXPATH=/Library/NullMoth/bringup/graphics-path
 graphics_path() { cat "$GFXPATH" 2>/dev/null; }
 apple_accel()   { "$IOREG" -r -c IOAccelerator -d 1 2>/dev/null; }
@@ -200,9 +222,17 @@ link_on() {
 arm_pipe() {
   local i h ok=0
   say "== first WindowServer start this boot: waiting for NVAccel's display head (up to $((WAIT_TRIES * 2)) s)"
+  local seen=0 why
   for i in $(seq 1 "$WAIT_TRIES"); do
     h=$(sysctl_r debug.nvaccel_heads_published)
     if [ -n "$h" ] && [ "$h" -ge 1 ]; then ok=1; break; fi
+    # three answers in a row (6 s), so a monitor still waking up is not taken for "no display"
+    if why=$(display_elsewhere); then seen=$((seen + 1)); else seen=0; fi
+    if [ "$seen" -ge 3 ]; then
+      say "no display on the NVIDIA card after ~$((i * 2)) s and the screen is on another graphics chip: $why - starting WindowServer on that screen now (the NVIDIA card stays up without a display)"
+      coredisplay_off; echo "elsewhere $(date '+%T')" > "$ELSEWHERE_MARK"; echo "elsewhere $(date '+%T')" >> "$MARK"
+      return
+    fi
     sleep 2
   done
   if [ $ok != 1 ]; then
@@ -272,7 +302,8 @@ wsgate_main() {
             await_fb_link
             record_preconditions || nmx_off "the Metal pipe is not ready for this start" nmx-preconditions
           fi;;
-    *) await_fb_link; record_preconditions;;
+    *) if [ -e "$ELSEWHERE_MARK" ]; then say "screen on another graphics chip: no Metal display pipe this start"
+       else await_fb_link; record_preconditions; fi;;
   esac
   start_windowserver "$@"
 }

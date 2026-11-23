@@ -9,6 +9,8 @@ GO2_SETTLE_TRIES=30                                 # x 2 s = 60 s for the retri
 NVGO_SECS=30                                        # nvgo itself is bounded: a pass that never returns must not hold the boot
 GO2_RETRIED=0
 IDLE_WATCH_TRIES=60                                 # x 3 s = 3 more minutes for an idle desktop's first frame
+HEAD_DIAG_TRY=45                                    # x 2 s = 90 s without a head: write down what the driver says, once
+HEAD_RESTART_TRY=75                                 # x 2 s = 150 s without a head: one automatic restart (see head_restart)
 WSGATE_DONE=/var/run/ws-gate.done                   # written by ws-gate.sh ("armed ...") when it armed the pipe first
 PIPE_DONE=/var/run/nvload.pipe                      # "final <time> <outcome>": nvload changes nothing more this boot
 
@@ -55,11 +57,83 @@ go2_retry() {
   return 0
 }
 
+# What the driver itself says while no head is there. A start that ends on a black screen used to leave only "no head":
+# these lines ride in the start report, so the reason is in the first upload.
+driver_lines() {   # the kernel driver's own lines of this start, newest last, bounded
+  run_bounded 25 /usr/bin/log show --last "${1:-4m}" --style compact \
+    --predicate 'process == "kernel" AND (eventMessage CONTAINS "NVRM-xnu" OR eventMessage CONTAINS "NVAccel" OR eventMessage CONTAINS "NVRMFB")' 2>/dev/null \
+    | grep -E 'NVRM-xnu|NVAccel|NVRMFB' | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +kernel[^:]*: *//' | cut -c1-300
+}
+# A laptop whose built-in screen is wired to its own graphics chip: the NVIDIA card lists its connectors and none has
+# a display (NVRMFB publishes connected-displays on each nub it enumerated, about 7 s after start), and another
+# graphics chip (PCI class 03, vendor not NVIDIA) is present, so the firmware's picture on that chip is the screen.
+# Waiting for an NVIDIA head there only meant minutes of black screen and restarts that could never help.
+# Prints "yes <other chips>" or "no <why>"; DISPLAY_ELSEWHERE_IOREG lets a test feed it a registry listing.
+display_elsewhere() {
+  local cds other
+  if [ -n "${DISPLAY_ELSEWHERE_IOREG:-}" ]; then cds=$(cat "$DISPLAY_ELSEWHERE_IOREG")
+  else cds=$(/usr/sbin/ioreg -lw0 2>/dev/null); fi
+  other=$(printf '%s\n' "$cds" | LC_ALL=C awk '
+    function flush() { if (disp && ven != "" && ven != "de10") n++; disp = 0; ven = "" }
+    /\+-o / { flush() }
+    /"class-code" = <....03..>/ { disp = 1 }
+    /"vendor-id" = </ { i = index($0, "<"); ven = substr($0, i + 1, 4) }
+    END { flush(); print n + 0 }')
+  cds=$(printf '%s\n' "$cds" | LC_ALL=C sed -n 's/.*"connected-displays" = \([0-9][0-9]*\).*/\1/p')
+  if [ -z "$cds" ]; then echo "no (the NVIDIA card has not listed its connectors yet)"; return 1; fi
+  if printf '%s\n' "$cds" | grep -qv '^0$'; then echo "no (a display is connected to the NVIDIA card)"; return 1; fi
+  if [ "$other" -lt 1 ]; then echo "no (no other graphics chip: the screen can only be on the NVIDIA card)"; return 1; fi
+  echo "yes ($other other graphics chip(s))"; return 0
+}
+ELSEWHERE_MARK=/var/run/nullmoth-display-elsewhere   # emptied at every boot
+HEAD_NO_DISPLAY=0
+head_diag() {      # $1 = seconds waited
+  local st loaded gpu out
+  st=$(autogo_state)
+  loaded=$(kmutil showloaded 2>/dev/null | grep -cE 'com\.nullmoth\.(NVRM|NVAccel|NVRMFB|NVRMAGDC)')
+  gpu=$(ioreg -c IOPCIDevice -lw0 2>/dev/null | grep -cE '"vendor-id" = <de100000>')
+  say "no head after $1 s: driver state '${st:-none published}', NullMoth graphics extensions running $loaded of 4, NVIDIA PCI functions $gpu, NVRM service $(ioreg -c NVRM 2>/dev/null | grep -c 'class NVRM'), NVAccel service $(ioreg -c NVAccel 2>/dev/null | grep -c 'class NVAccel'), heads sysctl '$(sysctl -n debug.nvaccel_heads_published 2>&1 | head -n 1)'"
+  out=$(driver_lines 4m)
+  if [ -z "$out" ]; then say "no head: the kernel log holds no driver line for this start (the query returned nothing - the driver may not have started, or the log could not be read)"
+  else
+    say "no head: the driver's last lines of this start:"
+    printf '%s\n' "$out" | grep -E 'auto-go|go\(|display|head|FAILED|failed|error|chipset|GSP|not ' | tail -n 30 | sed 's/^/    /'
+    printf '%s\n' "$out" | grep -q 'no display on any NVIDIA connector' && HEAD_NO_DISPLAY=1
+  fi
+  return 0
+}
+# A start with no head often comes up on the next start. Restart once by itself instead of leaving a black screen:
+# only when nobody is logged in, only when the driver did not say that no display is connected to the card, and
+# at most RECOVER_MAX times in a row (the count is cleared by the next healthy start).
+head_restart() {
+  local n who
+  [ "$HEAD_NO_DISPLAY" = 1 ] && { say "no automatic restart: the driver reports no display on any NVIDIA connector"; return 1; }
+  who=$(console_user)
+  [ -n "$who" ] && { say "no automatic restart: a user session is active (${who})"; return 1; }
+  n=$(cat "$RESTARTS" 2>/dev/null); case "$n" in ''|*[!0-9]*) n=0;; esac
+  if [ "$n" -ge "$RECOVER_MAX" ]; then
+    say "no automatic restart: restarted $n time(s) in a row for this already - it needs a person (read $LOG)"; return 1; fi
+  echo $((n + 1)) > "$RESTARTS.tmp" && mv -f "$RESTARTS.tmp" "$RESTARTS" || { say "no automatic restart: the count could not be written"; return 1; }
+  say "no display head this start: restarting the machine (automatic restart $((n + 1)) of $RECOVER_MAX)"
+  restart_machine
+}
+
 wait_for_head() {
-  local i
+  local i st last_st="-"
+  local seen=0 why
   for i in $(seq 1 "$HEAD_WAIT_TRIES"); do
     [ "$(heads)" -ge 1 ] && { say "NVAccel head published after ~$((i * 2)) s"; return 0; }
+    if why=$(display_elsewhere); then seen=$((seen + 1)); else seen=0; fi
+    if [ "$seen" -ge 3 ]; then
+      HEAD_NO_DISPLAY=1
+      say "no display on the NVIDIA card after ~$((i * 2)) s: $why - the screen is on that chip; no head is coming and no restart can bring one"
+      return 2
+    fi
     go2_retry && [ "$(heads)" -ge 1 ] && return 0
+    st=$(autogo_state)
+    [ "$st" = "$last_st" ] || { say "waiting for a head ($((i * 2)) s): driver state '${st:-none published}'"; last_st=$st; }
+    [ "$i" = "$HEAD_DIAG_TRY" ] && head_diag $((i * 2))
+    [ "$i" = "$HEAD_RESTART_TRY" ] && [ "$(heads)" -lt 1 ] && head_restart
     sleep 2
   done
   say "STOP: NVAccel published no head within $((HEAD_WAIT_TRIES * 2)) s - the screen stays on the software compositor"
@@ -205,7 +279,21 @@ nvload_main() {
   cap_log "$LOG"
   exec >> "$LOG" 2>&1
   say "== nvload start, boot $(sysctl -n kern.boottime | cut -c1-40)"
-  if ! wait_for_head; then pipe_final "no head"; exit 0; fi
+  wait_for_head; local wr=$?
+  if [ "$wr" = 2 ]; then
+    # The window server starts on the other chip's screen (ws-gate). Healthy = it keeps one process id for 2 minutes.
+    local p0 p n=0 t=0
+    while [ $t -lt 150 ]; do
+      t=$((t + 1))
+      p=$(pgrep -x WindowServer | head -n 1)
+      if [ -n "$p" ] && [ "$p" = "$p0" ]; then [ $n -ge 60 ] && { say "HEALTHY: the desktop is on the other graphics chip's screen (WindowServer $p steady 2 min); NVIDIA has no display"; pipe_final "display elsewhere"; exit 0; }
+      else p0=$p; n=0; fi
+      sleep 2; n=$((n + 1))
+    done
+    say "the window server did not stay up on the other graphics chip's screen in 5 min"
+    pipe_final "display elsewhere, not steady"; exit 0
+  fi
+  if [ "$wr" != 0 ]; then pipe_final "no head"; exit 0; fi
   arm_display
   pipe_final "done"
 }

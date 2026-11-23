@@ -1,5 +1,24 @@
 # Changelog
 
+## Liberator Beta 6
+- Version 0.6.0, built for its own kit (release tag v3.0.0-beta.6).
+- Wi-Fi on macOS 27 for Realtek RTL8922AE (Wi-Fi 7) cards, in the normal Wi-Fi menu. Downloads measured 22 to 25 MB/s on 5 GHz and about 5 MB/s on 2.4 GHz. Frames from other devices that pretend to be part of an aggregate, and block-ack requests that do not come from your own access point, are now refused. The driver's test switches moved out of a folder every user could write to.
+- Wi-Fi keeps the radio running between scans and joins, so a join starts at once instead of after the card powers up, and the Mac tells the access point when it leaves a network. 5 GHz joins land far more often.
+- Laptops whose built-in screen is wired to the AMD or Intel graphics: when the NVIDIA card reports no display, macOS 27 starts on the built-in screen right away instead of a black screen and automatic restarts. The NVIDIA card stays available without a display.
+- The menu bar stays: a small guard notices when nothing owns the menu bar after login and brings Finder forward, without restarting it.
+- Privacy prompts name the program that asked, not Liberator's launcher.
+- sharingd, Finder, Dock, Control Center and the widget service start once and stay up.
+- The Intel engine only lets a program take over the file it was started with. A program started by hand cannot borrow another program's identity.
+- Intel Macs with built-in graphics: Liberator takes the graphics drivers macOS 27 lacks from the Mac's own Apple Kernel Debug Kit (Apple-signed, checked before use) instead of refusing.
+- Intel Macs: the driver step no longer stops with "could not copy Dont", "kmutil wrote no collection" or "linked, but ... is not in the collection". A driver that cannot link on macOS 27, and any driver that needs it, is left out and named; the step stops only when no graphics driver remains.
+- Intel Macs: an update keeps the Mac's own platform driver and boot arguments in its startup files.
+- macOS 15: staging no longer stops with "a kit entry has a field 1401 will not write".
+- Intel 7, 8 and 9-series and X99 boards: USB ports are routed to the xHCI controller on macOS 27, so USB keyboards and mice work.
+- A PC whose NVIDIA card has not shown a picture within 90 seconds of start-up now writes the driver's state to its log and restarts once by itself, never while someone is logged in and never more than twice in a row.
+- The Mac's own serial number is used again; an invented one stopped Apple sign-in in Beta 5.
+- macOS 27 now reports an Apple silicon Mac: System Information and About This Mac show the chip (for example "Apple M2 Ultra") and the Mac's model name, the graphics show under the chip's name, and Apple silicon programs see an arm64 processor. Intel programs still see x86_64.
+- An update keeps what you added to the macOS 27 startup files yourself: extra kexts you enabled and a model you set by hand are carried into the new startup files instead of being dropped.
+
 ## Liberator Beta 5
 - Version 0.5.0, built for its own kit (release tag v3.0.0-beta.5).
 - Stock macOS 27: Apple's own programs are put back in place and run untouched (about 445 of them). Earlier betas replaced each one with a modified copy. Three programs still keep a modified copy because they need their own entitlements: the menu bar's app-lifecycle service, a diagnostics agent and NotificationCenter.

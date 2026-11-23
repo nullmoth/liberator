@@ -13,7 +13,13 @@
 #     internal speakers as the default output, and a DHCP request for wired ports that come up without an address.
 #
 #   sudo bash install-apple.sh --payload <this folder> --system "/Volumes/<name>" --data "/Volumes/<name> - Data"
-#        [--esp <partition>] [--dry-run | --apply | --uninstall]
+#        [--esp <partition>] [--kdk <folder or .dmg>] [--dry-run | --apply | --uninstall]
+#
+# Intel graphics: Tahoe keeps the code of Apple's Intel graphics drivers only inside its kernel collection - the
+# driver folders in /System/Library/Extensions hold an Info.plist and no program, and a folder like that links to
+# nothing. For those drivers the code is taken from Apple's Kernel Debug Kit for this Mac's own Tahoe build, which
+# holds the same drivers (same version) as files: an installed kit (/Library/Developer/KDKs), one given with --kdk, or
+# the kit's disk image, downloaded once (about 1.2 GB) and accepted only when its package is signed by Apple.
 #
 # No mode word is a dry run. Code 0 done or clean dry run, 1 refused or failed, 2 unknown option.
 # A file it adds is listed in added.list under <data>/Library/NullMoth/golden-gate/apple; a file it replaces is kept
@@ -21,7 +27,12 @@
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
-PAYLOAD=$HERE; SYS=""; DATA=""; MODE="--dry-run"
+PAYLOAD=$HERE; SYS=""; DATA=""; MODE="--dry-run"; KDK=""
+KDK_URL_BASE="https://github.com/dortania/KdkSupportPkg/releases/download"   # <build>/Kernel_Debug_Kit_<version>_build_<build>.dmg
+KDK_NEED_GB=9                          # chosen: the image (1.2 GB) plus its opened package (5.5 GB) plus room to work
+TBUILD=""; TVER=""                     # this Tahoe's build and version (read below when a kit is needed)
+KDK_INSTALLED=/Library/Developer/KDKs  # where installed kits live
+PKGUTIL=/usr/sbin/pkgutil; HDIUTIL=/usr/bin/hdiutil; CURL=/usr/bin/curl
 # test-hook-begin
 KMUTIL=/usr/bin/kmutil
 TAHOE_EXT=""                           # one folder holding Tahoe's AMD drivers and bundles, in place of the search
@@ -30,9 +41,11 @@ GFXIDS=""                              # graphics driver bundle IDs, in place of
 # test-hook-end
 while [ $# -gt 0 ]; do case "$1" in
   --payload) PAYLOAD=${2:-}; shift;; --system) SYS=${2:-}; shift;; --data) DATA=${2:-}; shift;; --esp) shift;;
-  --dry-run|--apply|--uninstall) MODE=$1;;
+  --dry-run|--apply|--uninstall) MODE=$1;; --kdk) KDK=${2:-}; shift;;
   # test-hook-begin
   --kmutil) KMUTIL=${2:-}; shift;; --tahoe-ext) TAHOE_EXT=${2:-}; shift;; --model) MODEL=${2:-}; shift;; --gfx-ids) GFXIDS=${2:-}; shift;;
+  --tahoe-build) TBUILD=${2:-}; shift;; --tahoe-version) TVER=${2:-}; shift;; --kdk-installed) KDK_INSTALLED=${2:-}; shift;;
+  --pkgutil) PKGUTIL=${2:-}; shift;; --hdiutil) HDIUTIL=${2:-}; shift;; --curl) CURL=${2:-}; shift;;
   # test-hook-end
   *) echo "STOP unknown option $1"; exit 2;; esac; shift; done
 say() { echo "  $*"; }
@@ -56,9 +69,21 @@ abs() { case "$1" in S:*) echo "$SYS${1#S:}";; D:*) echo "$DATA${1#D:}";; esac; 
 if [ "$MODE" = --uninstall ]; then
   echo "STEP removing the Mac Pro package"
   [ -f "$ADDED" ] || { say "nothing was installed by this package"; exit 0; }
+  # The system volume is mounted read-only after a restart, exactly as for an install: make it writable first. Without
+  # this every removal and every put-back on it failed, and the backup was then deleted anyway.
+  if mount | grep -F " on $SYS (" | grep -q 'read-only'; then
+    /sbin/mount -uw "$SYS" 2>/dev/null
+    mount | grep -F " on $SYS (" | grep -q 'read-only' && die "the macOS 27 system volume is read-only and could not be made writable. Nothing was changed"
+  fi
   while IFS= read -r r; do [ -n "$r" ] && rm -rf "$(abs "$r")"; done < "$ADDED"
-  if [ -d "$KEPT" ]; then (cd "$KEPT" && find . -type f -o -type l) | while IFS= read -r f; do
-    f=${f#./}; t=$(abs "${f%%/*}:/${f#*/}"); mkdir -p "${t%/*}" && mv -f "$KEPT/$f" "$t"; done; fi
+  bad=0
+  if [ -d "$KEPT" ]; then
+    while IFS= read -r f; do f=${f#./}; t=$(abs "${f%%/*}:/${f#*/}")
+      { mkdir -p "${t%/*}" && cp -pR "$KEPT/$f" "$t"; } || { say "could not put back $t"; bad=1; }
+    done < <(cd "$KEPT" && find . -type f -o -type l)
+  fi
+  # The kept originals are the only copy: they are deleted only when every one of them went back.
+  [ "$bad" = 0 ] || die "some files could not be put back; the originals are still kept in $KEPT"
   rm -rf "$STATE"; say "removed; restart to finish"; exit 0
 fi
 
@@ -109,31 +134,126 @@ if [ -z "$GFXIDS" ]; then
   GFXIDS=$(kmutil showloaded --list-only 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^com\./) print $i}' | sort -u |
     grep -vxF -f <(printf '%s\n' "$in27" com.nullmoth.NMXAudio) | grep -v '^com\.apple\.kpi\.' | tr '\n' ' ')
 fi
+# macOS 27 on Intel starts through the kit's own platform layer, which OpenCore injects: A2XACPIPlatform (the platform
+# expert), NetArm2x86IOAPIC (the interrupt controller), AppleRTC, efiruntime, efinvram and smbios. Tahoe's Apple drivers
+# for those same roles are never carried: linked beside the kit's, two drivers claim the platform expert, the interrupt
+# controller and the timers, and macOS 27 froze at start with no panic and no network (Mac Pro 6,1). NullMoth's own
+# drivers come from the kit, never from Tahoe: a test graphics driver loaded on Tahoe would claim the card.
+PLATFORM_OWNED="com.apple.driver.AppleACPIPlatform com.apple.driver.AppleAPIC com.apple.driver.AppleHPET
+ com.apple.driver.AppleRTC com.apple.driver.AppleEFIRuntime com.apple.driver.AppleSMBIOS com.apple.driver.AppleACPIEC
+ com.apple.driver.AppleACPIButtons com.apple.driver.AppleLPC com.apple.driver.ApplePlatformEnabler
+ com.apple.driver.AppleIntelMCEReporter com.apple.Dont_Steal_Mac_OS_X com.apple.driver.pmtelemetry"
+kept=""; left=""
+for id in $GFXIDS; do
+  case " $(echo $PLATFORM_OWNED) " in *" $id "*) left="$left $id"; continue;; esac
+  case "$id" in com.nullmoth.*) left="$left $id"; continue;; esac
+  kept="$kept $id"
+done
+GFXIDS=${kept# }
+[ -n "$left" ] && say "left to the kit's own start-up drivers:$left"
 kext_of() {   # the folder of the kext with bundle ID $1, in DIRS (top level and one plug-in level)
   local d k; for d in $DIRS; do for k in "$d"/*.kext "$d"/*.kext/Contents/PlugIns/*.kext; do [ -d "$k" ] || continue
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$k/Contents/Info.plist" 2>/dev/null)" = "$1" ] && { echo "$k"; return 0; }
   done; done; return 1; }
+# KEXTPATHS is one path per LINE: Apple's own kexts have spaces in their names ("Dont Steal Mac OS X.kext"), and a
+# space-joined list split them ("could not copy Dont", Beta 4/5, real Macs).
+NL='
+'
 VENDORS=""; KEXTPATHS=""; CARRY=""
 is_gfx() { case "$1" in *Graphics*|*Framebuffer*|*AMD*|*ATI*|*Radeon*|*Accelerat*|*GPU*|*Display*|*MCCS*|*nvidia*|*NVDA*|*GeForce*) return 0;; esac; return 1; }
 for id in $GFXIDS; do [ $PC = 1 ] && ! is_gfx "$id" && continue
-  k=$(kext_of "$id") || continue; KEXTPATHS="$KEXTPATHS $k"; CARRY="$CARRY $id"
+  k=$(kext_of "$id") || continue; KEXTPATHS="$KEXTPATHS$k$NL"; CARRY="$CARRY $id"
   case "$id" in *AMD*) VENDORS="$VENDORS AMD";; *AppleIntel*Graphics*|*AppleIntel*Framebuffer*) VENDORS="$VENDORS AppleIntel";; *nvidia*|*NVDA*|*GeForce*) VENDORS="$VENDORS GeForce NVDA";; esac; done
 [ -n "$CARRY" ] || die "found no driver of this machine's Tahoe to carry over. Nothing was changed"
+# Drivers whose folder names a program and holds none: their code is only in Tahoe's kernel collection.
+pb() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null; }
+needs_code() { local e; e=$(pb "$1" CFBundleExecutable) || return 1; [ -n "$e" ] && [ ! -f "$1/Contents/MacOS/$e" ]; }
+NOCODE=""; NOCODE_N=0
+while IFS= read -r k; do [ -n "$k" ] || continue; needs_code "$k" && { NOCODE="$NOCODE$k$NL"; NOCODE_N=$((NOCODE_N + 1)); }; done <<< "$KEXTPATHS"
+KDK_KIND=""; KDK_DMG=""; KDK_URL=""
+if [ "$NOCODE_N" -gt 0 ]; then
+  [ -n "$TBUILD" ] || TBUILD=$(sw_vers -buildVersion 2>/dev/null)
+  [ -n "$TVER" ] || TVER=$(sw_vers -productVersion 2>/dev/null)
+  [ -n "$TBUILD" ] && [ -n "$TVER" ] || die "could not read this Tahoe's version and build, needed to find its Kernel Debug Kit. Nothing was changed"
+  say "$NOCODE_N of these drivers keep their code only in Tahoe's kernel collection: $(while IFS= read -r k; do [ -n "$k" ] && printf '%s ' "${k##*/}"; done <<< "$NOCODE")"
+  KDK_DMG="$STATE/kdk/Kernel_Debug_Kit_${TVER}_build_${TBUILD}.dmg"
+  KDK_URL="$KDK_URL_BASE/$TBUILD/Kernel_Debug_Kit_${TVER}_build_${TBUILD}.dmg"
+  if [ -n "$KDK" ]; then
+    if [ -d "$KDK/System/Library/Extensions" ]; then KDK_KIND=folder
+    elif [ -f "$KDK" ]; then KDK_KIND=image; KDK_DMG=$KDK
+    else die "--kdk: $KDK is neither a Kernel Debug Kit folder nor its disk image. Nothing was changed"; fi
+  else
+    for d in "$KDK_INSTALLED"/KDK_*_"$TBUILD".kdk; do [ -d "$d/System/Library/Extensions" ] && { KDK=$d; KDK_KIND=folder; break; }; done
+    if [ -z "$KDK_KIND" ]; then if [ -s "$KDK_DMG" ]; then KDK_KIND=image; else KDK_KIND=download; fi; fi
+  fi
+  case "$KDK_KIND" in
+    folder) say "their code comes from the Kernel Debug Kit at $KDK";;
+    image) say "their code comes from the Kernel Debug Kit image $KDK_DMG (its package must be signed by Apple)";;
+    download) say "their code comes from Apple's Kernel Debug Kit for macOS $TVER ($TBUILD): about 1.2 GB will be downloaded from $KDK_URL";;
+  esac
+fi
 BUNDLES=""; for d in $DIRS; do for v in $(echo $VENDORS | tr ' ' '\n' | sort -u); do for b in "$d"/$v*.bundle; do [ -d "$b" ] && BUNDLES="$BUNDLES $b"; done; done; done
 say "this Mac's Tahoe: $(echo $CARRY | wc -w | tr -d ' ') drivers that macOS 27 lacks, $(echo $BUNDLES | wc -w | tr -d ' ') graphics bundles"
+# Graphics bundles that name a program and hold none (their code is in Tahoe's shared library cache) are named, so a
+# report shows them: they are copied as they are.
+for b in $BUNDLES; do needs_code "$b" && say "note: ${b##*/} holds no program of its own on this Tahoe"; done
 [ "$MODE" = --apply ] || { echo "dry run finished; nothing was changed. Run again with --apply to install."; exit 0; }
 
 WORK=$(mktemp -d /private/var/tmp/gg-apple.XXXXXX) || die "no private work folder"
 trap 'rm -rf "$WORK"' EXIT
 echo "STEP linking the auxiliary kernel collection"
 mkdir "$WORK/repo"
-for k in $KEXTPATHS; do cp -RX "$k" "$WORK/repo/" || die "could not copy ${k##*/}"; done
+while IFS= read -r k; do [ -n "$k" ] || continue; cp -RX "$k" "$WORK/repo/" || die "could not copy ${k##*/}"; done <<< "$KEXTPATHS"
 cp -RX "$P/Library/Extensions/NMXAudio.kext" "$WORK/repo/" || die "could not copy NMXAudio.kext"
+if [ "$NOCODE_N" -gt 0 ]; then
+  echo "STEP getting the code of $NOCODE_N drivers from the Kernel Debug Kit"
+  KROOT=""; KDEV=""
+  if [ "$KDK_KIND" = folder ]; then KROOT=$KDK
+  else
+    free=$(df -g "$WORK" 2>/dev/null | awk 'NR==2 {print $4}')
+    [ -n "$free" ] && [ "$free" -ge "$KDK_NEED_GB" ] || die "${free:-an unknown number of} GB are free where the Kernel Debug Kit would be opened; $KDK_NEED_GB GB are needed. Nothing was changed"
+    if [ "$KDK_KIND" = download ]; then
+      mkdir -p "${KDK_DMG%/*}" || die "could not make ${KDK_DMG%/*}. Nothing was changed"
+      "$CURL" -sS -f -L -C - --proto =https --proto-redir =https -o "$KDK_DMG.part" --connect-timeout 30 --retry 20 --retry-delay 5 \
+        --retry-all-errors --speed-limit 1024 --speed-time 120 "$KDK_URL" ||
+        die "the Kernel Debug Kit for macOS $TVER ($TBUILD) could not be downloaded from $KDK_URL. Get 'Kernel Debug Kit $TVER build $TBUILD' from Apple's developer downloads, install it, and run this again (a started download is kept and continued). Nothing was changed"
+      mv -f "$KDK_DMG.part" "$KDK_DMG" || die "could not keep the downloaded kit. Nothing was changed"
+    fi
+    out=$("$HDIUTIL" attach -readonly -nobrowse -noautoopen -mountrandom "$WORK" "$KDK_DMG" 2>&1) || die "could not open the Kernel Debug Kit image $KDK_DMG (delete it to download it again). Nothing was changed"
+    KDEV=$(printf '%s\n' "$out" | awk '$1 ~ /^\/dev\/disk[0-9]+$/ {print $1; exit}')
+    kmp=$(printf '%s\n' "$out" | awk -F'\t' '$NF ~ /^\// {print $NF; exit}')
+    trap '[ -n "$KDEV" ] && "$HDIUTIL" detach "$KDEV" -quiet 2>/dev/null; rm -rf "$WORK"' EXIT
+    [ -f "$kmp/KernelDebugKit.pkg" ] || die "the image holds no KernelDebugKit.pkg. Nothing was changed"
+    # The image came from outside: only a package Apple signed is opened.
+    # pkgutil must succeed, and its own status line (the first one, whole) must say Apple signed it: a name inside
+    # a certificate cannot stand in for that line.
+    sig=$("$PKGUTIL" --check-signature "$kmp/KernelDebugKit.pkg" 2>/dev/null) &&
+      [ "$(printf '%s\n' "$sig" | awk '/^ *Status:/ {sub(/^ */, ""); sub(/ *$/, ""); print; exit}')" = "Status: signed Apple Software" ] ||
+      die "the Kernel Debug Kit package in $KDK_DMG is not signed by Apple; it is not used (delete the image to download it again). Nothing was changed"
+    "$PKGUTIL" --expand-full "$kmp/KernelDebugKit.pkg" "$WORK/kdk" >/dev/null 2>&1 || die "could not open the Kernel Debug Kit's package. Nothing was changed"
+    "$HDIUTIL" detach "$KDEV" -quiet 2>/dev/null && KDEV=""
+    KROOT="$WORK/kdk/KDK.pkg/Payload"
+  fi
+  [ -d "$KROOT/System/Library/Extensions" ] || die "the Kernel Debug Kit holds no System/Library/Extensions. Nothing was changed"
+  while IFS= read -r k; do [ -n "$k" ] || continue
+    id=$(pb "$k" CFBundleIdentifier); ver=$(pb "$k" CFBundleVersion); exe=$(pb "$k" CFBundleExecutable); found=""
+    for c in "$KROOT/System/Library/Extensions/${k##*/}" "$KROOT"/System/Library/Extensions/*.kext/Contents/PlugIns/"${k##*/}"; do
+      [ -d "$c" ] && [ "$(pb "$c" CFBundleIdentifier)" = "$id" ] && { found=$c; break; }; done
+    [ -n "$found" ] || die "the Kernel Debug Kit has no ${k##*/} ($id). Nothing was changed"
+    [ "$(pb "$found" CFBundleVersion)" = "$ver" ] ||
+      die "the Kernel Debug Kit's ${k##*/} is version $(pb "$found" CFBundleVersion) and this Tahoe's is $ver: the kit is for another build. Nothing was changed"
+    [ -f "$found/Contents/MacOS/$exe" ] && lipo -archs "$found/Contents/MacOS/$exe" 2>/dev/null | grep -qw x86_64 ||
+      die "the Kernel Debug Kit's ${k##*/} holds no Intel program. Nothing was changed"
+    rm -rf "$WORK/repo/${k##*/}" && cp -RX "$found" "$WORK/repo/" || die "could not copy ${k##*/} from the Kernel Debug Kit. Nothing was changed"
+    say "${k##*/} $ver: code from the Kernel Debug Kit"
+  done <<< "$NOCODE"
+  rm -rf "$WORK/kdk"
+fi
 chown -R root:wheel "$WORK/repo"; chmod -R go-w "$WORK/repo"
 IDS="com.nullmoth.NMXAudio $CARRY"
 # A Tahoe driver that needs something macOS 27 does not have cannot link. kmutil names it ("Could not use 'id'"); it is
 # left out, said so, and the rest are linked again. The audio driver and at least one other must remain.
-for try in 1 2 3 4 5 6; do
+for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
   args=""; for id in $IDS; do args="$args -b $id"; done
   rm -f "$WORK/aux.kc"
   # shellcheck disable=SC2086
@@ -142,14 +262,38 @@ for try in 1 2 3 4 5 6; do
   bad=$(grep -oE "Could not use '[^']+'|Unable to resolve dependencies: '[^']+'" "$WORK/kmutil.log" | sed -E "s/.*'([^']+)'/\1/" | sort -u)
   [ -n "$bad" ] || { grep -v '^$' "$WORK/kmutil.log" | tail -12; die "the drivers did not link against the macOS 27.2 collections. Nothing was changed"; }
   for b in $bad; do [ "$b" = com.nullmoth.NMXAudio ] && die "the audio driver did not link. Nothing was changed"; say "left out (does not link on macOS 27): $b"; done
-  IDS=$(printf '%s\n' $IDS | grep -vxF -f <(printf '%s\n' $bad) | tr '\n' ' ')
+  # kmutil may name a driver that is not on the list: one a listed driver needs, or one kept inside a listed
+  # driver's bundle. The listed drivers that need it or hold it are the ones to leave out.
+  drop=""
+  for b in $bad; do
+    case " $IDS " in *" $b "*) drop="$drop $b"; continue;; esac
+    while IFS= read -r pl; do [ -n "$pl" ] || continue
+      top=${pl#"$WORK/repo/"}; top="$WORK/repo/${top%%/*}"
+      for cand in "${pl%/Contents/Info.plist}" "$top"; do
+        cid=$(pb "$cand" CFBundleIdentifier)
+        case " $IDS " in *" $cid "*) case " $drop " in *" $cid "*) ;; *) drop="$drop $cid"; say "left out (needs $b): $cid";; esac;; esac
+      done
+    done <<< "$(grep -rlF --include=Info.plist "<key>$b</key>" "$WORK/repo" 2>/dev/null; grep -rlF --include=Info.plist "<string>$b</string>" "$WORK/repo" 2>/dev/null)"
+  done
+  [ -n "$drop" ] || { grep -v '^$' "$WORK/kmutil.log" | tail -12; die "the drivers did not link against the macOS 27.2 collections. Nothing was changed"; }
+  for b in $drop; do [ "$b" = com.nullmoth.NMXAudio ] && die "the audio driver did not link. Nothing was changed"; done
+  IDS=$(printf '%s\n' $IDS | grep -vxF -f <(printf '%s\n' $drop) | tr '\n' ' ')
 done
 [ -f "$WORK/aux.kc" ] || die "kmutil wrote no collection. Nothing was changed"
+inside=$("$KMUTIL" inspect -A "$WORK/aux.kc" -B "$BOOTKC" -S "$SYSKC" 2>/dev/null)
+[ -n "$inside" ] || die "the new collection could not be read back. Nothing was changed"
+# The linker can leave a listed driver out without an error. The audio driver must be there; any other is said and
+# left out, and the graphics check below decides whether what remains can show a picture.
+kept=""
+for id in $IDS; do
+  if printf '%s\n' "$inside" | grep -qF "$id"; then kept="$kept $id"
+  elif [ "$id" = com.nullmoth.NMXAudio ]; then die "linked, but $id is not in the collection. Nothing was changed"
+  else say "left out (the linker did not place it): $id"; fi
+done
+IDS=${kept# }
 # A Mac whose graphics driver was left out above would start macOS 27 with no display. Refuse rather than place it.
 printf '%s\n' $IDS | grep -qE 'Framebuffer|Graphics|AMDFramebuffer|AMD7000Controller|AMDRadeonX|NVDA|GeForce' ||
   die "none of this Mac's graphics drivers links against macOS 27.2 (left out above), so it would start with no display. Nothing was changed"
-inside=$("$KMUTIL" inspect -A "$WORK/aux.kc" -B "$BOOTKC" -S "$SYSKC" 2>/dev/null)
-for id in $IDS; do printf '%s\n' "$inside" | grep -qF "$id" || die "linked, but $id is not in the collection. Nothing was changed"; done
 say "linked: $(stat -f %z "$WORK/aux.kc") bytes, $(echo $IDS | wc -w | tr -d ' ') extensions"
 
 HOOKIT=0; src=""

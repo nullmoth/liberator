@@ -25,6 +25,7 @@ tail -1 kobj/confollow_selftest.log
 "${CXX[@]}" -c port/crumb.cpp -o kobj/crumb.o
 "${CXX[@]}" -c port/devprops.cpp -o kobj/devprops.o
 "${CXX[@]}" -c port/vtdmap.cpp -o kobj/vtdmap.o
+"${CXX[@]}" -c port/xhciroute.cpp -o kobj/xhciroute.o
 # The private IOCPU / IOCPUInterruptController declarations must match the kernel slots it calls.
 "${CXX[@]}" -include IOKit/IOPlatformExpert.h -c port/vtcheck.cpp -o kobj/vtcheck.o
 VT=$(xcrun llvm-objdump -d kobj/vtcheck.o)
@@ -47,7 +48,7 @@ EOF
 B=out/A2XACPIPlatform.kext
 rm -rf "$B"; mkdir -p "$B/Contents/MacOS"
 xcrun clang++ -arch x86_64 -Xlinker -kext -nostdlib -Xlinker -export_dynamic \
-    kobj/info.o kobj/expert.o kobj/events.o kobj/cpuint.o kobj/pcibridge.o kobj/buttons.o kobj/crumb.o kobj/devprops.o kobj/vtdmap.o kobj/osxnu.o -Wl,-force_load,libacpica.a -lkmodc++ -lkmod -lcc_kext \
+    kobj/info.o kobj/expert.o kobj/events.o kobj/cpuint.o kobj/pcibridge.o kobj/buttons.o kobj/crumb.o kobj/devprops.o kobj/vtdmap.o kobj/xhciroute.o kobj/osxnu.o -Wl,-force_load,libacpica.a -lkmodc++ -lkmod -lcc_kext \
     -o "$B/Contents/MacOS/A2XACPIPlatform"
 cp port/Info.plist "$B/Contents/Info.plist"
 plutil -lint "$B/Contents/Info.plist" >/dev/null

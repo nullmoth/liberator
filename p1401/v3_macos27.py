@@ -105,11 +105,15 @@ def identity_for(report):
 # repository; these lists are what keeps it from rewriting the rest of the boot configuration.
 SETTABLE = ("Misc/Security/SecureBootModel", "PlatformInfo/Generic/SystemProductName")
 BOOT_ARGS_ALLOWED = ("-v", "-lilubetaall", "-vsmcbeta", "-no_compat_check",
-                     "a2x_conlive=1", "a2xbusydump=2", "pci_log=0x201", "pci_log_mode=0x2", "gfxrst=4", "nvrmholdcap=180",
+                     "a2x_conlive=1", "pci_log=0x201", "pci_log_mode=0x2", "gfxrst=4", "nvrmholdcap=180",
                      "nmxintel=3", "nmxamd=3", "nmxfb_pipe=1",
                      "a2x_pcibus=0x10010fe", "a2x_nondrv=1",
                      # the exec hook arms itself at boot, before the first service starts (stock macOS 27)
-                     "a2xbootarm=1")
+                     "a2xbootarm=1",
+                     # a kernel panic restarts the machine, as a Mac does, instead of leaving a frozen screen: macOS 27
+                     # on a PC cannot save a panic report, so a held panic screen helps nobody. It replaces any debug
+                     # value the PC's own config carried (the common 0x100 holds a panic forever).
+                     "debug=0x100100")
 
 _KERNEL = re.compile(r"\d{1,2}\.\d{1,2}\.\d{1,2}\Z")
 _KEXT = re.compile(r"[A-Za-z0-9_.+-]{1,96}\.kext\Z")

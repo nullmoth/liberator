@@ -491,13 +491,14 @@ with tempfile.TemporaryDirectory() as td:
 
     # 2d-iii. the startup log (opt-in): boot arguments that make a failed start say why; off by default
     rc, out, a = staged_args("sl-on", "--startlog", "yes")
-    arm("the startup log adds the verbose screen, the heartbeat and the break-in argument, and says so",
-        rc == 0 and " -v " in a and " a2xbusydump=2 " in a and " debug=0x104 " in a and "NOTE startup log: on" in out, out + a)
+    arm("the startup log adds the verbose screen and the break-in argument, and says so",
+        rc == 0 and " -v " in a and " debug=0x104 " in a and "a2xbusydump" not in a and "NOTE startup log: on" in out, out + a)
     rc, out, a = staged_args("sl-off")
     arm("without it none of them is added, and a2x_conlive never is", rc == 0 and " debug=0x104 " not in a and "a2xbusydump" not in a
         and "a2x_conlive" not in a and "startup log: on" not in out, out + a)
     rc, out, a = staged_args("sl-both", "--startlog", "yes", "--model", "MacPro6,1")
-    arm("it composes with the Mac Pro arguments and adds each name once", rc == 0 and a.count(" a2xbusydump=2 ") == 1 and " a2x_pcibus=0x10010fe " in a
+    arm("it composes with the Mac Pro arguments and adds each name once, and never the busy-dump diagnostic",
+        rc == 0 and "a2xbusydump" not in a and " a2x_pcibus=0x10010fe " in a and " debug=0x104 " in a
         and "a2x_conlive" not in a, out + a)
 
     # 2e. kernel patches. A patch list written for macOS 26 ends at 25.99.99, and an AMD PC does not start without
@@ -1800,10 +1801,18 @@ echo "$me $mode" >> "@LOG@"
         < script.index('KIT="$PRIV/kit"') < script.index("  kit_ok || stop \"$NOT_OFFERED Nothing was changed\"\n  kit_allowed"))
     kit_runs = (script.count('/bin/bash "$PAY/$inst"') + script.count('/bin/bash "$SPAY/$sinst"') + script.count('/bin/bash "$LDIR/$linst"')
                 + script.count('run_kit "$LDIR/$linst"') + script.count('run_kit "$KM"') + script.count('run_kit "$LDIR/make-kernel-collections.sh"'))
-    arm("every kit script is run from the private copy and never from the startup partition: four runs in finish, four in local, and the lay-down and the collections maker through one helper",
+    # The collections refresh in finish (kc_refresh) runs the maker twice more, from its own name for the lay-down folder
+    # (KC_LDIR, also inside the private copy) and through the same helper: 14 runs became 16.
+    kc = script[script.index("\nkc_refresh() {"):]
+    kc = kc[:kc.index("\n}\n")]
+    arm("every kit script is run from the private copy and never from the startup partition: four runs in finish, four in local, and the lay-down and the collections maker (also when finish refreshes the collections) through one helper",
         '"$ROOT/$DRIVER/$inst"' not in script and script.count('/bin/bash "$PAY/$inst"') == 4 and script.count('/bin/bash "$SPAY/$sinst"') == 4
         and script.count('/bin/bash "$LDIR/$linst"') == 1 and script.count('/bin/bash "$@"') == 1 and script.count("/bin/bash ") == 10
-        and script.count('SPAY="$KIT/$sdir"') == 1 and script.count('PAY="$KIT/$ddir"') == 1 and script.count('LDIR="$KIT/$d"') == 1 and kit_runs == 14, kit_runs)
+        and script.count('SPAY="$KIT/$sdir"') == 1 and script.count('PAY="$KIT/$ddir"') == 1
+        and script.count('KC_LDIR="$KIT/$d"') == 1 and script.count('LDIR="$KIT/$d"') == 2 and kit_runs == 16
+        and kc.count('run_kit "$KM"') == 2 and kc.count('KM="$KC_LDIR/make-kernel-collections.sh"') == 1 and "/bin/bash" not in kc
+        and "$ROOT" not in kc.split('run_kit "$KM"')[0].split("KC_LDIR=")[1].split("\n")[0]
+        and 0 < kc.find('tree_trusted "$KIT" ||') < kc.find('run_kit "$KM"'), kit_runs)
     arm("the private copy is checked again right before each of those runs once the step has started changing things",
         script.count('tree_trusted "$KIT" || stop "the private copy of the v3 kit changed') >= 12)
     fin = script[script.index("\nfinish)"):script.index("\nlocal)")]

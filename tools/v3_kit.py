@@ -94,7 +94,7 @@ PERSONALITY = [{"name": "VirtualSMC.kext", "from": "AppleACPIPlatformExpert", "t
 # them, and every 27.2 start that reached the network had the live console (a2x_conlive=1) beside -v. The first four
 # are read by the platform kexts the kit brings, the last two by the NVIDIA kernel driver.
 BOOT_ARGS = ["-v", "-lilubetaall", "-vsmcbeta", "-no_compat_check",
-             "a2x_conlive=1", "a2xbusydump=2", "pci_log=0x201", "pci_log_mode=0x2", "gfxrst=4", "nvrmholdcap=180"]
+             "a2x_conlive=1", "pci_log=0x201", "pci_log_mode=0x2", "gfxrst=4", "nvrmholdcap=180"]
 SET = ["Misc/Security/SecureBootModel", "PlatformInfo/Generic/SystemProductName"]
 
 
