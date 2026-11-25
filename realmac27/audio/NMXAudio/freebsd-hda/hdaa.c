@@ -46,6 +46,7 @@
 #include <dev/sound/pci/hda/hda_reg.h>
 
 #include "mixer_if.h"
+#include "nmx_pcm.h"
 
 #define hdaa_lock(devinfo)	mtx_lock((devinfo)->lock)
 #define hdaa_unlock(devinfo)	mtx_unlock((devinfo)->lock)
@@ -761,6 +762,302 @@ hdaa_eld_handler(struct hdaa_widget *w)
 		hdaa_eld_dump(w);
 	);
 	hdaa_channels_handler(&devinfo->as[w->bindas]);
+}
+
+/* Keep the playback route in step with the same pin state used by CoreAudio. */
+static bool
+nmx_hda_refresh_pin(struct hdaa_widget *pin, bool present, const uint8_t *eld,
+    unsigned size)
+{
+	bool changed = pin->eld_len != size ||
+	    (size && (pin->eld == NULL || memcmp(pin->eld, eld, size) != 0));
+	if (changed) {
+		uint8_t *replacement = NULL;
+		if (size) {
+			replacement = malloc(size, M_HDAA, M_NOWAIT);
+			if (replacement == NULL)
+				return false;
+			memcpy(replacement, eld, size);
+		}
+		if (pin->eld)
+			free(pin->eld, M_HDAA);
+		pin->eld = replacement;
+		pin->eld_len = size;
+	}
+	if (changed || pin->wclass.pin.connected != present) {
+		pin->wclass.pin.connected = present;
+		hdaa_channels_handler(&pin->devinfo->as[pin->bindas]);
+	}
+	return true;
+}
+
+/*
+ * Read the ELD of the pin that actually feeds this PCM. The cached ELD only
+ * tracks validity changes, so it cannot identify a swap from one valid sink
+ * to another. A multi-pin association has no single display identity.
+ */
+int
+nmx_hda_display_endpoint(device_t dev, struct nmx_display_endpoint *endpoint)
+{
+	struct hdaa_pcm_devinfo *pcm = device_get_ivars(dev);
+	if (pcm == NULL || pcm->playas < 0)
+		return NMX_DISPLAY_LOCAL;
+
+	struct hdaa_devinfo *info = pcm->devinfo;
+	struct hdaa_audio_as *association = &info->as[pcm->playas];
+	int status = NMX_DISPLAY_LOCAL, count = 0;
+	struct hdaa_widget *pin = NULL;
+	hdaa_lock(info);
+	for (unsigned i = 0; i < nitems(association->pins); ++i) {
+		if (association->pins[i] <= 0)
+			continue;
+		struct hdaa_widget *widget = hdaa_widget_get(info, association->pins[i]);
+		if (widget == NULL || !widget->enable)
+			continue;
+		++count;
+		if (HDA_PARAM_PIN_CAP_DP(widget->wclass.pin.cap) ||
+		    HDA_PARAM_PIN_CAP_HDMI(widget->wclass.pin.cap))
+			pin = widget;
+	}
+	if (pin == NULL)
+		goto done;
+	status = NMX_DISPLAY_UNAVAILABLE;
+	if (endpoint == NULL || count != 1 || pin->bindas != pcm->playas ||
+	    association->num_chans == 0)
+		goto done;
+
+	uint8_t eld[128];
+	uint32_t sense = hda_command(info->dev, HDA_CMD_GET_PIN_SENSE(0, pin->nid));
+	const uint32_t required = HDA_CMD_GET_PIN_SENSE_PRESENCE_DETECT |
+	    HDA_CMD_GET_PIN_SENSE_ELD_VALID;
+	if (sense == HDA_INVALID)
+		goto done;
+	if ((sense & required) != required) {
+		nmx_hda_refresh_pin(pin, (sense & HDA_CMD_GET_PIN_SENSE_PRESENCE_DETECT) != 0, NULL, 0);
+		goto done;
+	}
+
+	uint32_t result = hda_command(info->dev, HDA_CMD_GET_HDMI_DIP_SIZE(0, pin->nid, 0x08));
+	unsigned size = result & 0xff;
+	if (result == HDA_INVALID || size < 20 || size > sizeof(eld))
+		goto done;
+	for (unsigned i = 0; i < size; ++i) {
+		result = hda_command(info->dev, HDA_CMD_GET_HDMI_ELDD(0, pin->nid, i));
+		if (result == HDA_INVALID || !(result & 0x80000000u))
+			goto done;
+		eld[i] = result & 0xff;
+		if (i == 2) {
+			unsigned baseline = 4u + 4u * eld[2];
+			if (baseline < 20 || baseline > size)
+				goto done;
+			size = baseline;
+		}
+	}
+	sense = hda_command(info->dev, HDA_CMD_GET_PIN_SENSE(0, pin->nid));
+	if (sense != HDA_INVALID && (sense & required) == required &&
+	    nmx_hda_refresh_pin(pin, true, eld, size) &&
+	    nmx_parse_display_eld(eld, size, endpoint))
+		status = NMX_DISPLAY_CONNECTED;
+done:
+	hdaa_unlock(info);
+	return status;
+}
+
+static void hdaa_chan_formula(struct hdaa_devinfo *devinfo, int asid,
+	char *buf, int buflen);
+
+static bool
+nmx_hda_valid_color(unsigned int color)
+{
+	/* 0 is Unknown, 10-13 are reserved, and 15 is Other in the HDA tables. */
+	return (color >= 1 && color <= 9) || color == 14;
+}
+
+static uint8_t
+nmx_hda_signal_type(uint8_t digital)
+{
+	switch (digital) {
+	case 0:
+		return NMX_AUDIO_SIGNAL_ANALOG;
+	case 0x3:
+		return NMX_AUDIO_SIGNAL_HDMI;
+	case 0x5:
+		return NMX_AUDIO_SIGNAL_DISPLAYPORT;
+	case 0x7:
+		return NMX_AUDIO_SIGNAL_HDMI_DP;
+	default:
+		return digital ? NMX_AUDIO_SIGNAL_DIGITAL : NMX_AUDIO_SIGNAL_UNKNOWN;
+	}
+}
+
+/*
+ * Return the codec identity and exact pin metadata used by this PCM. The
+ * aggregate fields describe only the requested direction and are withheld
+ * when the HDA pins disagree. The full pin list preserves that disagreement
+ * for diagnostics and future consumers.
+ */
+int
+nmx_hda_pcm_label_metadata(device_t dev, int direction,
+	struct nmx_pcm_label_metadata *metadata)
+{
+	struct hdaa_pcm_devinfo *pcm = device_get_ivars(dev);
+	struct hdaa_devinfo *info;
+	const char *function_group_name, *suffix = " Audio Function Group";
+	int selected_index, indices[2], selected = -1;
+	unsigned int pin_count = 0;
+	bool role_common = true, color_common = true, digital_common = true;
+	bool have_role = false, have_color = false, have_digital = false;
+	uint8_t role = NMX_AUDIO_PIN_DEVICE_UNKNOWN;
+	uint8_t color = 0, digital = 0;
+
+	if (metadata == NULL)
+		return 0;
+	bzero(metadata, sizeof(*metadata));
+	metadata->role = NMX_AUDIO_PIN_DEVICE_UNKNOWN;
+	metadata->location = 0xff;
+	metadata->color = 0xff;
+	metadata->signal = NMX_AUDIO_SIGNAL_UNKNOWN;
+	if (pcm == NULL)
+		return 0;
+
+	/* hdaa_probe appends this fixed suffix to the actual codec description. */
+	function_group_name = device_get_desc(device_get_parent(dev));
+	if (function_group_name != NULL) {
+		size_t name_length = strlen(function_group_name);
+		size_t suffix_length = strlen(suffix);
+		if (name_length > suffix_length &&
+		    strcmp(function_group_name + name_length - suffix_length, suffix) == 0) {
+			size_t codec_length = name_length - suffix_length;
+			if (codec_length >= sizeof(metadata->codec_name))
+				codec_length = sizeof(metadata->codec_name) - 1;
+			memcpy(metadata->codec_name, function_group_name, codec_length);
+			metadata->codec_name[codec_length] = '\0';
+		}
+	}
+
+	selected_index = direction == NMX_DIR_PLAY ? pcm->playas : pcm->recas;
+	if (selected_index < 0)
+		return 0;
+	indices[0] = pcm->playas;
+	indices[1] = pcm->recas;
+	if (indices[0] == selected_index)
+		selected = 0;
+	else if (indices[1] == selected_index)
+		selected = 1;
+	if (selected < 0)
+		return 0;
+
+	info = pcm->devinfo;
+	hdaa_lock(info);
+
+	for (int association_index = 0; association_index < 2; ++association_index) {
+		int index = indices[association_index];
+		if (index < 0 || (association_index == 1 && index == indices[0]))
+			continue;
+		struct hdaa_audio_as *association = &info->as[index];
+		for (unsigned int sequence = 0;
+		    sequence < sizeof(association->pins) / sizeof(association->pins[0]);
+		    ++sequence) {
+			int nid = association->pins[sequence];
+			if (nid <= 0)
+				continue;
+			struct hdaa_widget *pin = hdaa_widget_get(info, nid);
+			if (pin == NULL || !pin->enable)
+				continue;
+
+			uint32_t config = pin->wclass.pin.config;
+			uint8_t pin_role = HDA_CONFIG_DEFAULTCONF_DEVICE(config);
+			if (pin_role == 14)
+				pin_role = NMX_AUDIO_PIN_DEVICE_UNKNOWN;
+			uint8_t pin_digital = HDA_PARAM_AUDIO_WIDGET_CAP_DIGITAL(pin->param.widget_cap) ? 1 : 0;
+			if (metadata->pin_count < NMX_AUDIO_MAX_PIN_METADATA) {
+				struct nmx_audio_pin_metadata *pin_info =
+				    &metadata->pins[metadata->pin_count++];
+				pin_info->node_id = (uint8_t)nid;
+				pin_info->direction = association->dir == HDAA_CTL_OUT ?
+				    NMX_AUDIO_PIN_DIRECTION_OUTPUT : NMX_AUDIO_PIN_DIRECTION_INPUT;
+				pin_info->role = pin_role;
+				pin_info->location = HDA_CONFIG_DEFAULTCONF_LOCATION(config);
+				pin_info->color = HDA_CONFIG_DEFAULTCONF_COLOR(config);
+				pin_info->connector = HDA_CONFIG_DEFAULTCONF_CONNECTION_TYPE(config);
+				pin_info->connectivity = HDA_CONFIG_DEFAULTCONF_CONNECTIVITY(config);
+				pin_info->digital = pin_digital;
+				pin_info->association = HDA_CONFIG_DEFAULTCONF_ASSOCIATION(config);
+				pin_info->sequence = HDA_CONFIG_DEFAULTCONF_SEQUENCE(config);
+			}
+			if (association_index != selected)
+				continue;
+
+			++pin_count;
+			if (!have_role) {
+				role = pin_role;
+				have_role = true;
+			} else if (pin_role == NMX_AUDIO_PIN_DEVICE_UNKNOWN || pin_role != role) {
+				role_common = false;
+			}
+			unsigned int pin_color = HDA_CONFIG_DEFAULTCONF_COLOR(config);
+			if (!nmx_hda_valid_color(pin_color)) {
+				color_common = false;
+			} else if (!have_color) {
+				color = (uint8_t)pin_color;
+				have_color = true;
+			} else if (pin_color != color) {
+				color_common = false;
+			}
+			if (!have_digital) {
+				digital = pin_digital;
+				have_digital = true;
+			} else if (pin_digital != digital) {
+				digital_common = false;
+			}
+		}
+	}
+
+	struct hdaa_audio_as *selected_as = &info->as[selected_index];
+	metadata->direction = selected_as->dir == HDAA_CTL_OUT ?
+	    NMX_AUDIO_PIN_DIRECTION_OUTPUT : NMX_AUDIO_PIN_DIRECTION_INPUT;
+	if (pin_count != 0) {
+		if (role_common && have_role)
+			metadata->role = role;
+		if (selected_as->location > 0 &&
+		    selected_as->location < sizeof(HDA_LOCS) / sizeof(HDA_LOCS[0]) &&
+		    HDA_LOCS[selected_as->location][0] != '0')
+			metadata->location = (uint8_t)selected_as->location;
+		if (color_common && have_color) {
+			metadata->color = color;
+			metadata->color_is_common = 1;
+		}
+		if (digital_common && have_digital)
+			metadata->signal = nmx_hda_signal_type(digital ? selected_as->digital : 0);
+		/* Mixed roles, locations, colors, or analog/digital pins remain explicit
+		 * in metadata but are never promoted to a false aggregate label. */
+	}
+
+	char play_channels[8] = {}, record_channels[8] = {};
+	if (pcm->playas >= 0 && info->as[pcm->playas].num_chans > 0)
+		hdaa_chan_formula(info, pcm->playas, play_channels, sizeof(play_channels));
+	if (pcm->recas >= 0 && info->as[pcm->recas].num_chans > 0)
+		hdaa_chan_formula(info, pcm->recas, record_channels, sizeof(record_channels));
+	if (play_channels[0] != 0 || record_channels[0] != 0) {
+		if (play_channels[0] == 0 && pcm->playas >= 0 &&
+		    info->as[pcm->playas].num_chans > 0)
+			strlcpy(play_channels, "2.0", sizeof(play_channels));
+		else if (record_channels[0] == 0 && pcm->recas >= 0 &&
+		    info->as[pcm->recas].num_chans > 0)
+			strlcpy(record_channels, "2.0", sizeof(record_channels));
+		if (strcmp(play_channels, record_channels) == 0)
+			record_channels[0] = 0;
+	}
+	if (play_channels[0] != 0)
+		strlcpy(metadata->channel_layout, play_channels, sizeof(metadata->channel_layout));
+	if (record_channels[0] != 0) {
+		if (metadata->channel_layout[0] != 0)
+			strlcat(metadata->channel_layout, "/", sizeof(metadata->channel_layout));
+		strlcat(metadata->channel_layout, record_channels, sizeof(metadata->channel_layout));
+	}
+
+	hdaa_unlock(info);
+	return metadata->pin_count != 0;
 }
 
 /*
@@ -6921,7 +7218,14 @@ hdaa_chan_formula(struct hdaa_devinfo *devinfo, int asid,
 	struct hdaa_audio_as *as;
 	int c;
 
+	if (buflen <= 0)
+		return;
+	buf[0] = '\0';
+	if (devinfo == NULL || asid < 0 || asid >= devinfo->ascnt)
+		return;
 	as = &devinfo->as[asid];
+	if (as->num_chans <= 0)
+		return;
 	c = devinfo->chans[as->chans[0]].channels;
 	if (c == 1)
 		snprintf(buf, buflen, "mono");

@@ -9,10 +9,10 @@ OUT=$1
 cd "$A"
 mkdir -p gen obj
 for m in "$F/pcm/channel_if.m" "$F/pcm/mixer_if.m" "$F/pci/hda/hdac_if.m"; do
-    /opt/homebrew/bin/python3 mkif.py "$m" "gen/$(basename "$m" .m).h"
+    "${PYTHON3:-python3}" mkif.py "$m" "gen/$(basename "$m" .m).h"
 done
 rm -f obj/*.o
-for s in "$F/pci/hda/hdac.c" "$F/pci/hda/hdacc.c" "$F/pci/hda/hdaa.c" "$F/pci/hda/hdaa_patches.c" nmx_snd_compat.c nmx_pcm.c nmx_audio_stubs.c; do
+for s in "$F/pci/hda/hdac.c" "$F/pci/hda/hdacc.c" freebsd-hda/hdaa.c freebsd-hda/hdaa_patches.c nmx_snd_compat.c nmx_pcm.c nmx_display_eld.c nmx_audio_stubs.c; do
     ./cc-snd.sh "$s" > "log-$(basename "$s" .c).txt" 2>&1 || { grep -A3 error: "log-$(basename "$s" .c).txt" | head -20; exit 1; }
 done
 # the IOKit side, as ccxx.sh compiles NMXGPU's (Kernel.framework headers only, never the FreeBSD tree) plus the sound
