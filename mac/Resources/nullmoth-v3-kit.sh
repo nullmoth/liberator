@@ -103,13 +103,20 @@ if [ -n "$FILE" ]; then
   ok "taken from $FILE"
 else
   got=0
+  DL="$HERE/nullmoth-download.sh"
+  [ ! -r "$DL" ] || . "$DL"
   for b in $BASES; do
     case "$b" in *github.com*) u="$b/$KTAG/$KNAME";; *) u="$b/$KNAME";; esac
     say "NOTE downloading $u"
     # curl runs silent (its own meter is not for a window); how far it is comes from the size of the file so far,
     # as "PROGRESS kit-download <percent> <bytes so far> <bytes in all>" lines, which 1401 draws as a bar.
-    curl -f -L -sS --proto "$PROTO" --proto-redir "$PROTO" --connect-timeout 30 --retry 5 --retry-delay 5 \
-         --max-filesize "$KSIZE" -o "$A" "$u" &
+    set -- -f -L -sS -C - --proto "$PROTO" --proto-redir "$PROTO" --connect-timeout 30 --retry 5 --retry-delay 5 \
+           --max-filesize "$KSIZE" -o "$A" "$u"
+    if [ -r "$DL" ]; then
+      nm_download "$u" "$A" "$KSIZE" "$PROTO" "$@" &
+    else
+      /usr/bin/curl -q "$@" &
+    fi
     cpid=$!
     while kill -0 "$cpid" 2>/dev/null; do
       sleep 1
